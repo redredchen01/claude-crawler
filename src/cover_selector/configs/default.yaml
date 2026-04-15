@@ -1,0 +1,44 @@
+# Default configuration for Cover Selector MVP
+# All magic numbers are centralized here for easy tuning
+
+scene_detection:
+  threshold: 27.0          # Content-based scene change detection threshold (0-100 scale)
+  min_scene_len: 15        # Minimum frames per scene (reduces flicker/false positives)
+  delta_lum: 1.0          # Luminance change sensitivity
+  delta_edges: 0.2        # Edge change sensitivity
+
+image_preprocessing:
+  analysis_max_size: 960  # Long edge of analysis thumbnails (pixels). Original frames preserved for output.
+
+blur_analysis:
+  blur_threshold: 30.0    # Minimum acceptable blur_score (0-100). Lower = clearer required.
+
+brightness_analysis:
+  brightness_threshold_low: 40.0   # Frames darker than this (0-100 brightness scale) get low scores
+  brightness_threshold_high: 80.0  # Frames brighter than this get low scores (overexposure)
+
+ocr_detection:
+  ocr_enabled: true
+  bottom_subtitle_ratio_threshold: 0.3   # Reject if bottom 20% area >30% filled with text
+  center_text_ratio_threshold: 0.2       # Reject if center area >20% filled with text
+
+face_analysis:
+  face_confidence: 0.5    # MediaPipe confidence threshold (0-1). Lower = more permissive detection
+
+composition_analysis:
+  closeup_threshold: 0.4          # Face ratio >0.4 = potential closeup
+  subject_too_small_threshold: 0.05  # Face ratio <0.05 = subject too small
+  cutoff_threshold: 0.1           # Face edge cutoff >0.1 = face is cut off by frame edge
+
+deduplication:
+  dedup_threshold: 8      # dHash Hamming distance <8 = similar frames (0-64 scale, 8 is typical)
+  dedup_enabled: true
+
+scorer:
+  # Unvalidated defaults - Phase 0 user validation TBD
+  weights: [0.25, 0.25, 0.20, 0.20, 0.10]  # [clarity, cleanliness, subject_presence, composition, cover_suitability]
+  top_k: 10               # Return top 10 candidate frames
+  batch_size: 10          # Process 10 frames at a time (adjust if memory-constrained)
+
+system:
+  memory_warning_threshold_mb: 200  # If free RAM <200MB, reduce batch_size

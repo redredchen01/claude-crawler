@@ -1,0 +1,14 @@
+{
+  "name": "yd-2026-workspace",
+  "version": "1.1.0.0",
+  "private": true,
+  "description": "YD 2026 workspace root — not published",
+  "license": "MIT",
+  "scripts": {
+    "dashboard": "node ga4-server.js",
+    "dashboard:dev": "GA4_PROPERTY_ID=524298631 node ga4-server.js"
+  },
+  "dependencies": {
+    "@google-analytics/data": "^4.12.1"
+  }
+}

@@ -1,0 +1,79 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: seo-content-api
+  namespace: seo-content-system
+  labels:
+    app: seo-content-api
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: seo-content-api
+  namespace: seo-content-system
+  labels:
+    app: seo-content-api
+rules:
+  # ConfigMap access
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  # Secret access
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+  # Pod self-discovery
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # Service discovery
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: seo-content-api
+  namespace: seo-content-system
+  labels:
+    app: seo-content-api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: seo-content-api
+subjects:
+  - kind: ServiceAccount
+    name: seo-content-api
+    namespace: seo-content-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: seo-content-api-global
+  labels:
+    app: seo-content-api
+rules:
+  # Node access for pod distribution
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  # Persistent volumes (read-only)
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: seo-content-api-global
+  labels:
+    app: seo-content-api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: seo-content-api-global
+subjects:
+  - kind: ServiceAccount
+    name: seo-content-api
+    namespace: seo-content-system

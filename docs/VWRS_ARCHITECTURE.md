@@ -1,0 +1,1 @@
+../projects/production/video-watermark-removal-system/docs/ARCHITECTURE.md

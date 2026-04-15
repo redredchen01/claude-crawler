@@ -1,0 +1,3 @@
+[submodule "projects/production/vts"]
+	path = projects/production/vts
+	url = https://github.com/redredchen01/video-transcode-skill.git

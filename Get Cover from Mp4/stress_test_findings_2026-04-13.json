@@ -1,0 +1,142 @@
+{
+  "stress_test_report": {
+    "date": "2026-04-13T15:13:37.034602",
+    "pass": "Second-pass after 5 P1 fixes",
+    "focus_areas": [
+      "Hard filter 5a/5b edge cases (all frames reject)",
+      "FFmpeg/PySceneDetect timestamp precision",
+      "Pydantic config validation partial defaults",
+      "4K video resolution handling",
+      "Violation weight normalization"
+    ],
+    "total_findings": 8,
+    "high_severity": 3,
+    "medium_severity": 5,
+    "findings": [
+      {
+        "id": "1.1",
+        "title": "Rule 5a (Binary Violation) Deviation Formula Undefined",
+        "severity": "MEDIUM",
+        "confidence": 0.68,
+        "category": "scoring_logic",
+        "edge_case": "All frames violate rule 5a (no face detected); all frames generate identical violation_severity_score=30",
+        "gap": "Plan specifies deviation = (threshold - actual) / threshold, but 'has face' is binary (0/1), not continuous. Deviation formula breaks down for binary rules.",
+        "evidence": "Unit 5, lines 437-439; rules defined as discrete checks (face_count = 0)",
+        "consequence": "All non-face frames tie with violation_severity_score=30. Tie-breaker falls to frame_id, which depends on floating-point calculations.",
+        "stress_test_scenario": "No-face video (landscape/product). Degradation returns 3 borderline candidates with identical severity. Tie-breaker frame_id may differ across re-runs if rounding varies.",
+        "recommendation": "Specify deviation formula for binary rules. Either: (A) deviation = 1.0 if violated else 0.0, or (B) exclude binary rules from severity calculation, use fixed penalty weight instead."
+      },
+      {
+        "id": "1.2",
+        "title": "Frame_id Generation Stability Across Re-runs Not Guaranteed",
+        "severity": "HIGH",
+        "confidence": 0.82,
+        "category": "reproducibility",
+        "edge_case": "User runs same video twice with identical config. Degradation scenario: all frames rejected. Returns top 3 borderline candidates ordered by frame_id.",
+        "gap": "Frame_id = f'{scene_id}_{offset_percent}' (Unit 3, lines 285-287). Scene_id depends on PySceneDetect output, which is deterministic, but no explicit guarantee in plan that frame_id sort order is stable.",
+        "evidence": "Unit 3, lines 285-287; Unit 5, line 441 uses frame_id as tie-breaker sort key; no explicit specification of lexicographic vs numeric ordering",
+        "consequence": "If frame_id is sorted lexicographically (string sort), '10_50' sorts before '2_50'. Violates 'deterministic tie-breaking' expectation. Same video run twice may return different frame ordering.",
+        "stress_test_scenario": "Run same video twice with identical config. Compare frame_id ordering in scoring_report.json top 3 borderline candidates. If order differs, tie-breaker is non-deterministic.",
+        "recommendation": "Use explicit numeric frame_id (ascending integer) instead of string. Or: document that frame_id = int(scene_id)*1000 + offset_percent*10 for stable numeric sort."
+      },
+      {
+        "id": "2.1",
+        "title": "Timestamp Extraction and FFmpeg Seek Strategy Not Specified",
+        "severity": "MEDIUM",
+        "confidence": 0.65,
+        "category": "external_api_coupling",
+        "edge_case": "FFmpeg timestamp validation (Unit 2, line 248) tolerance 0.1s. PySceneDetect outputs FrameTimecode objects, but plan doesn't specify how to extract seconds or FFmpeg seek parameters.",
+        "gap": "Unit 2 specifies validation threshold but not: (A) PySceneDetect output format (frame number vs seconds vs PTS), (B) FFmpeg seek strategy (exact vs keyframe snap), (C) error handling if diff > 0.1s.",
+        "evidence": "Unit 2, line 248: '若出現時差 > 0.1s，表示 FFmpeg 解碼/seek 有誤' — no implementation detail of how diff is computed",
+        "consequence": "Ambiguous how timestamps are extracted. If PySceneDetect frame number (e.g., 1800) is misinterpreted as seconds instead of dividing by fps, time skew could exceed 0.1s.",
+        "stress_test_scenario": "60fps video with scene boundary at frame 1800. If interpreted as 1800s instead of 1800/60=30s, time offset is 1770s (massive error). Plan doesn't prevent this interpretation error.",
+        "recommendation": "Explicitly add to Unit 2: 'PySceneDetect ContentDetector returns FrameTimecode. Extract seconds: seconds = timecode.get_seconds() [PySceneDetect v0.7+ API]. FFmpeg -ss (fast seek) may land on nearest keyframe. If frame timestamp diff > 0.1s, log warning and proceed (tolerance acceptable for MVP).'"
+      },
+      {
+        "id": "3.1",
+        "title": "Pydantic Config Validation Strategy Ambiguous (Strict vs Permissive)",
+        "severity": "HIGH",
+        "confidence": 0.80,
+        "category": "configuration_handling",
+        "edge_case": "Unit 1 enumerates 21 config items. User provides partial config (15/21 items). Does validation fail hard or merge with defaults?",
+        "gap": "Plan specifies 'Pydantic validation' and '所有必要參數存在' (all required params present) but doesn't specify: (A) whether Field(default=...) is used, (B) whether default.yaml is deep-merged with custom.yaml or replaced entirely, (C) default values for each 21 items.",
+        "evidence": "Unit 1, lines 201-226; no Pydantic schema or merge strategy defined",
+        "consequence": "Strict Pydantic mode (default) → missing fields cause ValidationError, CLI exits. User must provide all 21 items. Permissive mode → user doesn't know which defaults are used. Either way, behavior is undefined in plan.",
+        "stress_test_scenario": "User runs: cover_selector --input video.mp4 (no --config). Does it use hardcoded defaults in code or fail to load config? User provides partial custom.yaml with 15/21 items. Are missing 6 items loaded from default.yaml or cause error?",
+        "recommendation": "Specify config loading in Unit 1: '(1) Load configs/default.yaml with all 21 items and hardcoded defaults. (2) If --config provided, load custom.yaml and deep-merge with default.yaml (custom overrides default). (3) Pydantic schema uses Field(default=...) for all 21 items; required=False. (4) Log which config values are used (defaults vs custom) when --profile enabled.'"
+      },
+      {
+        "id": "4.1",
+        "title": "Face Ratio Threshold Not Resolution-Adaptive",
+        "severity": "HIGH",
+        "confidence": 0.79,
+        "category": "hardfilter_robustness",
+        "edge_case": "4K video (3840x2160). Face detected: bounding box 100x100 pixels. largest_face_ratio = (100*100) / (3840*2160) = 0.0006. Rule 5b rejects (threshold 0.05). Same face in 1080p video passes.",
+        "gap": "Threshold 0.05 (Unit 5, line 456; config line 208: subject_too_small_threshold=0.05) is absolute, not scaled by resolution. For frame to pass on 4K: face area > 415,200 pixels (644x644 bbox), unrealistic.",
+        "evidence": "Unit 4E, line 368: 'is_subject_too_small = largest_face_ratio < 0.05'; Unit 5, line 456 uses same threshold as hard filter",
+        "consequence": "4K videos systematically reject frames with visible faces (face ratio 10x smaller than 1080p). Tool produces resolution-dependent results: same video downscaled to 1080p has different rejection rate.",
+        "stress_test_scenario": "Process 4K video and 1080p downscale of same video. 4K version rejects frames that 1080p accepts. Results non-comparable.",
+        "recommendation": "Normalize threshold by resolution. Option 1: 'Use relative face width instead of area: subject_too_small = max(face_w, face_h) / max(img_w, img_h) < 0.1 (linear dimension ratio)'. Option 2: 'Use absolute pixel minimum: subject_too_small = face_w < 100 pixels OR face_h < 100 pixels (works across resolutions). Specify which in config with justification.'"
+      },
+      {
+        "id": "5.1",
+        "title": "Violation Weight Sum Exceeds Final Score Scale",
+        "severity": "MEDIUM",
+        "confidence": 0.72,
+        "category": "scoring_normalization",
+        "edge_case": "Violation weights: blur=25, overexpose=20, subtitle=15, text=12, no_subject=30, cutoff=18, duplicate=5. Sum=125. Final_score is [0,100]. If frame has all violations: penalty_score=125, final_score = X - 125 (negative, clamped to 0).",
+        "gap": "Plan specifies penalty_score = sum(weights) but doesn't specify: (A) normalization strategy (are weights normalized to sum=100?), (B) clamping behavior (max penalty allowed?), (C) whether penalty_score is scaled to [0,100].",
+        "evidence": "Unit 5, lines 437-438 enumerate weights summing to 125; line 429 formula: final_score = weighted_sum - penalty_score, result constrained to [0,100]",
+        "consequence": "Scoring gradient collapses. Frame A (75 pts - 100 penalty) = -25 → 0. Frame B (75 pts - 50 penalty) = 25. Frames with many violations are indistinguishable from frames with 1 critical violation.",
+        "stress_test_scenario": "Frame with multiple mid-severity violations (overexpose + subtitle + text + cutoff + duplicate) accumulates penalty=20+15+12+18+5=70. Frame with single critical violation (no_subject=30) has penalty=30. Both get clamped to 0, ranking is arbitrary.",
+        "recommendation": "Clarify penalty normalization: 'Option 1: Normalize weights to sum=100 before accumulation (each weight /= 1.25). penalty_score = min(100, sum(normalized_weights * violated)). Option 2: Cap individual weights so max violation <= 50, allowing final_score >= 0 for most cases. Specify which and update default.yaml accordingly.'"
+      },
+      {
+        "id": "6.1",
+        "title": "OCR Timeout and Failure Handling Not Specified",
+        "severity": "MEDIUM",
+        "confidence": 0.63,
+        "category": "error_handling",
+        "edge_case": "Unit 4C OCRDetector scans 6 regions with Tesseract PSM 6. If Tesseract hangs on one frame (corrupted image, extreme aspect ratio, binary image), pipeline stalls indefinitely. No timeout specified.",
+        "gap": "Unit 4C, lines 349-355: 'pytesseract 對 6 個區域做 OCR' — no timeout parameter, no exception handling, no fallback behavior if OCR fails.",
+        "evidence": "Unit 4C doesn't mention timeout, try-catch, or degradation strategy",
+        "consequence": "Single pathological frame (e.g., all-black region or corrupted header) causes Tesseract to hang. Entire pipeline blocks. User sees no progress.",
+        "stress_test_scenario": "Video with frame that has extreme aspect ratio (e.g., 100000x1 pixel) or OCR-crashing binary data in one region. Pipeline hangs at OCR step indefinitely.",
+        "recommendation": "Add to Unit 4C: 'Set timeout=5s for each OCR region (parametrized in config as ocr_timeout_sec). If timeout exceeded for one region: log warning, skip region, set ocr_text_count += 0 for that region. If all 6 regions timeout: set ocr_text_count=0, ocr_enabled=False (fallback). Include timeout errors in reject_log.json for debugging.'"
+      },
+      {
+        "id": "7.1",
+        "title": "Deduper Tie-Breaking Undefined for Identical Scores",
+        "severity": "MEDIUM",
+        "confidence": 0.67,
+        "category": "reproducibility",
+        "edge_case": "Deduper groups frames by dHash (Hamming distance < 8). Two frames in same group have identical final_score. Plan says 'keep highest score' but doesn't specify secondary sort key.",
+        "gap": "Unit 4F, line 379: '每組保留 final_score 最高者為「代表」' — no secondary sort key for tied scores. Deduper behavior depends on dict/list iteration order.",
+        "evidence": "Unit 4F, line 379; no mention of tie-breaking or secondary sort criteria",
+        "consequence": "Deduper behavior is non-deterministic. Same video processed twice may return different frame as 'representative' if frames appear in different order.",
+        "stress_test_scenario": "Video with 200 identical frames (same scene, dHash identical, final_score identical). Run twice: iteration order differs, different frame marked as 'representative' in each run.",
+        "recommendation": "Specify deduper tie-breaking: 'Within each duplicate group: (1) Sort by final_score DESC. (2) If tied, sort by frame_id ASC (string lexicographic). (3) Keep first frame as representative, mark others status=duplicate.' This ensures deterministic deduplication."
+      }
+    ],
+    "risk_clusters": {
+      "cluster_a_non_determinism": {
+        "title": "Non-Determinism & Reproducibility",
+        "findings": ["1.2", "7.1"],
+        "risk": "Same video processed twice yields different results (violates '可審計' audit requirement in Problem Frame)",
+        "impact": "HIGH"
+      },
+      "cluster_b_config_scale": {
+        "title": "Configuration & Scale Robustness",
+        "findings": ["3.1", "4.1"],
+        "risk": "Tool fails silently with partial configs or produces inconsistent results across resolutions (1080p vs 4K)",
+        "impact": "HIGH"
+      },
+      "cluster_c_error_handling": {
+        "title": "Error Handling & Robustness",
+        "findings": ["2.1", "6.1"],
+        "risk": "Pipeline hangs or crashes on edge cases (corrupted frames, unusual resolutions, timestamp drift)",
+        "impact": "MEDIUM"
+      }
+    }
+  }
+}

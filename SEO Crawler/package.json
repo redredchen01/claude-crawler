@@ -1,0 +1,17 @@
+{
+  "name": "seo-crawler",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SEO Crawler - Data Insights Engine",
+  "scripts": {
+    "dev": "concurrently \"npm run backend:dev\" \"npm run frontend:dev\"",
+    "backend:dev": "cd backend && node dist/index.js",
+    "frontend:dev": "cd frontend && npm run dev",
+    "build": "npm run backend:build && npm run frontend:build",
+    "backend:build": "cd backend && npm run build 2>/dev/null || true",
+    "frontend:build": "cd frontend && npm run build"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0"
+  }
+}

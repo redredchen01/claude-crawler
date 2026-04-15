@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# ydk — 快速入口
+# 用法: ./bin/ydk <command> [args...]
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+if [ ! -d "$PROJECT_DIR/.venv" ]; then
+  echo "🔧 建立虛擬環境..."
+  python3 -m venv "$PROJECT_DIR/.venv"
+  "$PROJECT_DIR/.venv/bin/pip" install -e "$PROJECT_DIR" -q
+fi
+
+exec "$PROJECT_DIR/.venv/bin/python" -m ydk.cli "$@"

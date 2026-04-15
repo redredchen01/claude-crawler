@@ -1,0 +1,6 @@
+export { HomePage } from './HomePage'
+export { DashboardPage } from './DashboardPage'
+export { WorkspacesPage } from './WorkspacesPage'
+export { RolesPage } from './RolesPage'
+export { IntegrationsPage } from './IntegrationsPage'
+export { SettingsPage } from './SettingsPage'

@@ -1,0 +1,118 @@
+{
+  "dashboard": {
+    "title": "Prompt Optimizer - Performance Dashboard",
+    "tags": ["prompt-optimizer", "performance", "metrics"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "API Request Latency (P95)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, api_request_duration_seconds)",
+            "refId": "A",
+            "legendFormat": "{{ endpoint }}"
+          }
+        ],
+        "yaxes": [{"label": "Seconds"}]
+      },
+      {
+        "id": 2,
+        "title": "API Error Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(api_errors_total[5m]) / rate(api_requests_total[5m])",
+            "refId": "A",
+            "legendFormat": "{{ endpoint }}"
+          }
+        ],
+        "yaxes": [{"label": "Error Rate"}]
+      },
+      {
+        "id": 3,
+        "title": "Batch Job Success Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(batch_jobs_total{status=\"success\"}[5m]) / rate(batch_jobs_total[5m])",
+            "refId": "A",
+            "legendFormat": "{{ endpoint }}"
+          }
+        ],
+        "yaxes": [{"label": "Success Rate"}]
+      },
+      {
+        "id": 4,
+        "title": "Webhook Delivery Success Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(webhook_deliveries_total{status=\"success\"}[5m]) / rate(webhook_deliveries_total[5m])",
+            "refId": "A",
+            "legendFormat": "{{ event_type }}"
+          }
+        ],
+        "yaxes": [{"label": "Success Rate"}]
+      },
+      {
+        "id": 5,
+        "title": "Cache Hit Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(cache_hits_total[5m]) / (rate(cache_hits_total[5m]) + rate(cache_misses_total[5m]))",
+            "refId": "A",
+            "legendFormat": "{{ cache_type }}"
+          }
+        ],
+        "yaxes": [{"label": "Hit Rate"}]
+      },
+      {
+        "id": 6,
+        "title": "Database Query Latency (P95)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, db_query_duration_seconds)",
+            "refId": "A",
+            "legendFormat": "{{ operation }}"
+          }
+        ],
+        "yaxes": [{"label": "Seconds"}]
+      },
+      {
+        "id": 7,
+        "title": "Queue Lengths",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "batch_queue_length",
+            "refId": "A",
+            "legendFormat": "Batch Queue"
+          },
+          {
+            "expr": "webhook_queue_length",
+            "refId": "B",
+            "legendFormat": "Webhook Queue"
+          }
+        ],
+        "yaxes": [{"label": "Queue Length"}]
+      },
+      {
+        "id": 8,
+        "title": "Heap Memory Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "nodejs_heap_size_bytes / 1024 / 1024",
+            "refId": "A",
+            "legendFormat": "{{ type }}"
+          }
+        ],
+        "yaxes": [{"label": "MB"}]
+      }
+    ]
+  }
+}

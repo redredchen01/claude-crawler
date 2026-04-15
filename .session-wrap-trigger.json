@@ -1,0 +1,31 @@
+{
+  "triggers": [
+    {
+      "id": "yd-session-wrap",
+      "name": "YD Session Wrap",
+      "description": "Save session context to Memory and sync Obsidian",
+      "command": "cd /Users/dex/YD\\ 2026 && bash ./scripts/session-wrap.sh",
+      "tags": ["automation", "session", "memory"],
+      "runInBackground": false,
+      "confirmBeforeRun": false
+    },
+    {
+      "id": "yd-sync-all",
+      "name": "YD Sync All",
+      "description": "Sync Obsidian and wrap session",
+      "command": "cd /Users/dex/YD\\ 2026 && bash ./scripts/obsidian-sync.sh && bash ./scripts/session-wrap.sh 'Manual sync'",
+      "tags": ["automation", "sync"],
+      "runInBackground": true,
+      "confirmBeforeRun": false
+    },
+    {
+      "id": "yd-memory-check",
+      "name": "YD Memory Check",
+      "description": "Show current Memory status",
+      "command": "cd /Users/dex && echo '=== Memory Files ===' && ls -1 .claude/projects/-Users-dex-YD-2026/memory/*.md && echo '' && echo '=== Recent Wraps ===' && ls -lt .claude/projects/-Users-dex-YD-2026/memory/session_*_wrap.md 2>/dev/null | head -3",
+      "tags": ["status", "memory"],
+      "runInBackground": false,
+      "confirmBeforeRun": false
+    }
+  ]
+}

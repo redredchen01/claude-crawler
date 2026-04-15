@@ -1,0 +1,22 @@
+name: Tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - run: npm install
+      - run: npm test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test Python scripts syntax
+        run: python3 -c "import py_compile; py_compile.compile('scripts/ctx_status.py'); py_compile.compile('scripts/ctx_checkpoint.py')"
+      - name: Test hook syntax
+        run: bash -n hooks/ctx-track.sh

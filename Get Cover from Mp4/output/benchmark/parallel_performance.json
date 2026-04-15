@@ -1,0 +1,31 @@
+{
+  "test_time": "2026-04-14 12:49:03",
+  "speedup": 1.09,
+  "sequential": {
+    "type": "sequential",
+    "runs": [
+      {
+        "run": 1,
+        "elapsed_sec": 1.286
+      },
+      {
+        "run": 2,
+        "elapsed_sec": 1.809
+      }
+    ]
+  },
+  "parallel": {
+    "type": "parallel",
+    "max_workers": 4,
+    "runs": [
+      {
+        "run": 1,
+        "elapsed_sec": 1.552
+      },
+      {
+        "run": 2,
+        "elapsed_sec": 1.286
+      }
+    ]
+  }
+}

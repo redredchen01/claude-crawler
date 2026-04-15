@@ -1,0 +1,108 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# Media files
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.flv
+*.m4v
+*.webm
+
+# Generated output
+candidate_frames/
+output/
+test_output/
+
+# Logs
+*.log
+logs/
+
+# Local config overrides
+.env
+.env.local
+
+# Project-specific
+stress_test_findings*.json
+OPTIMIZATION_*.md
+*_SUMMARY.md
+SESSION_SUMMARY.md
+TEST_COVERAGE_*.md
+COMPLETION_SUMMARY.md
+FINAL_SUMMARY.md
+PERFORMANCE_REPORT.md
+FRAME_SELECTION_STRATEGY.md
+SAMPLING_ENHANCEMENT.md
+IMPROVEMENTS_SUMMARY.md
+test_memory_usage.py
+test_cache_performance.py
+test_parallel_performance.py
+simple_demo.py
+
+# OS
+.DS_Store
+Thumbs.db

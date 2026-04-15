@@ -1,0 +1,339 @@
+/**
+ * 洞察仪表板样式 (Phase 4.1.4)
+ */
+
+.insights-dashboard {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+.insights-dashboard h2 {
+  font-size: 1.8rem;
+  margin-bottom: 2rem;
+  color: #333;
+}
+
+/* 仪表板网格 */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+  gap: 2rem;
+  margin-bottom: 3rem;
+}
+
+.card {
+  background: #fff;
+  border-radius: 8px;
+  padding: 1.5rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.card h3 {
+  margin-bottom: 1.5rem;
+  font-size: 1.2rem;
+  color: #333;
+}
+
+/* 难度分布直方图 */
+.difficulty-histogram {
+}
+
+.histogram-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.bar-group {
+  display: grid;
+  grid-template-columns: 80px 1fr 50px;
+  align-items: center;
+  gap: 1rem;
+}
+
+.bar-group label {
+  font-weight: 500;
+  font-size: 0.9rem;
+}
+
+.bar-container {
+  background: #f0f0f0;
+  border-radius: 4px;
+  height: 24px;
+  overflow: hidden;
+  position: relative;
+}
+
+.bar {
+  height: 100%;
+  transition: width 0.3s ease;
+  border-radius: 4px;
+}
+
+.bar.easy {
+  background: #4caf50;
+}
+
+.bar.medium {
+  background: #ff9800;
+}
+
+.bar.hard {
+  background: #ff5722;
+}
+
+.bar.very-hard {
+  background: #f44336;
+}
+
+.bar-group .count {
+  text-align: right;
+  font-weight: 500;
+  min-width: 40px;
+}
+
+/* ROI排行表 */
+.roi-ranking-table table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+}
+
+.roi-ranking-table th,
+.roi-ranking-table td {
+  padding: 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid #eee;
+}
+
+.roi-ranking-table th {
+  background: #f5f5f5;
+  font-weight: 600;
+  color: #333;
+}
+
+.roi-ranking-table tbody tr:hover {
+  background: #f9f9f9;
+}
+
+/* 竞争对手热力图 */
+.competitor-heatmap {
+}
+
+.heatmap-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.heatmap-cell {
+  padding: 0.75rem;
+  border-radius: 4px;
+  border: 1px solid #ddd;
+  text-align: center;
+  font-size: 0.85rem;
+  transition: transform 0.2s;
+  cursor: pointer;
+}
+
+.heatmap-cell:hover {
+  transform: scale(1.05);
+  border-color: #ff9800;
+}
+
+.heatmap-cell small {
+  display: block;
+  word-break: break-word;
+}
+
+/* 筛选器 */
+.insights-filter {
+  background: #fff;
+  border-radius: 8px;
+  padding: 1.5rem;
+  margin-bottom: 2rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.insights-filter h3 {
+  margin-bottom: 1.5rem;
+  font-size: 1.1rem;
+}
+
+.filter-group {
+  margin-bottom: 1.5rem;
+}
+
+.filter-group:last-child {
+  margin-bottom: 0;
+}
+
+.filter-group label {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-weight: 500;
+  color: #333;
+}
+
+.filter-group input[type="range"] {
+  width: 100%;
+  margin-bottom: 0.5rem;
+}
+
+.filter-group span {
+  display: inline-block;
+  margin-left: 1rem;
+  color: #666;
+  font-weight: 500;
+}
+
+/* 结果表格区域 */
+.insights-section {
+  background: #fff;
+  border-radius: 8px;
+  padding: 1.5rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.results-table {
+  margin-top: 2rem;
+}
+
+.results-table h3 {
+  margin-bottom: 1rem;
+  font-size: 1.1rem;
+  color: #333;
+}
+
+.results-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.results-table th,
+.results-table td {
+  padding: 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid #eee;
+}
+
+.results-table th {
+  background: #f5f5f5;
+  font-weight: 600;
+  color: #333;
+  position: sticky;
+  top: 0;
+}
+
+.results-table tbody tr:hover {
+  background: #f9f9f9;
+}
+
+/* 分页控制 */
+.pagination {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid #eee;
+}
+
+.pagination button {
+  padding: 0.5rem 1rem;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  background: #fff;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.pagination button:hover:not(:disabled) {
+  background: #f5f5f5;
+  border-color: #999;
+}
+
+.pagination button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pagination span {
+  color: #666;
+  font-weight: 500;
+}
+
+/* 徽章样式 */
+.badge {
+  display: inline-block;
+  padding: 0.25rem 0.75rem;
+  border-radius: 12px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  margin-right: 0.25rem;
+}
+
+.badge-info {
+  background-color: #e3f2fd;
+  color: #1976d2;
+}
+
+.badge-success {
+  background-color: #e8f5e9;
+  color: #388e3c;
+}
+
+.badge-warning {
+  background-color: #fff3e0;
+  color: #f57c00;
+}
+
+.badge-danger {
+  background-color: #ffebee;
+  color: #d32f2f;
+}
+
+/* 响应式设计 */
+@media (max-width: 1024px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .bar-group {
+    grid-template-columns: 60px 1fr 50px;
+  }
+}
+
+@media (max-width: 768px) {
+  .insights-dashboard {
+    padding: 1rem;
+  }
+
+  .dashboard-grid {
+    gap: 1rem;
+  }
+
+  .card {
+    padding: 1rem;
+  }
+
+  .heatmap-grid {
+    grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+  }
+
+  .pagination {
+    flex-wrap: wrap;
+  }
+
+  .results-table table {
+    font-size: 0.9rem;
+  }
+
+  .results-table th,
+  .results-table td {
+    padding: 0.5rem;
+  }
+}

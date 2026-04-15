@@ -1,0 +1,44 @@
+{
+  "name": "@redredchen01/ctx",
+  "version": "2.6.0",
+  "description": "Context window auto-manager for free AI agent users. Your 200K context, maximized.",
+  "main": "src/index.js",
+  "bin": {
+    "ctx": "bin/cli.js"
+  },
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage"
+  },
+  "keywords": [
+    "ai-agent",
+    "context-window",
+    "openclaw",
+    "claude-code",
+    "cursor",
+    "cline",
+    "token-management",
+    "memory",
+    "skill"
+  ],
+  "author": "redredchen01",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/redredchen01/ctx.git"
+  },
+  "files": [
+    "src/",
+    "bin/",
+    "SKILL.md",
+    "SKILL-full.md",
+    "README.md",
+    "LICENSE",
+    "scripts/",
+    "hooks/"
+  ],
+  "devDependencies": {
+    "jest": "^30.3.0"
+  }
+}

@@ -1,0 +1,234 @@
+name: YDK Version Auto-Publish
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'projects/production/yd-utility-kit/**'
+      - '.github/workflows/publish.yml'
+  workflow_dispatch:
+    inputs:
+      force_version:
+        description: 'Force version (e.g., 0.6.0) - leave empty for auto-detect'
+        required: false
+        type: string
+
+env:
+  YDK_DIR: projects/production/yd-utility-kit
+  PYTHON_VERSION: '3.11'
+  NODE_VERSION: '20'
+
+jobs:
+  detect-version:
+    name: Detect Version Changes
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.detect.outputs.version }}
+      bump_type: ${{ steps.detect.outputs.bump_type }}
+      should_publish: ${{ steps.detect.outputs.should_publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect Version Bump
+        id: detect
+        run: |
+          cd ${{ env.YDK_DIR }}
+
+          CURRENT_VERSION=$(grep '^version = ' pyproject.toml | cut -d'"' -f2)
+          echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+
+          LAST_TAG=$(git describe --tags --abbrev=0 'ydk-v*' 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            LAST_VERSION="0.0.0"
+            COMMIT_COUNT=$(git rev-list --count HEAD 2>/dev/null || echo "1")
+          else
+            LAST_VERSION="${LAST_TAG#ydk-v}"
+            COMMIT_COUNT=$(git rev-list --count "$LAST_TAG"..HEAD 2>/dev/null || echo "0")
+          fi
+          echo "last_version=$LAST_VERSION" >> $GITHUB_OUTPUT
+
+          if [ "$CURRENT_VERSION" != "$LAST_VERSION" ] && [ "$COMMIT_COUNT" -gt 0 ]; then
+            echo "should_publish=true" >> $GITHUB_OUTPUT
+            echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+
+            if [ -z "$LAST_TAG" ]; then
+              COMMITS=$(git log HEAD --oneline)
+            else
+              COMMITS=$(git log "$LAST_TAG"..HEAD --oneline 2>/dev/null || git log HEAD -1 --oneline)
+            fi
+
+            if echo "$COMMITS" | grep -q "BREAKING\|^.*!:"; then
+              echo "bump_type=major" >> $GITHUB_OUTPUT
+            elif echo "$COMMITS" | grep -q "^feat:"; then
+              echo "bump_type=minor" >> $GITHUB_OUTPUT
+            else
+              echo "bump_type=patch" >> $GITHUB_OUTPUT
+            fi
+
+            echo "✅ Version change detected: $LAST_VERSION → $CURRENT_VERSION"
+          else
+            echo "should_publish=false" >> $GITHUB_OUTPUT
+            echo "ℹ️  No version change (current: $CURRENT_VERSION, last: $LAST_VERSION)"
+          fi
+
+  publish:
+    name: Publish to PyPI, npm, GitHub
+    needs: detect-version
+    if: needs.detect-version.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.YDK_DIR }}/package.json
+        continue-on-error: true
+
+      - name: Install Python Dependencies
+        run: |
+          cd ${{ env.YDK_DIR }}
+          python -m pip install --upgrade pip setuptools wheel build
+          pip install -r requirements.txt || true
+
+      - name: Install Node Dependencies
+        run: |
+          cd ${{ env.YDK_DIR }}
+          npm install || true
+        continue-on-error: true
+
+      - name: Build Python Package
+        run: |
+          cd ${{ env.YDK_DIR }}
+          python -m build
+
+      - name: Build npm Package
+        run: |
+          cd ${{ env.YDK_DIR }}
+          if [ -f "package.json" ]; then
+            npm run build || true
+          else
+            echo "ℹ️  No package.json found, skipping npm build"
+          fi
+        continue-on-error: true
+
+      - name: Create Git Tag
+        env:
+          VERSION: ${{ needs.detect-version.outputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          TAG="ydk-v${{ env.VERSION }}"
+          if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+            git tag -a "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+            echo "✅ Tag created and pushed: $TAG"
+          else
+            echo "ℹ️  Tag already exists: $TAG"
+          fi
+
+      - name: Publish to PyPI (Trusted Publisher)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: ${{ env.YDK_DIR }}/dist
+          skip-existing: true
+          verbose: true
+        if: always()
+        continue-on-error: true
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        if: always()
+        continue-on-error: true
+        run: |
+          cd ${{ env.YDK_DIR }}
+
+          if [ -f "package.json" ] && [ -n "${{ secrets.NPM_TOKEN }}" ]; then
+            echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" > ~/.npmrc
+            npm publish || echo "⚠️  npm publish skipped"
+          else
+            echo "ℹ️  Skipping npm publish (no package.json or NPM_TOKEN)"
+          fi
+
+      - name: Create GitHub Release
+        env:
+          VERSION: ${{ needs.detect-version.outputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "ydk-v${{ env.VERSION }}" \
+            --title "YDK v${{ env.VERSION }}" \
+            --generate-notes \
+            --draft=false \
+            || echo "ℹ️  Release already exists"
+
+      - name: Update Obsidian Vault
+        if: always()
+        continue-on-error: true
+        env:
+          VERSION: ${{ needs.detect-version.outputs.version }}
+        run: |
+          VAULT_FILE="obsidian/projects/yd-utility-kit.md"
+
+          if [ -f "$VAULT_FILE" ]; then
+            TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
+
+            sed -i "s/last_published_version:.*/last_published_version: ${{ env.VERSION }}/g" "$VAULT_FILE"
+            sed -i "s/last_published_date:.*/last_published_date: $TIMESTAMP/g" "$VAULT_FILE"
+            sed -i "s/version:.*/version: ${{ env.VERSION }}/g" "$VAULT_FILE"
+
+            echo "✅ Vault updated"
+          fi
+
+  health-check:
+    name: Post-Publish Health Check
+    needs: [detect-version, publish]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify PyPI Release
+        if: needs.detect-version.outputs.should_publish == 'true'
+        continue-on-error: true
+        run: |
+          pip install --upgrade yd-utility-kit 2>/dev/null && echo "✅ PyPI verified" || echo "⚠️  PyPI verification skipped"
+
+      - name: Verify Git Tags
+        if: needs.detect-version.outputs.should_publish == 'true'
+        run: |
+          git fetch --tags
+          TAG="ydk-v${{ needs.detect-version.outputs.version }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "✅ Git tag verified: $TAG"
+          else
+            echo "⚠️  Git tag not found: $TAG"
+          fi
+
+      - name: Log Publish Event
+        if: needs.detect-version.outputs.should_publish == 'true'
+        continue-on-error: true
+        env:
+          VERSION: ${{ needs.detect-version.outputs.version }}
+        run: |
+          bash scripts/agent/publish-logger.sh "${{ env.VERSION }}" "yd-utility-kit" "success"

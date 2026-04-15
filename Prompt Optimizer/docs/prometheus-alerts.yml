@@ -1,0 +1,126 @@
+groups:
+  - name: prompt_optimizer
+    interval: 30s
+    rules:
+      # API Performance Alerts
+      - alert: ApiHighLatency
+        expr: histogram_quantile(0.95, api_request_duration_seconds) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API P95 latency > 100ms"
+          description: "API response time P95 is {{ $value }}s on {{ $labels.endpoint }}"
+
+      - alert: ApiHighErrorRate
+        expr: (rate(api_errors_total[5m]) / rate(api_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API error rate > 5%"
+          description: "Error rate is {{ $value }} on {{ $labels.endpoint }}"
+
+      # Batch Processing Alerts
+      - alert: BatchHighFailureRate
+        expr: (rate(batch_jobs_total{status="failed"}[5m]) / rate(batch_jobs_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Batch failure rate > 5%"
+          description: "Batch failure rate is {{ $value }} for {{ $labels.endpoint }}"
+
+      - alert: BatchQueueBacklog
+        expr: batch_queue_length > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Batch queue backlog > 100"
+          description: "{{ $value }} pending batch jobs"
+
+      - alert: BatchHighDuration
+        expr: histogram_quantile(0.95, batch_job_duration_seconds) > 60
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Batch P95 duration > 60s"
+          description: "Batch job P95 duration is {{ $value }}s"
+
+      # Webhook Alerts
+      - alert: WebhookLowSuccessRate
+        expr: (rate(webhook_deliveries_total{status="success"}[5m]) / rate(webhook_deliveries_total[5m])) < 0.99
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Webhook success rate < 99%"
+          description: "Success rate is {{ $value }} for {{ $labels.event_type }}"
+
+      - alert: WebhookQueueBacklog
+        expr: webhook_queue_length > 1000
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Webhook queue backlog > 1000"
+          description: "{{ $value }} pending webhook events"
+
+      - alert: WebhookHighLatency
+        expr: histogram_quantile(0.95, webhook_delivery_duration_seconds) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Webhook P95 latency > 5s"
+          description: "Webhook delivery P95 is {{ $value }}s"
+
+      # Cache Alerts
+      - alert: CacheLowHitRate
+        expr: (rate(cache_hits_total[5m]) / (rate(cache_hits_total[5m]) + rate(cache_misses_total[5m]))) < 0.5
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "Cache hit rate < 50%"
+          description: "Hit rate is {{ $value }} for {{ $labels.cache_type }}"
+
+      - alert: CacheRefreshSlow
+        expr: histogram_quantile(0.95, cache_refresh_duration_seconds) > 1
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "Cache refresh P95 > 1s"
+          description: "Cache refresh P95 is {{ $value }}s for {{ $labels.cache_type }}"
+
+      # Database Alerts
+      - alert: DbQuerySlow
+        expr: histogram_quantile(0.95, db_query_duration_seconds) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DB query P95 > 500ms"
+          description: "Query P95 is {{ $value }}s for {{ $labels.operation }}"
+
+      - alert: DbHighMemory
+        expr: (nodejs_heap_size_bytes{type="used"} / nodejs_heap_size_bytes{type="limit"}) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Heap memory usage > 90%"
+          description: "Heap usage is {{ $value | humanizePercentage }}"
+
+      # System Alerts
+      - alert: ServiceDown
+        expr: up{job="prompt-optimizer"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service is down"
+          description: "Prompt Optimizer service is not responding"

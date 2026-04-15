@@ -1,0 +1,43 @@
+{
+  "workspace": "YD 2026",
+  "created": "2026-03-26",
+  "projects": [
+    {
+      "priority": 1,
+      "name": "dexapi",
+      "path": "dexapi",
+      "type": "node-project",
+      "description": "YDAPI 核心實現",
+      "status": "active",
+      "lastUpdate": "2026-03-25",
+      "commits": 20
+    },
+    {
+      "priority": 2,
+      "name": "test-ydapi",
+      "path": "test-ydapi",
+      "type": "node-project",
+      "description": "YDAPI 測試環境",
+      "status": "active",
+      "lastUpdate": "2026-03-25",
+      "commits": 18,
+      "size": "137M"
+    },
+    {
+      "priority": 3,
+      "name": "watermark 0324",
+      "path": "watermark 0324",
+      "type": "apex-project",
+      "description": "APEX 自治開發引擎",
+      "status": "maintained",
+      "lastUpdate": "2026-03-25",
+      "commits": 25,
+      "features": ["SDD context", "dev/specs"]
+    }
+  ],
+  "knowledgeBase": {
+    "type": "obsidian",
+    "path": ".obsidian-vault",
+    "purpose": "本地知識管理系統"
+  }
+}

@@ -1,0 +1,83 @@
+#!/bin/zsh
+
+# YD 2026 — Session Wrap & Auto-sync Aliases
+# Source this in ~/.zshrc: source ~/YD\ 2026/.zshrc-wrap
+
+export YD_WORKSPACE="${YD_WORKSPACE:-/Users/dex/YD 2026}"
+export YD_MEMORY="${YD_MEMORY:-/Users/dex/.claude/projects/-Users-dex-YD-2026/memory}"
+export YD_OBSIDIAN="${YD_OBSIDIAN:-$YD_WORKSPACE/obsidian}"
+
+# Session Wrap — Save context at session end
+function wrap() {
+  case "${1:-}" in
+    login|logout|status|history|help)
+      bash "$YD_WORKSPACE/scripts/wrap-cli.sh" "$@"
+      ;;
+    *)
+      bash "$YD_WORKSPACE/scripts/session-wrap.sh" "$@"
+      ;;
+  esac
+}
+alias wrap-summary='wrap "$(date +%Y-%m-%d) — Session summary"'
+
+# Auto-sync
+alias sync-kb='bash "$YD_WORKSPACE/scripts/obsidian-sync.sh"'
+alias sync-all='wrap && sync-kb'
+
+# Agent tools (v3.4.0)
+alias agent-context='bash "$YD_WORKSPACE/scripts/agent/agent-context.sh"'
+alias agent-share='bash "$YD_WORKSPACE/scripts/agent/agent-share.sh"'
+alias agent-decision='bash "$YD_WORKSPACE/scripts/agent/agent-decision.sh"'
+alias agent-checkpoint='bash "$YD_WORKSPACE/scripts/agent/agent-checkpoint.sh"'
+alias agent-knowledge='bash "$YD_WORKSPACE/scripts/agent/agent-knowledge.sh"'
+alias agent-optimize='bash "$YD_WORKSPACE/scripts/agent/agent-optimize.sh"'
+alias agent-tasks='bash "$YD_WORKSPACE/scripts/agent/agent-tasks.sh"'
+
+# Visualization tools (v3.4.0)
+alias visualize-tasks='bash "$YD_WORKSPACE/scripts/viz/visualize-tasks.sh"'
+alias analyze-decisions='bash "$YD_WORKSPACE/scripts/viz/analyze-decisions.sh"'
+alias memory-report='bash "$YD_WORKSPACE/scripts/viz/memory-report.sh"'
+alias timeline='bash "$YD_WORKSPACE/scripts/viz/timeline.sh"'
+
+# Memory shortcuts
+alias mem='cat "$YD_MEMORY/MEMORY.md" | head -50'
+alias mem-full='cat "$YD_MEMORY/MEMORY.md"'
+alias mem-edit='code "$YD_MEMORY"'
+
+# Status checks
+alias yd-km-status='echo "KB: $(find "$YD_OBSIDIAN" -name "*.md" | wc -l) files" && echo "Memory: $(ls -1 "$YD_MEMORY"/*.md 2>/dev/null | wc -l) files"'
+
+# Quick nav (pw 由 .zshrc-workspace 定義)
+alias kb='code "$YD_OBSIDIAN"'
+
+# Session workflow
+function yd-start-session() {
+    echo "📌 Loading YD 2026 session..."
+    echo ""
+    echo "Last session wrap:"
+    ls -lt "$YD_MEMORY"/session_*_wrap.md 2>/dev/null | head -1 | awk '{print $NF}' | xargs cat 2>/dev/null | head -20
+    echo ""
+    echo "✅ Ready to work!"
+    echo "   Run 'wrap' when done to save context"
+}
+
+function yd-end-session() {
+    echo "🔄 Ending session..."
+    wrap "$@"
+    echo ""
+    echo "📊 Session saved. Next steps:"
+    echo "   1. Review: cat $YD_MEMORY/MEMORY.md"
+    echo "   2. Push: cd $YD_WORKSPACE && git push"
+}
+
+echo "✅ YD 2026 wrap aliases loaded (v3.4.0 agent-native + visualization)"
+echo ""
+echo "Session management:"
+echo "   wrap, sync-kb, mem, kb, yd-start-session, yd-end-session"
+echo ""
+echo "Agent tools:"
+echo "   agent-context, agent-share, agent-decision, agent-checkpoint"
+echo "   agent-knowledge, agent-optimize, agent-tasks"
+echo ""
+echo "Visualization tools (NEW):"
+echo "   visualize-tasks, analyze-decisions, memory-report, timeline"

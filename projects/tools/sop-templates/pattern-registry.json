@@ -1,0 +1,129 @@
+{
+  "version": "1.0.0",
+  "description": "SOP S4 Implementation Pattern Registry — 從已完成 SOP 提取的可複用模式",
+  "generatedAt": "2026-03-30",
+  "patterns": [
+    {
+      "id": "schema-validator",
+      "name": "JSON Schema Validation",
+      "description": "結構化資料驗證與標準化 — 包括 schema 定義、validator 編譯、批次驗證與錯誤報告",
+      "source_sop": 1,
+      "source_project": "P2",
+      "source_file": "task-result.schema.json + task-result-validator.mjs",
+      "use_cases": [
+        "API request/response validation",
+        "Configuration file validation",
+        "Data import/export standardization",
+        "Input sanitization"
+      ],
+      "estimated_save": "30-40s",
+      "template_file": "schema-validator-template.mjs",
+      "dependencies": ["ajv", "ajv-formats"],
+      "key_functions": [
+        "createSchemaValidator(schema)",
+        "validateBatch(records, validator)",
+        "formatValidationErrors(errors)"
+      ],
+      "customization_points": [
+        "schema properties — 修改 JSON Schema 定義",
+        "validation rules — 調整 AJV 選項",
+        "error formatting — 自訂錯誤訊息格式"
+      ],
+      "metrics": {
+        "sop_duration": 1680,
+        "token_cost": 1.82,
+        "first_pass_rate": 1.0,
+        "files_modified": 3,
+        "lines_of_code": 150
+      }
+    },
+    {
+      "id": "dedup-algorithm",
+      "name": "Event Deduplication",
+      "description": "時間窗口內的去重機制 — 複合鍵簽名 + 狀態管理 + 自動清理舊記錄",
+      "source_sop": 2,
+      "source_project": "P2",
+      "source_file": "ga4-alert.mjs",
+      "use_cases": [
+        "Notification deduplication (same-day same-type)",
+        "Alert aggregation",
+        "Event log deduplication",
+        "Workflow state management"
+      ],
+      "estimated_save": "35-45s",
+      "template_file": "dedup-algorithm-template.mjs",
+      "dependencies": [],
+      "key_functions": [
+        "dedupSignature(date, entityKey, type)",
+        "hasBeenNotified(state, signature)",
+        "cleanDedupHistory(state, today, retentionDays)",
+        "checkAndMarkBatch(events, state, options)"
+      ],
+      "customization_points": [
+        "signature format — 調整複合鍵結構",
+        "retention period — 改變歷史保留天數",
+        "state persistence — 選擇存儲機制 (JSON/DB)"
+      ],
+      "metrics": {
+        "sop_duration": 2040,
+        "token_cost": 2.15,
+        "first_pass_rate": 1.0,
+        "files_modified": 1,
+        "lines_of_code": 80
+      }
+    },
+    {
+      "id": "text-normalization",
+      "name": "Text Normalization & Validation",
+      "description": "文本規範化 — 字符限制檢查、優雅截斷、換行處理、批次驗證",
+      "source_sop": 3,
+      "source_project": "P1",
+      "source_file": "pipe.go + root.go",
+      "use_cases": [
+        "CLI help text formatting (80 char limit)",
+        "Command description normalization",
+        "Text constraint validation",
+        "Batch quality reporting"
+      ],
+      "estimated_save": "25-35s",
+      "template_file": "text-normalization-template.mjs",
+      "dependencies": [],
+      "key_functions": [
+        "checkTextCompliance(text, maxChars)",
+        "normalizeText(text)",
+        "truncateText(text, maxChars, options)",
+        "wrapText(text, width)",
+        "validateTextBatch(items, maxChars)"
+      ],
+      "customization_points": [
+        "max character limit — 改變寬度限制",
+        "truncation strategy — 選擇斷句方式",
+        "normalization rules — 調整空白/標點處理"
+      ],
+      "metrics": {
+        "sop_duration": 1320,
+        "token_cost": 1.95,
+        "first_pass_rate": 1.0,
+        "commands_affected": 375,
+        "compliance_rate": 0.995
+      }
+    }
+  ],
+  "pattern_usage_matrix": {
+    "validation_tasks": ["schema-validator", "text-normalization"],
+    "deduplication_tasks": ["dedup-algorithm"],
+    "data_processing": ["schema-validator", "text-normalization"],
+    "state_management": ["dedup-algorithm"],
+    "batch_operations": ["schema-validator", "text-normalization"]
+  },
+  "estimated_total_savings": {
+    "description": "SOP #5 預期可節省的時間",
+    "range": "100-150s",
+    "percentage": "10-15%"
+  },
+  "next_steps": {
+    "sop_5": "根據新 SOP 需求，選擇合適的模板組合",
+    "template_evolution": "每次新 SOP 完成後，評估是否提取新模式",
+    "pattern_refinement": "收集使用反饋，優化模板 API"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "mode": "triple",
+  "degradation_reason": null,
+  "output_file": "composition_report.json",
+  "bottom_image": {
+    "frame_id": 0,
+    "timestamp_sec": 1.37,
+    "blur_score": 75.0
+  },
+  "zoom_images": [
+    {
+      "frame_id": 1,
+      "timestamp_sec": 2.74,
+      "blur_score": 75.0
+    },
+    {
+      "frame_id": 2,
+      "timestamp_sec": 4.11,
+      "blur_score": 75.0
+    }
+  ],
+  "summary": {
+    "total_candidates": 0,
+    "valid_candidates": 0,
+    "selected_frames": 3
+  }
+}

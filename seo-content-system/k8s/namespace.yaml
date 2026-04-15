@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: seo-content-system
+  labels:
+    name: seo-content-system
+    environment: production

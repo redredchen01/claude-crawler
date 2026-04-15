@@ -1,0 +1,66 @@
+{
+  "test_time": "2026-04-14 12:47:04",
+  "cache_improvement_percent": 0.0,
+  "no_cache": {
+    "cache_enabled": false,
+    "num_runs": 3,
+    "runs": [
+      {
+        "run": 1,
+        "elapsed_sec": 0.298,
+        "scenes_count": 1,
+        "candidates_count": 3
+      },
+      {
+        "run": 2,
+        "elapsed_sec": 0.279,
+        "scenes_count": 1,
+        "candidates_count": 3
+      },
+      {
+        "run": 3,
+        "elapsed_sec": 0.274,
+        "scenes_count": 1,
+        "candidates_count": 3
+      }
+    ],
+    "stats": {
+      "min": 0.274,
+      "max": 0.298,
+      "avg": 0.284,
+      "first_run": 0.298,
+      "subsequent_avg": 0.277
+    }
+  },
+  "with_cache": {
+    "cache_enabled": true,
+    "num_runs": 3,
+    "runs": [
+      {
+        "run": 1,
+        "elapsed_sec": 0.276,
+        "scenes_count": 1,
+        "candidates_count": 3
+      },
+      {
+        "run": 2,
+        "elapsed_sec": 0.291,
+        "scenes_count": 1,
+        "candidates_count": 3
+      },
+      {
+        "run": 3,
+        "elapsed_sec": 0.286,
+        "scenes_count": 1,
+        "candidates_count": 3
+      }
+    ],
+    "stats": {
+      "min": 0.276,
+      "max": 0.291,
+      "avg": 0.284,
+      "first_run": 0.276,
+      "subsequent_avg": 0.288
+    }
+  }
+}

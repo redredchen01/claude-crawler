@@ -1,0 +1,72 @@
+#!/bin/bash
+# Clausidian 通用 CLI 入口 — 路由到 npm 全局 clausidian 命令或本地 TG Bot 工具
+
+set -e
+
+# 路由：如果是 clausidian 原生命令，传给全局 clausidian 工具
+# 如果是 workspace 相关命令（evolve/report/dash），路由到对应项目
+
+case "$1" in
+  # Clausidian 原生命令 — 直接转发
+  init|journal|note|capture|search|list|sync|watch|health|verify|stats|tag|graph|broken-links|orphans|duplicates|merge|batch|review|archive|update|delete|read|recent|random|backlinks|pin|rename|move|import|export|open|suggested|validate|note-created|note-updated|note-deleted|auto-tag|stale)
+    clausidian "$@"
+    ;;
+
+  # 工作區自動化命令
+  evolve)
+    echo "🌀 啟動系統自我迭代鏈..."
+    echo "🧹 進行工作空間整合清理..."
+    "$HOME/YD 2026/scripts/agent/doc-updater.sh"
+    "$HOME/YD 2026/scripts/agent/agent-tasks.sh" status
+    echo "🚀 執行元調度..."
+    "$HOME/YD 2026/scripts/meta-orchestrator.sh"
+    ;;
+
+  report)
+    echo "📊 生成並推送日報/週報..."
+    TG_BOT_DIR="/Users/dex/YD 2026/projects/production/claude_code_telegram_bot"
+    if [ "$2" == "weekly" ]; then
+      (cd "$TG_BOT_DIR" && node weekly-ops-report.mjs)
+    else
+      (cd "$TG_BOT_DIR" && node daily-work-report.mjs telegram)
+    fi
+    ;;
+
+  dash)
+    echo "🎨 重新生成視覺化儀表板..."
+    TG_BOT_DIR="/Users/dex/YD 2026/projects/production/claude_code_telegram_bot"
+    (cd "$TG_BOT_DIR" && node generate-dashboard.mjs)
+    ;;
+
+  sync-vault)
+    echo "🔄 同步 Obsidian 庫..."
+    "$HOME/YD 2026/scripts/obsidian-sync.sh"
+    ;;
+
+  *)
+    echo "Clausidian 統一入口"
+    echo ""
+    echo "Usage: clausidian <command> [options]"
+    echo ""
+    echo "Clausidian 原生命令："
+    echo "  init              - 初始化新 vault"
+    echo "  journal           - 建立今日日記"
+    echo "  note              - 建立筆記"
+    echo "  capture           - 快速記錄想法"
+    echo "  search            - 搜尋筆記"
+    echo "  sync              - 重建索引"
+    echo "  watch             - 監聽文件變化自動 sync"
+    echo "  review            - 生成週回顧/月回顧"
+    echo "  auto-tag          - 自動建議標籤"
+    echo "  stale             - 列出過期筆記"
+    echo "  tag|graph|stats   - 檢視統計和圖表"
+    echo ""
+    echo "工作區命令："
+    echo "  evolve            - 自我迭代鏈"
+    echo "  report [weekly]   - 日報/週報生成"
+    echo "  dash              - 儀表板重建"
+    echo "  sync-vault        - Obsidian vault 同步"
+    echo ""
+    echo "更多幫助：clausidian --help"
+    ;;
+esac

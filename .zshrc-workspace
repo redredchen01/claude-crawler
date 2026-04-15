@@ -1,0 +1,99 @@
+# YD 2026 Workspace Shortcuts
+# Source this from ~/.zshrc with: source ~/YD\ 2026/.zshrc-workspace
+
+export WORKSPACE_ROOT="${YD_WORKSPACE:-/Users/dex/YD 2026}"
+
+# 載入 session-wrap aliases（agent tools, viz, wrap）
+[ -f "$WORKSPACE_ROOT/.zshrc-wrap" ] && source "$WORKSPACE_ROOT/.zshrc-wrap"
+
+# 快速進入項目
+alias p1="cd '$WORKSPACE_ROOT/projects/production/gwx'"
+alias p2="cd '$WORKSPACE_ROOT/projects/production/claude_code_telegram_bot'"
+alias p3="cd '$WORKSPACE_ROOT/projects/production/video-watermark-removal-system'"
+alias p4="cd '$WORKSPACE_ROOT/projects/production/video-watermark-removal-system'"
+alias pw="cd '$WORKSPACE_ROOT'"
+alias pj="cd '$WORKSPACE_ROOT/projects'"
+
+# 知識庫 (kb, mem 由 .zshrc-wrap 統一定義)
+
+yd-info() {
+  sed -n '1,220p' "$WORKSPACE_ROOT/PROJECTS_INFO.md"
+}
+
+# GWX (Go CLI + npm package)
+alias gwx-install="p1 && make install"
+alias gwx-test="p1 && go test ./..."
+
+# TG Bot (Node.js)
+alias tg-start="p2 && npm start"
+alias tg-smoke="p2 && npm run smoke"
+
+# VWRS (Video Watermark Removal System)
+alias vwrs-install="p4 && pip install -r requirements.txt && pip install -e ."
+alias vwrs-help="p4 && python -m src.vwrs --help"
+alias vwrs-test="p4 && python -m pytest tests/"
+
+# 查看項目狀態
+yd-status() {
+  echo "📊 YD 2026 Workspace Status"
+  echo "================================"
+  for dir in projects/production/gwx projects/production/claude_code_telegram_bot projects/production/video-watermark-removal-system; do
+    cd "$WORKSPACE_ROOT/$dir" 2>/dev/null || continue
+    project=$(basename "$dir")
+    echo "✓ $project: $(git log -1 --format='%h %s' 2>/dev/null || echo 'no git')"
+  done
+  echo "================================"
+  cd "$WORKSPACE_ROOT"
+}
+
+# Skill 飛輪部署
+alias skill-deploy="bash '$WORKSPACE_ROOT/scripts/deploy/skill-deploy.sh'"
+alias skill-list="bash '$WORKSPACE_ROOT/scripts/deploy/skill-deploy.sh' --list"
+alias skill-status="bash '$WORKSPACE_ROOT/scripts/deploy/skill-deploy.sh' --status"
+
+# 新專案快速建立
+skill-new() {
+  local name="$1"
+  local type="${2:-tools}"  # tools | experimental | production
+  [ -z "$name" ] && echo "用法: skill-new <name> [tools|experimental|production]" && return 1
+  local dir="$WORKSPACE_ROOT/projects/$type/$name"
+  mkdir -p "$dir"
+  cd "$dir"
+  git init
+  cat > SKILL.md <<'SKILL_EOF'
+---
+name: PLACEHOLDER
+description: |
+  TODO: 描述你的 skill
+allowed-tools:
+  - Bash
+  - Read
+  - Write
+  - Glob
+  - Grep
+---
+
+# PLACEHOLDER
+
+## 觸發條件
+- TODO
+
+## 工作流程
+1. TODO
+SKILL_EOF
+  sed -i '' "s/PLACEHOLDER/$name/g" SKILL.md
+  echo "✅ 專案建立: $dir"
+  echo "   編輯 SKILL.md 開始開發"
+  echo "   完成後: skill-deploy $name"
+}
+
+# 同步知識庫和 Memory
+yd-sync() {
+  echo "🔄 Syncing workspace..."
+  # 添加你的同步邏輯
+  echo "✅ Sync complete"
+}
+alias yd-status="./scripts/agent/agent-tasks.sh status"
+alias yd-check="./scripts/agent/agent-check.sh"
+alias yd-sync="./scripts/agent/doc-updater.sh"
+source /Users/dex/YD 2026/scripts/agent/dynamic-shell-loader.sh

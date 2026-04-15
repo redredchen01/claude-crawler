@@ -1,0 +1,85 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cover-selector"
+version = "0.1.0"
+description = "Local video cover frame selector using rule-based analysis"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Cover Selector Contributors", email = "noreply@github.com"}
+]
+keywords = ["video", "frame-selection", "image-processing", "cover-image", "analysis"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Multimedia :: Graphics",
+]
+
+[project.urls]
+Homepage = "https://github.com/redredchen01/cover-selector-mvp"
+Repository = "https://github.com/redredchen01/cover-selector-mvp.git"
+Issues = "https://github.com/redredchen01/cover-selector-mvp/issues"
+Documentation = "https://github.com/redredchen01/cover-selector-mvp#readme"
+
+dependencies = [
+    "typer[all]>=0.9.0",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "scenedetect>=0.6.0",
+    "opencv-python>=4.8.0",
+    "pytesseract>=0.3.10",
+    "pillow>=10.0.0",
+    "psutil>=5.9.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=23.0",
+    "isort>=5.12",
+    "flake8>=6.0",
+    "mypy>=1.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages]
+find = {where = ["src"]}
+
+[project.scripts]
+cover-selector = "cover_selector.cli.main:app"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --cov=src/cover_selector --cov-report=term-missing"
+
+[tool.black]
+line-length = 100
+target-version = ['py39']
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false

@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>绩效核对邮件系统 - 极简部署版</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;700&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        :root {
+            --primary: #6366f1;
+            --primary-hover: #4f46e5;
+            --secondary: #ec4899;
+            --accent: #06b6d4;
+            --bg: #0f172a;
+            --card-bg: rgba(30, 41, 59, 0.7);
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --border: rgba(255, 255, 255, 0.1);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        }
+
+        body {
+            background-color: var(--bg);
+            background-image: 
+                radial-gradient(at 0% 0%, hsla(253,16%,7%,1) 0, transparent 50%), 
+                radial-gradient(at 50% 0%, hsla(225,39%,30%,1) 0, transparent 50%), 
+                radial-gradient(at 100% 0%, hsla(339,49%,30%,1) 0, transparent 50%);
+            min-height: 100vh;
+            color: var(--text-main);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2rem;
+            overflow-x: hidden;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 1000px;
+            animation: fadeIn 0.8s ease-out;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 3rem;
+        }
+
+        h1 {
+            font-family: 'Outfit', sans-serif;
+            font-size: 2.5rem;
+            background: linear-gradient(135deg, #fff 0%, #94a3b8 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 0.5rem;
+        }
+
+        p.subtitle {
+            color: var(--text-muted);
+            font-size: 1.1rem;
+        }
+
+        /* Glassmorphic Card */
+        .card {
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--border);
+            border-radius: 24px;
+            padding: 2.5rem;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            margin-bottom: 2rem;
+            transition: transform 0.3s ease;
+        }
+
+        /* Upload Area */
+        .upload-area {
+            border: 2px dashed var(--border);
+            border-radius: 16px;
+            padding: 3rem 2rem;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            position: relative;
+        }
+
+        .upload-area:hover {
+            border-color: var(--primary);
+            background: rgba(99, 102, 241, 0.05);
+        }
+
+        .upload-area.dragging {
+            border-color: var(--accent);
+            background: rgba(6, 182, 212, 0.1);
+            transform: scale(1.02);
+        }
+
+        .upload-icon {
+            color: var(--primary);
+            margin-bottom: 1rem;
+        }
+
+        .upload-text {
+            font-size: 1.2rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+
+        .upload-hint {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+        }
+
+        /* Table Area */
+        .table-container {
+            margin-top: 2rem;
+            display: none; /* Hidden by default */
+            overflow-x: auto;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9rem;
+        }
+
+        th {
+            background: rgba(15, 23, 42, 0.5);
+            padding: 1rem;
+            text-align: left;
+            color: var(--text-muted);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        td {
+            padding: 1rem;
+            border-top: 1px solid var(--border);
+        }
+
+        tr:hover {
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        /* Action Button */
+        #btn-send {
+            display: none;
+            margin-top: 2rem;
+            width: 100%;
+            padding: 1rem;
+            background: linear-gradient(135deg, var(--primary) 0%, var(--accent) 100%);
+            border: none;
+            border-radius: 12px;
+            color: white;
+            font-weight: 700;
+            font-size: 1.1rem;
+            cursor: pointer;
+            box-shadow: 0 10px 20px -5px rgba(99, 102, 241, 0.4);
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+
+        #btn-send:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 15px 25px -5px rgba(99, 102, 241, 0.5);
+            filter: brightness(1.1);
+        }
+
+        #btn-send:disabled {
+            background: #475569;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        /* Toast Notifications */
+        #toast {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            padding: 1rem 2rem;
+            border-radius: 12px;
+            background: var(--card-bg);
+            backdrop-filter: blur(10px);
+            border: 1px solid var(--border);
+            color: white;
+            transform: translateY(100px);
+            transition: transform 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.4);
+        }
+
+        #toast.show {
+            transform: translateY(0);
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .loading-spinner {
+            width: 24px;
+            height: 24px;
+            border: 3px solid rgba(255,255,255,0.1);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        footer {
+            margin-top: 4rem;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            text-align: center;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <header>
+            <h1>绩效核对邮件系统</h1>
+            <p class="subtitle">上传绩效表格，一键预览并核发确认邮件</p>
+        </header>
+
+        <section class="card">
+            <label for="file-input" class="upload-area" id="drop-zone">
+                <i data-lucide="cloud-upload" class="upload-icon" style="width: 48px; height: 48px;"></i>
+                <div class="upload-text">点击或拖拽 Excel 文件到这里</div>
+                <div class="upload-hint">支持 .xlsx, .xls 格式</div>
+                <input type="file" id="file-input" accept=".xlsx, .xls">
+            </label>
+
+            <div id="data-preview" class="table-container">
+                <table id="preview-table">
+                    <thead id="table-head"></thead>
+                    <tbody id="table-body"></tbody>
+                </table>
+            </div>
+
+            <button id="btn-send">
+                <span id="btn-text">确认并群发邮件</span>
+                <span id="btn-loader" style="display: none;"><div class="loading-spinner"></div></span>
+            </button>
+        </section>
+
+        <footer>
+            &copy; 2026 Performance Check System • Built with Flask & Vanilla CSS
+        </footer>
+    </div>
+
+    <div id="toast">
+        <i data-lucide="check-circle" id="toast-icon"></i>
+        <span id="toast-message">操作成功！</span>
+    </div>
+
+    <script>
+        // Initialize Lucide Icons
+        lucide.createIcons();
+
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+        const dataPreview = document.getElementById('data-preview');
+        const previewTableBody = document.getElementById('table-body');
+        const previewTableHead = document.getElementById('table-head');
+        const btnSend = document.getElementById('btn-send');
+        const toast = document.getElementById('toast');
+        const toastMsg = document.getElementById('toast-message');
+
+        let currentData = [];
+
+        // Drag & Drop Handlers
+        ['dragenter', 'dragover'].forEach(name => {
+            dropZone.addEventListener(name, (e) => {
+                e.preventDefault();
+                dropZone.classList.add('dragging');
+            });
+        });
+
+        ['dragleave', 'drop'].forEach(name => {
+            dropZone.addEventListener(name, (e) => {
+                e.preventDefault();
+                dropZone.classList.remove('dragging');
+            });
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            const files = e.dataTransfer.files;
+            if (files.length) handleUpload(files[0]);
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length) handleUpload(e.target.files[0]);
+        });
+
+        async function handleUpload(file) {
+            const formData = new FormData();
+            formData.append('file', file);
+
+            showToast('正在解析 Excel...', 'info');
+
+            try {
+                const response = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const result = await response.json();
+
+                if (result.error) {
+                    showToast(result.error, 'error');
+                } else {
+                    displayData(result.data);
+                    showToast('文件上传并解析成功！', 'success');
+                }
+            } catch (err) {
+                showToast('上传失败，请检查网络或服务器。', 'error');
+            }
+        }
+
+        function displayData(rows) {
+            if (!rows || rows.length === 0) return;
+
+            currentData = rows;
+            previewTableHead.innerHTML = '';
+            previewTableBody.innerHTML = '';
+
+            // Generate Headers
+            const headerRow = document.createElement('tr');
+            rows[0].forEach(cell => {
+                const th = document.createElement('th');
+                th.textContent = cell || '-';
+                headerRow.appendChild(th);
+            });
+            previewTableHead.appendChild(headerRow);
+
+            // Generate Body (limit to 10 rows for preview)
+            rows.slice(1, 11).forEach(row => {
+                const tr = document.createElement('tr');
+                row.forEach(cell => {
+                    const td = document.createElement('td');
+                    td.textContent = cell || '-';
+                    tr.appendChild(td);
+                });
+                previewTableBody.appendChild(tr);
+            });
+
+            dataPreview.style.display = 'block';
+            btnSend.style.display = 'flex';
+            btnSend.style.justifyContent = 'center';
+            btnSend.style.alignItems = 'center';
+            btnSend.style.gap = '10px';
+        }
+
+        btnSend.addEventListener('click', async () => {
+            btnSend.disabled = true;
+            document.getElementById('btn-text').textContent = '发送中...';
+            document.getElementById('btn-loader').style.display = 'block';
+
+            try {
+                const response = await fetch('/api/send', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ emails: currentData.slice(1) })
+                });
+                const result = await response.json();
+                
+                showToast(result.message, 'success');
+            } catch (err) {
+                showToast('发送失败，请重试。', 'error');
+            } finally {
+                btnSend.disabled = false;
+                document.getElementById('btn-text').textContent = '确认并群发邮件';
+                document.getElementById('btn-loader').style.display = 'none';
+            }
+        });
+
+        function showToast(message, type = 'success') {
+            toastMsg.textContent = message;
+            toast.className = 'show';
+            
+            // Icon change
+            const icon = document.getElementById('toast-icon');
+            if (type === 'error') {
+                icon.setAttribute('data-lucide', 'alert-circle');
+                toast.style.borderColor = '#ef4444';
+            } else if (type === 'info') {
+                icon.setAttribute('data-lucide', 'loader');
+                toast.style.borderColor = 'var(--accent)';
+            } else {
+                icon.setAttribute('data-lucide', 'check-circle');
+                toast.style.borderColor = 'var(--primary)';
+            }
+            lucide.createIcons();
+
+            setTimeout(() => {
+                toast.className = '';
+            }, 3000);
+        }
+    </script>
+</body>
+</html>

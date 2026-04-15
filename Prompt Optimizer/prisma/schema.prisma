@@ -1,0 +1,256 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                 String    @id @default(cuid())
+  email              String    @unique
+  password           String
+  role               String    @default("USER") // "ADMIN" or "USER"
+  defaultTeamId      String?   // Primary team context for multi-team users
+  deletionRequestedAt DateTime? // For GDPR deletion request tracking
+  records            OptimizationRecord[]
+  apiKeys            ApiKey[]
+  webhooks           WebhookConfig[]
+  jobs               OptimizationJob[]
+  batchJobs          BatchOptimizationJob[]
+  preferences        UserPreference?
+  sessions           Session[]
+  teams              TeamMember[]
+  auditLogs          AuditLog[]
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@index([email])
+  @@index([deletionRequestedAt])
+}
+
+model ApiKey {
+  id            String   @id @default(cuid())
+  key           String   @unique
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  teamId        String?  // NULL = personal key, otherwise team-scoped key
+  ipWhitelist   String?  // "192.168.1.1,10.0.0.0/8" or null for any IP
+  endpoints     String?  // JSON array: ["score","optimize-full"] or null for all
+  readonly      Boolean  @default(false) // Can't modify team/keys if true
+  expiresAt     DateTime? // Auto-revoke after date
+  createdAt     DateTime @default(now())
+  lastUsed      DateTime?
+  active        Boolean  @default(true)
+
+  @@index([userId])
+  @@index([key])
+  @@index([teamId])
+  @@index([expiresAt])
+}
+
+model WebhookConfig {
+  id        String   @id @default(cuid())
+  userId    String?
+  teamId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team      Team?    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  url       String
+  scope     String   @default("all") // "score", "optimize-full", or "all"
+  active    Boolean  @default(true)
+  secret    String   // for HMAC verification
+  events    WebhookEvent[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([teamId])
+  @@unique([userId, url])
+}
+
+model WebhookEvent {
+  id           String   @id @default(cuid())
+  configId     String
+  config       WebhookConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+  eventType    String   // "rate_limit_warning"
+  payload      String   // JSON
+  attempts     Int      @default(0)
+  lastError    String?
+  deliveredAt  DateTime?
+  createdAt    DateTime @default(now())
+
+  @@index([configId])
+  @@index([deliveredAt])
+}
+
+model OptimizationJob {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status    String   @default("running") // "running", "cancelled", "completed", "failed"
+  result    String?  // JSON serialized optimization result
+  error     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  cancelledAt DateTime?
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expires      DateTime
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model OptimizationRecord {
+  id                      String   @id @default(uuid())
+  raw_prompt              String
+  raw_score               String   // JSON serialized
+  raw_score_total         Int?     // denormalized total for fast queries
+  optimized_prompt        String?
+  optimized_score         String?  // JSON serialized
+  optimized_score_total   Int?     // denormalized total for fast queries
+  optimization_explanation String?
+  userId                  String?
+  user                    User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  created_at              DateTime @default(now())
+  updated_at              DateTime @updatedAt
+
+  @@index([created_at])
+  @@index([userId])
+  @@index([userId, created_at])
+}
+
+model Team {
+  id                 String   @id @default(cuid())
+  name               String
+  slug               String   @unique
+  orgId              String?  // Parent organization (for future org support)
+  stripeCustomerId   String?  // Stripe customer ID for billing
+  subscriptionStatus String   @default("inactive") // "active", "inactive", "cancelled", "past_due"
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  members    TeamMember[]
+  quotas     TeamQuota[]
+  webhooks   WebhookConfig[]
+  batchJobs  BatchOptimizationJob[]
+  auditLogs  AuditLog[]
+
+  @@index([slug])
+  @@index([createdAt])
+  @@index([stripeCustomerId])
+}
+
+model TeamMember {
+  id       String   @id @default(cuid())
+  teamId   String
+  userId   String
+  role     String   // "admin", "editor", "viewer"
+  joinedAt DateTime @default(now())
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, userId])
+  @@index([teamId])
+  @@index([userId])
+}
+
+model TeamQuota {
+  id           String   @id @default(cuid())
+  teamId       String   @unique
+  monthlyLimit Int      @default(100000)
+  currentUsage Int      @default(0)
+  resetAt      DateTime
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([teamId])
+  @@index([resetAt])
+}
+
+model AuditLog {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  teamId       String?
+  team         Team?    @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  action       String   // AuditAction enum value
+  resourceType String
+  resourceId   String
+  changes      String?  // JSON serialized changes
+  ipAddress    String?
+  userAgent    String?
+  status       String   @default("success") // "success" or "failure"
+  errorMessage String?
+  createdAt    DateTime @default(now())
+
+  @@index([userId])
+  @@index([teamId])
+  @@index([resourceType])
+  @@index([action])
+  @@index([createdAt])
+}
+
+model BatchOptimizationJob {
+  id               String   @id @default(cuid())
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  teamId           String?
+  team             Team?    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  status           String   @default("pending") // "pending", "processing", "completed", "failed", "cancelled"
+  totalItems       Int
+  processedItems   Int      @default(0)
+  failedItems      Int      @default(0)
+  batchName        String
+  prompts          String   // JSON array of prompts
+  results          String?  // JSON array of results
+  resultsUrl       String?  // URL to download results
+  error            String?
+  createdAt        DateTime @default(now())
+  startedAt        DateTime?
+  completedAt      DateTime?
+  updatedAt        DateTime @updatedAt
+
+  @@index([userId])
+  @@index([teamId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([status, createdAt]) // Composite index for dashboard queries (status + time filtering)
+  @@index([userId, status]) // Composite for user batch filtering
+}
+
+model UserPreference {
+  id                      String   @id @default(cuid())
+  userId                  String   @unique
+  user                    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  language                String   @default("en")
+  timezone                String   @default("UTC")
+  theme                   String   @default("system") // "light", "dark", or "system"
+  emailNotifications      String   // JSON: {batchCompleted, batchFailed, weeklyReport, monthlyReport}
+  privacySettings         String   // JSON: {shareAnalytics, allowDataExport}
+  defaultBatchSettings    String   // JSON: {defaultEndpoint, autoProcess, notifyOnCompletion}
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  @@index([userId])
+}

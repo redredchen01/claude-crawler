@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: seo-content-config
+  namespace: seo-content-system
+  labels:
+    app: seo-content-api
+    version: v1
+data:
+  NODE_ENV: "production"
+  PORT: "3000"
+  LOG_LEVEL: "info"
+  API_PREFIX: "/api/v1"
+  SERP_PROVIDER: "playwright"
+  TREND_PROVIDER: "google-trends"
+  REDIS_URL: "redis://redis-service:6379"
+  DATABASE_URL: "sqlite:///data/seo-content.db"
+  CORS_ORIGIN: "https://seo-content.example.com"
+  # Worker configuration
+  WORKER_CONCURRENCY: "4"
+  WORKER_TIMEOUT: "30000"
+  # Rate limiting
+  RATE_LIMIT_WINDOW: "60"
+  RATE_LIMIT_MAX_REQUESTS: "100"
+  # Cache configuration
+  CACHE_TTL: "3600"
+  CACHE_MAX_SIZE: "1000"
+  # Logging
+  LOG_FORMAT: "json"
+  LOG_COLORIZE: "false"
+  # Feature flags
+  FEATURE_SERP_SCRAPING: "true"
+  FEATURE_TREND_ANALYSIS: "true"
+  FEATURE_MULTI_LANGUAGE: "true"
+  FEATURE_INTERNAL_LINKS: "true"

@@ -1,0 +1,42 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bash \"/Users/dex/YD 2026/login-agents.sh\")",
+      "Bash(codex auth:*)",
+      "Bash(codex --help)",
+      "Bash(npm install:*)",
+      "Bash(qodercli --version)",
+      "Bash(qodercli auth:*)",
+      "Bash(qodercli --help)",
+      "Skill(update-config)",
+      "Skill(triple-publish)",
+      "Bash(timeout 10 npm run dev)",
+      "Bash(ffprobe:*)",
+      "Skill(version-sync)",
+      "Bash(ffmpeg -i '/Users/dex/Downloads/【3D】 マッチングアプリで知り合った女がサキュバスだった話_clean.mp4' -af \"astats=metadata=1:reset=30,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=/tmp/rms_levels.txt\" -f null -)",
+      "Read(//tmp/**)",
+      "Bash(ffmpeg -i '/Users/dex/Downloads/【3D】 マッチングアプリで知り合った女がサキュバスだった話_clean.mp4' -filter:v \"select=''''gt\\(scene,0.3\\)'''',showinfo\" -f null -)",
+      "Bash(ln:*)",
+      "Bash(npm view:*)",
+      "Bash(python3:*)",
+      "Bash(npx remotion:*)",
+      "Bash(rm -f \"/Users/dex/YD 2026/projects/experimental/remotion-clip/public/source.mp4\")",
+      "Bash(cp '/Users/dex/Downloads/【3D】 マッチングアプリで知り合った女がサキュバスだった話_clean.mp4' \"/Users/dex/YD 2026/projects/experimental/remotion-clip/public/source.mp4\")",
+      "Read(//Users/dex/Downloads/**)",
+      "Bash(ls -la /Users/dex/Downloads/*3D*)",
+      "Bash(ls -la /Users/dex/Downloads/*マッチング*)",
+      "Bash(find /Users/dex/Downloads -name *clean* -type f)",
+      "Bash(rm:*)",
+      "Bash(echo $OPENAI_API_KEY)",
+      "Bash(PYTHON=/opt/homebrew/Caskroom/miniforge/base/envs/ghost-remover/bin/python3)",
+      "Bash($PYTHON -c \":*)",
+      "Bash(/opt/homebrew/Caskroom/miniforge/base/envs/ghost-remover/bin/python3 -c \":*)",
+      "Bash(1 1)",
+      "Bash(\"/Users/dex/YD 2026/projects/experimental/remotion-clip/signals_cache/transcript.json\")",
+      "Bash(pkill -f \"whisper-base\")",
+      "Bash(__NEW_LINE_f6d4417299678998__ /opt/homebrew/Caskroom/miniforge/base/envs/ghost-remover/bin/python3:*)",
+      "Bash(cp /tmp/dry_run_demo.md /Users/dex/.claude/plugins/cache/claude-plugins-official/skill-creator/72b975468071/skills/api-aggregation-notifier-workspace/iteration-1/eval-2/with_skill/outputs/)",
+      "Bash(cp /tmp/scheduling_guide.md /Users/dex/.claude/plugins/cache/claude-plugins-official/skill-creator/72b975468071/skills/api-aggregation-notifier-workspace/iteration-1/eval-2/with_skill/outputs/)"
+    ]
+  }
+}

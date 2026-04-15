@@ -1,0 +1,57 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Global Styles */
+* {
+  @apply transition-colors duration-200;
+}
+
+body {
+  @apply bg-slate-50 text-slate-900;
+}
+
+/* Utility Classes */
+.btn {
+  @apply px-4 py-2 rounded font-medium cursor-pointer transition-colors;
+}
+
+.btn-primary {
+  @apply bg-blue-600 text-white hover:bg-blue-700;
+}
+
+.btn-secondary {
+  @apply bg-slate-200 text-slate-900 hover:bg-slate-300;
+}
+
+.btn-sm {
+  @apply px-3 py-1 text-sm;
+}
+
+.card {
+  @apply bg-white rounded-lg border border-slate-200 p-4 shadow-sm;
+}
+
+.input {
+  @apply px-3 py-2 border border-slate-300 rounded font-medium focus:outline-none focus:border-blue-500;
+}
+
+.badge {
+  @apply inline-block px-2 py-1 text-sm font-medium rounded;
+}
+
+.badge-success {
+  @apply bg-green-100 text-green-800;
+}
+
+.badge-warning {
+  @apply bg-yellow-100 text-yellow-800;
+}
+
+.badge-danger {
+  @apply bg-red-100 text-red-800;
+}
+
+.loading-spinner {
+  @apply inline-block w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin;
+}

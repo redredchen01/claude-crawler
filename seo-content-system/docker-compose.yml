@@ -1,0 +1,88 @@
+version: "3.9"
+
+services:
+  # Backend API service
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: seo-content-api
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      LOG_LEVEL: info
+      DATABASE_URL: sqlite:///data/seo-content.db
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-in-production}
+      API_PREFIX: /api/v1
+      SERP_PROVIDER: playwright
+      TREND_PROVIDER: google-trends
+      REDIS_URL: redis://cache:6379
+      CORS_ORIGIN: "http://localhost:5173"
+    volumes:
+      - ./backend/src:/app/src
+      - ./data:/data
+      - /app/node_modules
+    depends_on:
+      - cache
+      - db
+    networks:
+      - seo-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Frontend service
+  web:
+    image: node:20-alpine
+    container_name: seo-content-web
+    working_dir: /app
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_URL: http://localhost:3000/api/v1
+      NODE_ENV: development
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: sh -c "npm install && npm run dev"
+    depends_on:
+      - api
+    networks:
+      - seo-network
+    restart: unless-stopped
+
+  # Redis cache
+  cache:
+    image: redis:7-alpine
+    container_name: seo-content-cache
+    ports:
+      - "6379:6379"
+    volumes:
+      - cache-data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - seo-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # SQLite database (via volume for persistence)
+  # Note: SQLite is file-based, no separate service needed
+  # Database file stored in ./data/seo-content.db
+
+volumes:
+  cache-data:
+    driver: local
+
+networks:
+  seo-network:
+    driver: bridge

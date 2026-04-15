@@ -1,0 +1,65 @@
+{
+  "version": "1.0.0",
+  "strategies": [
+    {
+      "type": "original",
+      "enabled": true,
+      "description": "Original seed keyword"
+    },
+    {
+      "type": "space_modifier",
+      "enabled": true,
+      "description": "Double the keyword with space"
+    },
+    {
+      "type": "a_z_suffix",
+      "enabled": true,
+      "description": "Add a-z letters as suffixes"
+    },
+    {
+      "type": "numeric_suffix",
+      "enabled": true,
+      "description": "Add numbers and years as suffixes"
+    },
+    {
+      "type": "question_modifiers",
+      "enabled": true,
+      "modifiers": ["怎么", "如何", "为什么", "是什么", "哪个好", "有什么区别"],
+      "description": "Common question words in Chinese"
+    },
+    {
+      "type": "comparison_modifiers",
+      "enabled": true,
+      "modifiers": ["vs", "区别", "比较", "哪个更好"],
+      "description": "Comparison-related modifiers"
+    },
+    {
+      "type": "commercial_modifiers",
+      "enabled": true,
+      "modifiers": ["推荐", "价格", "费用", "购买", "优惠", "排行"],
+      "description": "Commercial intent modifiers"
+    },
+    {
+      "type": "scenario_modifiers",
+      "enabled": true,
+      "modifiers": ["新手", "教程", "步骤", "公司", "个人", "手机", "电脑"],
+      "description": "Context/scenario modifiers"
+    },
+    {
+      "type": "location_modifiers",
+      "enabled": false,
+      "modifiers": ["中国", "北京", "上海", "台湾", "香港", "新加坡", "美国"],
+      "description": "Geographic location modifiers (disabled by default)"
+    }
+  ],
+  "limits": {
+    "maxCandidatesPerStrategy": 100,
+    "totalMaxCandidates": 1000,
+    "expandDepth": 1
+  },
+  "options": {
+    "deduplication": true,
+    "preserveSourceType": true,
+    "trackDepth": true
+  }
+}

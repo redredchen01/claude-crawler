@@ -1,0 +1,43 @@
+{
+  "name": "session-wrap-skill",
+  "version": "3.1.0",
+  "description": "Universal AI agent memory persistence — auto-save project context at session end. Works with Claude Code, Codex, Gemini CLI, Cursor, Windsurf, Cline, Roo Code, Copilot, Amp, OpenClaw, OpenHands, Amazon Q, and more.",
+  "keywords": [
+    "ai-agent",
+    "claude-code",
+    "codex",
+    "gemini-cli",
+    "cursor",
+    "windsurf",
+    "cline",
+    "openclaw",
+    "openhands",
+    "amazon-q",
+    "memory",
+    "persistence",
+    "session",
+    "context",
+    "skill",
+    "developer-tools"
+  ],
+  "author": "redredchen01",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/redredchen01/session-wrap-skill.git"
+  },
+  "homepage": "https://github.com/redredchen01/session-wrap-skill",
+  "bugs": {
+    "url": "https://github.com/redredchen01/session-wrap-skill/issues"
+  },
+  "bin": {
+    "session-wrap-skill": "bin/install.js"
+  },
+  "files": [
+    "SKILL.md",
+    "README.md",
+    "LICENSE",
+    "bin/",
+    "install.sh"
+  ]
+}
