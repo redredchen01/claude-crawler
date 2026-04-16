@@ -2,21 +2,28 @@
 
 import logging
 import queue
+import sqlite3
 import time
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse, urlunparse
 from urllib.robotparser import RobotFileParser
-
-from bs4 import BeautifulSoup
 
 from crawler.core.frontier import Frontier
 from crawler.core.fetcher import fetch_page, needs_js_rendering
-from crawler.storage import init_db, create_scan_job, update_scan_job, insert_page, update_page
+from crawler.parser import parse_page
+from crawler.storage import (
+    init_db, create_scan_job, update_scan_job, insert_page, update_page,
+    save_resource_with_tags,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def _check_robots(url: str, robots_cache: dict[str, RobotFileParser | None], user_agent: str) -> bool:
-    """Check robots.txt for the given URL. Caches per domain."""
+    """Check robots.txt for the given URL. Caches per domain.
+
+    If robots.txt cannot be fetched or parsed (403, 404, timeout, etc.),
+    allow crawling per RFC 9309.
+    """
     parsed = urlparse(url)
     domain = parsed.netloc
     if domain not in robots_cache:
@@ -25,7 +32,13 @@ def _check_robots(url: str, robots_cache: dict[str, RobotFileParser | None], use
         rp.set_url(robots_url)
         try:
             rp.read()
-            robots_cache[domain] = rp
+            # RobotFileParser.read() silently fails on 403/404 — entries will be empty
+            # and can_fetch defaults to deny-all. Treat empty entries as "no restrictions".
+            if not rp.entries:
+                logger.warning("robots.txt unreadable for %s (empty/403/404), allowing all", domain)
+                robots_cache[domain] = None
+            else:
+                robots_cache[domain] = rp
         except Exception:
             logger.warning("Could not fetch robots.txt for %s, allowing all", domain)
             robots_cache[domain] = None
@@ -35,15 +48,15 @@ def _check_robots(url: str, robots_cache: dict[str, RobotFileParser | None], use
     return rp.can_fetch(user_agent, url)
 
 
-def _extract_links(html: str, base_url: str) -> list[str]:
-    """Extract absolute URLs from <a href> tags."""
-    soup = BeautifulSoup(html, "html.parser")
-    links = []
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        absolute = urljoin(base_url, href)
-        links.append(absolute)
-    return links
+def _normalize_url(url: str) -> str:
+    """Normalize URL for deduplication: strip fragment, lowercase domain, lowercase path."""
+    parsed = urlparse(url)
+    netloc = parsed.netloc.lower()
+    path = parsed.path or "/"
+    # Remove trailing slash for consistency
+    if path != "/" and path.endswith("/"):
+        path = path.rstrip("/")
+    return urlunparse((parsed.scheme, netloc, path, parsed.params, parsed.query, ""))
 
 
 def _send_progress(progress_queue: queue.Queue | None, data: dict) -> None:
@@ -71,6 +84,7 @@ def run_crawl(
     frontier = Frontier(entry_url, max_pages, max_depth)
     robots_cache: dict[str, RobotFileParser | None] = {}
     pages_done = 0
+    resources_found = 0
 
     try:
         while not frontier.is_done() and pages_done < max_pages:
@@ -101,10 +115,36 @@ def run_crawl(
 
             pages_done += 1
 
-            # Extract and push links
+            # Parse page: extract resources, links, and page type
             if html:
-                links = _extract_links(html, url)
-                for link in links:
+                result = parse_page(html, url)
+
+                # Update page type from parser
+                if page_id:
+                    update_page(db_path, page_id, page_type=result.page_type)
+
+                # Save extracted resources (use batch connection for efficiency)
+                # Batch: open connection once, save all resources, close once
+                if result.resources:
+                    batch_conn = sqlite3.connect(db_path)
+                    batch_conn.execute("PRAGMA journal_mode=WAL")
+                    batch_conn.execute("PRAGMA foreign_keys=ON")
+                    batch_conn.row_factory = sqlite3.Row
+                    try:
+                        for resource in result.resources:
+                            # Normalize URL to reduce duplicates
+                            resource.url = _normalize_url(resource.url)
+                            resource.scan_job_id = scan_job_id
+                            resource.page_id = page_id
+                            saved_id = save_resource_with_tags(db_path, resource, conn=batch_conn)
+                            if saved_id:
+                                resources_found += 1
+                        batch_conn.commit()
+                    finally:
+                        batch_conn.close()
+
+                # Push discovered links to frontier
+                for link in result.links:
                     frontier.push(link, depth + 1)
 
             # Progress
@@ -119,7 +159,8 @@ def run_crawl(
             if not frontier.is_done():
                 time.sleep(rate_limit)
 
-        update_scan_job(db_path, scan_job_id, status="completed", pages_scanned=pages_done)
+        update_scan_job(db_path, scan_job_id, status="completed",
+                        pages_scanned=pages_done, resources_found=resources_found)
         _send_progress(progress_queue, {
             "pages_done": pages_done,
             "pages_total": max_pages,

@@ -9,7 +9,8 @@ from unittest.mock import patch, MagicMock
 
 from crawler.core.frontier import Frontier
 from crawler.core.fetcher import needs_js_rendering
-from crawler.core.engine import run_crawl, _extract_links
+from crawler.core.engine import run_crawl
+from crawler.parser import parse_page
 
 
 # ── Frontier Tests ──
@@ -172,17 +173,18 @@ class TestNeedsJsRendering:
 class TestExtractLinks:
     def test_extracts_absolute_links(self):
         html = '<html><body><a href="https://example.com/page">link</a></body></html>'
-        links = _extract_links(html, "https://example.com/")
-        assert "https://example.com/page" in links
+        result = parse_page(html, "https://example.com/")
+        assert "https://example.com/page" in result.links
 
     def test_resolves_relative_links(self):
         html = '<html><body><a href="/about">link</a></body></html>'
-        links = _extract_links(html, "https://example.com/page")
-        assert "https://example.com/about" in links
+        result = parse_page(html, "https://example.com/page")
+        assert "https://example.com/about" in result.links
 
     def test_no_links(self):
         html = "<html><body>no links</body></html>"
-        assert _extract_links(html, "https://example.com/") == []
+        result = parse_page(html, "https://example.com/")
+        assert result.links == []
 
 
 # ── Engine Tests ──
@@ -277,3 +279,63 @@ class TestEngine:
             job = get_scan_job(db_path, job_id)
             assert job.status == "completed"
             assert job.pages_scanned >= 1
+
+    @patch("crawler.core.engine._check_robots", return_value=True)
+    @patch("crawler.core.engine.fetch_page")
+    @patch("crawler.core.engine.time.sleep")
+    def test_resources_persisted_after_crawl(self, mock_sleep, mock_fetch, mock_robots):
+        """Crawled detail pages should have resources saved to DB."""
+        html = (
+            '<html><head><meta property="og:title" content="Test Article"></head>'
+            '<body><article><h1>Test Article</h1>'
+            '<p>' + 'content ' * 200 + '</p>'
+            '<a rel="tag">python</a><a rel="tag">web</a>'
+            '<span>views 1234</span>'
+            '</article></body></html>'
+        )
+        mock_fetch.return_value = html
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            job_id = run_crawl("https://example.com/post/123", db_path, max_pages=1, rate_limit=0)
+
+            from crawler.storage import get_scan_job, get_resources
+            job = get_scan_job(db_path, job_id)
+            assert job.resources_found >= 1
+
+            resources = get_resources(db_path, job_id)
+            assert len(resources) >= 1
+            assert resources[0].title == "Test Article"
+            assert "python" in resources[0].tags
+
+
+class TestRobotsTxt:
+    def test_empty_entries_allows_crawl(self):
+        """robots.txt returning 403/404 (empty entries) should allow crawling."""
+        from crawler.core.engine import _check_robots
+
+        cache: dict = {}
+        # Mock RobotFileParser.read() to produce empty entries (simulates 403)
+        with patch("crawler.core.engine.RobotFileParser") as MockRP:
+            rp_instance = MockRP.return_value
+            rp_instance.entries = []  # empty = 403/404 response
+            rp_instance.read.return_value = None
+
+            allowed = _check_robots("https://example.com/page", cache, "TestBot/1.0")
+            assert allowed is True
+            assert cache.get("example.com") is None  # cached as None = allow all
+
+    def test_valid_entries_respected(self):
+        """Valid robots.txt with disallow rules should be enforced."""
+        from crawler.core.engine import _check_robots
+        from urllib.robotparser import RobotFileParser
+
+        cache: dict = {}
+        with patch("crawler.core.engine.RobotFileParser") as MockRP:
+            rp_instance = MockRP.return_value
+            rp_instance.entries = ["non-empty"]  # has valid entries
+            rp_instance.read.return_value = None
+            rp_instance.can_fetch.return_value = False
+
+            allowed = _check_robots("https://example.com/blocked", cache, "TestBot/1.0")
+            assert allowed is False

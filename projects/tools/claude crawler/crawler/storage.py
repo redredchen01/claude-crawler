@@ -261,15 +261,65 @@ def get_resources_by_tag(db_path: str, tag_id: int, limit: int = 10) -> list[Res
         return [Resource(**dict(r)) for r in rows]
 
 
-def save_resource_with_tags(db_path: str, resource: Resource) -> int | None:
-    """Insert resource and link its tags. Returns resource_id or None if duplicate."""
-    resource_id = insert_resource(db_path, resource)
-    if resource_id is None:
-        return None
-    for tag_name in resource.tags:
-        tag_name = tag_name.strip()
-        if not tag_name:
-            continue
-        tag_id = get_or_create_tag(db_path, resource.scan_job_id, tag_name)
-        link_resource_tag(db_path, resource_id, tag_id)
-    return resource_id
+def save_resource_with_tags(db_path: str, resource: Resource, conn: sqlite3.Connection | None = None) -> int | None:
+    """Insert resource and link its tags. Returns resource_id or None if duplicate.
+
+    If conn is provided, reuses it (batch mode); otherwise opens its own connection.
+    Batch mode is more efficient when called in a loop.
+    """
+    close_conn = False
+    if conn is None:
+        conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.row_factory = sqlite3.Row
+        close_conn = True
+
+    try:
+        # Insert resource
+        cursor = conn.execute(
+            """INSERT OR IGNORE INTO resources
+               (scan_job_id, page_id, title, url, cover_url, views, likes, hearts,
+                category, published_at, raw_data)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (resource.scan_job_id, resource.page_id, resource.title,
+             resource.url, resource.cover_url, resource.views, resource.likes,
+             resource.hearts, resource.category, resource.published_at, resource.raw_data),
+        )
+        resource_id = cursor.lastrowid if cursor.rowcount > 0 else None
+
+        if resource_id is None:
+            return None
+
+        # Link tags (batch-friendly)
+        for tag_name in resource.tags:
+            tag_name = tag_name.strip()
+            if not tag_name:
+                continue
+            # Get or create tag
+            row = conn.execute(
+                "SELECT id FROM tags WHERE scan_job_id = ? AND name = ?",
+                (resource.scan_job_id, tag_name),
+            ).fetchone()
+            if row:
+                tag_id = row["id"]
+            else:
+                cursor = conn.execute(
+                    "INSERT INTO tags (scan_job_id, name) VALUES (?, ?)",
+                    (resource.scan_job_id, tag_name),
+                )
+                tag_id = cursor.lastrowid
+
+            # Link resource-tag
+            conn.execute(
+                "INSERT OR IGNORE INTO resource_tags (resource_id, tag_id) VALUES (?, ?)",
+                (resource_id, tag_id),
+            )
+
+        if close_conn:
+            conn.commit()
+        return resource_id
+
+    finally:
+        if close_conn:
+            conn.close()

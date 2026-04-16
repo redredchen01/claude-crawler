@@ -75,22 +75,39 @@ def _detect_page_type(html: str, url: str, soup: BeautifulSoup) -> str:
     if "/tag/" in url or "/tags/" in url:
         return "tag"
 
+    # Detail pages — single main content with rich metadata (check before list)
+    path = urlparse(url).path.strip("/")
+    is_root = not path  # homepage / index
+    main_block = soup.select_one("article") or soup.select_one("main") or soup.select_one(".post")
+    if main_block and not is_root:
+        og_title = _extract_meta(soup, "og:title")
+        h1 = soup.find("h1")
+        has_meta = bool(og_title or h1 or soup.find("time"))
+        if has_meta:
+            # Disambiguate: if the URL looks like a specific item (has numeric ID or slug),
+            # it's more likely a detail page even if it also has list-like elements
+            segments = path.split("/")
+            has_item_id = any(seg.isdigit() for seg in segments)
+            if has_item_id:
+                return "detail"
+            # Without numeric ID, need stronger signals to distinguish from index pages
+            if h1 and og_title:
+                return "detail"
+            # <article> with <h1> is a strong detail signal
+            if soup.select_one("article") and h1:
+                return "detail"
+
     # List pages — look for repeated card-like elements
-    for selector in ["article", "div.card", ".card", "ul li"]:
+    for selector in ["article", "div.card", ".card"]:
         elements = soup.select(selector)
         if len(elements) > 3:
             return "list"
 
-    # Detail pages — single main content with metadata
-    main_block = soup.select_one("article") or soup.select_one("main") or soup.select_one(".post")
-    if main_block:
-        has_meta = bool(
-            _extract_meta(soup, "og:title")
-            or soup.find("h1")
-            or soup.find("time")
-        )
-        if has_meta:
-            return "detail"
+    # Fallback list detection: repeated <a> with images (card grids)
+    all_links = soup.select("a[href]")
+    link_cards = [a for a in all_links if a.find("img") and a.get_text(strip=True)]
+    if len(link_cards) > 5:
+        return "list"
 
     return "other"
 
@@ -130,11 +147,11 @@ def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
         t = _clean_text(a.get_text(strip=True))
         if t and t not in tags:
             tags.append(t)
-    # Elements with class containing "tag"
+    # Elements with class containing "tag" — match both a[class*="tag"] and [class*="tag"] a
     if not tags:
-        for el in soup.select('[class*="tag"] a'):
+        for el in soup.select('a[class*="tag"], [class*="tag"] a'):
             t = _clean_text(el.get_text(strip=True))
-            if t and t not in tags:
+            if t and t not in tags and t != "+":
                 tags.append(t)
 
     # Metrics
@@ -193,30 +210,48 @@ def _extract_list_resources(soup: BeautifulSoup, url: str) -> list[Resource]:
     cards = soup.select("article")
     if len(cards) <= 1:
         cards = soup.select("div.card, .card")
+    # Fallback: repeated <a> elements with images (common in CMS card grids)
     if len(cards) <= 1:
-        cards = soup.select("ul li")
+        all_links = soup.select("a[href]")
+        cards = [a for a in all_links if a.find("img") and a.get_text(strip=True)]
 
     for card in cards:
-        a_tag = card.find("a", href=True)
-        if not a_tag:
-            continue
+        # If the card itself is an <a>, use it directly; otherwise find nested <a>
+        if card.name == "a" and card.get("href"):
+            a_tag = card
+        else:
+            a_tag = card.find("a", href=True)
+            if not a_tag:
+                continue
 
         # Title
         heading = card.find(re.compile(r"^h[1-6]$"))
-        title = _clean_text(heading.get_text(strip=True)) if heading else _clean_text(a_tag.get_text(strip=True))
+        if heading:
+            title = _clean_text(heading.get_text(strip=True))
+        else:
+            # For <a> cards, prefer figcaption or dedicated text element over full a_tag text
+            figcaption = card.find("figcaption")
+            if figcaption:
+                title = _clean_text(figcaption.get_text(strip=True))
+            else:
+                title = _clean_text(a_tag.get_text(strip=True))
 
         # URL
         res_url = urljoin(url, a_tag["href"])
 
-        # Cover
+        # Cover — prefer data-src (lazy-loaded) over src placeholder
         img = card.find("img")
-        cover = urljoin(url, img["src"]) if img and img.get("src") else ""
+        if img:
+            img_src = img.get("data-src") or img.get("src") or ""
+            cover = urljoin(url, img_src) if img_src else ""
+        else:
+            cover = ""
 
         # Tags (optional in cards)
         tags: list[str] = []
-        for tag_el in card.select('a[rel="tag"], [class*="tag"] a'):
+        for tag_el in card.select('a[rel="tag"], a[class*="tag"], [class*="tag"] a'):
             t = _clean_text(tag_el.get_text(strip=True))
-            if t and t not in tags:
+            if t and t not in tags and t != "+":
                 tags.append(t)
 
         # Metrics (optional)
