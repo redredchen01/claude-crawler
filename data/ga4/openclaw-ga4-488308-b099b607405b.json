@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "openclaw-ga4-488308",
+  "private_key_id": "b099b607405bcb5bd1755f4eadc652f479ab7a38",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDbgSatkpMn8pOd\nla+Nx3YLhgE1thd65ViP+30hf8jDQlu4ztqWakdgGQLjIYi6JBOGp2Z9j+e1Z25h\n4TRs5nLz2xvexRBSMfZp8684DQyIJxKbLpUT+iuvmDzpsS47xv3pQkIyh2p+zIXh\nRefTvh163r7AZjRYPDRjmuBII0LFBM5peAbcelLkif0rtH7sTNt1U2kEo5pyAejA\ndARI+DAm2NRxQtubpYZxdzkiW+G6ztnPD4Z1P7BPT8DDGmJl3EjT0piidn/7Kfft\nSk/W48zrP79RNFWwi6dhsh4EHgQEaoOJi7i3hsFkQhUX18Q89haJwl7Wggko2WSR\nXupFA8hrAgMBAAECggEAM0gOEDkRNiD/Ca7hz77Mvk51U+YRwD16nlDD4CKpday4\nHwn8mW2E9VeCjCvWdJ5fDXNoh2cqXAApEqb5h4OjUYNcFIR3lqxjhEdRJUgvKFPw\njd6pJ3yn3iMz/+jMA10vDuLS8lkesTb5BDM/wQFGg+EsMWjvS7ntB2Q0h8XtIHfb\nNsG5tMLhkjPB3L+jSA1Ix9erkDAJUDajSkQKkUJvingD8t6m8KMQdcHSdDnvQ1qF\nAJvEmsthVQNddQcbMDtmcKuYvqzav9tAWsRUnSfgWitlk11i2ss4nh9d0ae3ApzW\nWn0OuqVyv7jwvCvxZsDiV3QfZkJ0huZ9taVSD4GUiQKBgQDwp/o3teEF18Dos+fb\nRpKVbc8+4M/hUeIbasyXJRkybaf6mgjLpwipZOWhle/OQoAsjAlQSPnBCDZAsgGy\n/xDg00bFLDA+0APFiOeCJ5Rt2pBJS+bXM/U31aWG8Qn52R05hopgLQps2Lj+2+bl\n7G+Y8GIPCUZUBUlsIyR7RVK3JQKBgQDpf+7t0ufHdKlPlNmycyPhQXob7ima/ep5\nPAzWAMJNi9qEwSm/LSSckCI7tGjw9H2NwlnXbZCnff8XbSoA46IL4/RRsYltrpoU\nZWlAQkVMIypKWh+6Ts6XYpV2CRIfXVjxim4wgGJB1SAcay4nhRJRhQDkowSEtjrf\nQ8JJ3db0TwKBgFlZRGEiueT9cbXz9YVH8mxgVK23sfap/BTJ1iPXtj8uz0sPnWxf\nG6wotckEbgBaWFQxudOBBJlSfzIN5OucH5wZVREnktH/UScp6So9n7IZj7Bm6dHE\njKqqO8aZ/2Yv4dXVydJjZpd671RQOK3s1pIlzYJfoyjWvafUdFsAJfGxAoGAYH1X\ndLu0v/17gcFW/KEL8KeoGCag1sWawSKJg12o7XafhEB2SeQTvwbovpdczkWaJJxt\nl9JU9oHgigO4Wcm3SwaWDbQ5wDNoxIjrp3w7Oq1Fapg3iDvMr04zySUScheXC6lS\nw4QqFl5F+LhpyDb7TOiTZ+fdlCHhziUoAnJDw40CgYEAtFr+H0LlElKEKCb/84dx\nkhcnP69wsfZZdh1PB3N+MDGfLAOJTwZqPqScEzGmHgv2Hel4fCB2sUN/YL3S6yGW\nsP4LQKT/FoXcDafLORu+WjxrmVBoxTVQX69MlVTK7rOlHYHaQF7C+pOn8LzBL2kk\nG7e/EX4Wne0/mvbVoRv6/4A=\n-----END PRIVATE KEY-----\n",
+  "client_email": "openclaw-ga4@openclaw-ga4-488308.iam.gserviceaccount.com",
+  "client_id": "110720943741263944565",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/openclaw-ga4%40openclaw-ga4-488308.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
