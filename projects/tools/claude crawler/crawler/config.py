@@ -21,6 +21,11 @@ REQ_PER_SEC_MAX = 20.0
 RENDER_TIMEOUT = 30  # seconds per page
 RENDER_RETRY_COUNT = 2
 BROWSER_SHUTDOWN_TIMEOUT = 5.0  # seconds before SIGKILL fallback
+# Networkidle wait after page.goto. Default 0 = skip entirely (modern sites
+# with WS/long-poll/persistent analytics never actually reach networkidle,
+# so the previous unconditional 5s wait was pure latency tax). Operators
+# who genuinely need it can set to e.g. 1500ms.
+RENDER_WAIT_NETWORKIDLE_MS = 0
 
 # --- Progress reporting ---
 PROGRESS_FLUSH_MS = 250  # coalescer flush window

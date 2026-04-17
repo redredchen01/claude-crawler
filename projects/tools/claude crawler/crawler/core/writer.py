@@ -243,6 +243,12 @@ class WriterThread:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=5000")
+        # synchronous=NORMAL halves fsync cost on every COMMIT while still
+        # giving WAL-mode crash safety. The narrowed durability guarantee
+        # (we may lose the *last* in-flight transaction on power loss vs
+        # FULL's strict guarantee) is acceptable for a desktop crawler —
+        # losses become 'pending' rows that resume picks up.
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.row_factory = sqlite3.Row
         return conn
 

@@ -33,6 +33,7 @@ from typing import Any, Callable
 
 from crawler.config import (
     BROWSER_SHUTDOWN_TIMEOUT, RENDER_RETRY_COUNT, RENDER_TIMEOUT,
+    RENDER_WAIT_NETWORKIDLE_MS,
 )
 from crawler.models import RenderRequest
 
@@ -44,10 +45,20 @@ _DEFAULT_RESTART_BACKOFFS = (1.0, 5.0)
 _DEFAULT_MAX_CONSECUTIVE_FAILURES = 3
 _DEVTOOLS_PORT_FILE = "DevToolsActivePort"
 _CHROMIUM_BOOT_TIMEOUT = 10.0
+# Bounded queue: workers block on submit() when render is the bottleneck
+# (force_playwright on slow sites). Without this, submitted-Future churn
+# accumulates unbounded behind a slow renderer.
+_DEFAULT_QUEUE_SIZE = 16
+_DEFAULT_SUBMIT_TIMEOUT = 60.0
 
 
 class ShutdownError(RuntimeError):
     """Raised on a Future when the render thread shuts down before completing."""
+
+
+class RenderQueueFullError(RuntimeError):
+    """Raised when submit() can't enqueue within the producer timeout —
+    indicates the render thread is the throughput bottleneck."""
 
 
 @dataclass
@@ -56,11 +67,18 @@ class _ChromiumHandle:
 
     Tests can substitute this with any object — the launch/render/teardown
     callables passed into RenderThread are responsible for interpreting it.
+
+    ``context`` is the shared browser context — created lazily on first
+    render and recycled across subsequent renders via ``clear_cookies()``
+    / ``clear_permissions()``. For our anonymous, single-domain crawl
+    model that's sufficient state isolation; recreating a fresh
+    ``new_context()`` per page costs ~50-200ms of Chromium IPC overhead.
     """
     proc: subprocess.Popen | None
     playwright: Any  # playwright.sync_api.Playwright
     browser: Any     # playwright.sync_api.Browser
     user_data_dir: str | None
+    context: Any = None  # playwright.sync_api.BrowserContext, lazy-created
 
 
 def preflight() -> tuple[bool, str]:
@@ -189,29 +207,57 @@ def _wait_for_devtools_port(proc: subprocess.Popen, user_data_dir: str,
 
 
 def _real_render(handle: _ChromiumHandle, url: str, timeout_ms: int) -> str:
-    """Render a single URL via the live browser, returning HTML."""
-    context = handle.browser.new_context()
-    try:
-        page = context.new_page()
-        page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+    """Render a single URL via the live browser, returning HTML.
+
+    C1: reuses one BrowserContext per handle, recycled with ``clear_cookies``
+    + ``clear_permissions`` between renders. Saves the ~50-200ms cost of
+    ``browser.new_context()`` per page.
+
+    C2: ``RENDER_WAIT_NETWORKIDLE_MS`` config knob (default 0 = skip).
+    Long-poll / WebSocket pages never reach networkidle, so the previous
+    unconditional 5s wait was pure latency tax on every JS render.
+    """
+    if handle.context is None:
+        handle.context = handle.browser.new_context()
+    else:
         try:
-            page.wait_for_load_state("networkidle", timeout=5000)
+            handle.context.clear_cookies()
         except Exception:
-            # Some pages never reach networkidle (long-poll, websockets);
-            # the DOM is enough for parsing.
-            pass
+            logger.debug("context.clear_cookies() raised", exc_info=True)
+        try:
+            handle.context.clear_permissions()
+        except Exception:
+            logger.debug("context.clear_permissions() raised", exc_info=True)
+
+    page = handle.context.new_page()
+    try:
+        page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+        if RENDER_WAIT_NETWORKIDLE_MS > 0:
+            try:
+                page.wait_for_load_state(
+                    "networkidle", timeout=RENDER_WAIT_NETWORKIDLE_MS,
+                )
+            except Exception:
+                # Some pages never reach networkidle even within the
+                # configured cap; DOM is enough for parsing.
+                pass
         return page.content()
     finally:
         try:
-            context.close()
+            page.close()
         except Exception:
-            logger.debug("context.close() raised during render cleanup",
+            logger.debug("page.close() raised during render cleanup",
                          exc_info=True)
 
 
 def _real_teardown(handle: _ChromiumHandle, timeout: float) -> None:
-    """Close browser, stop Playwright driver, kill Chromium PID, clean up."""
+    """Close context, browser, stop Playwright driver, kill Chromium PID, clean up."""
     try:
+        if handle.context is not None:
+            try:
+                handle.context.close()
+            except Exception:
+                logger.debug("context.close() raised", exc_info=True)
         if handle.browser is not None:
             try:
                 handle.browser.close()
@@ -334,6 +380,8 @@ class RenderThread:
         shutdown_timeout: float = BROWSER_SHUTDOWN_TIMEOUT,
         max_consecutive_failures: int = _DEFAULT_MAX_CONSECUTIVE_FAILURES,
         restart_backoffs: tuple[float, ...] = _DEFAULT_RESTART_BACKOFFS,
+        queue_size: int = _DEFAULT_QUEUE_SIZE,
+        submit_timeout: float = _DEFAULT_SUBMIT_TIMEOUT,
         launch_fn: LaunchFn | None = None,
         render_fn: RenderFn | None = None,
         teardown_fn: TeardownFn | None = None,
@@ -343,12 +391,16 @@ class RenderThread:
         self._shutdown_timeout = shutdown_timeout
         self._max_consecutive_failures = max_consecutive_failures
         self._restart_backoffs = restart_backoffs
+        self._submit_timeout = submit_timeout
 
         self._launch_fn: LaunchFn = launch_fn or _real_launch
         self._render_fn: RenderFn = render_fn or _real_render
         self._teardown_fn: TeardownFn = teardown_fn or _real_teardown
 
-        self._queue: queue.Queue = queue.Queue()
+        # Bounded queue: workers experience natural backpressure when render
+        # is the throughput bottleneck instead of growing a queue of
+        # never-resolved Futures.
+        self._queue: queue.Queue = queue.Queue(maxsize=queue_size)
         self._thread: threading.Thread | None = None
         self._started = False
         self._shutdown_called = False
@@ -386,9 +438,24 @@ class RenderThread:
         self._thread.start()
 
     def submit(self, url: str) -> Future:
-        """Enqueue a render request; caller awaits ``future.result(timeout=...)``."""
+        """Enqueue a render request; caller awaits ``future.result(timeout=...)``.
+
+        Blocks (up to ``submit_timeout``) when the bounded queue is full so
+        workers experience natural backpressure rather than piling up
+        unfulfillable Futures behind a slow renderer. On timeout raises
+        :class:`RenderQueueFullError`.
+        """
         future: Future = Future()
-        self._queue.put(RenderRequest(url=url, future=future))
+        try:
+            self._queue.put(
+                RenderRequest(url=url, future=future),
+                timeout=self._submit_timeout,
+            )
+        except queue.Full as exc:
+            raise RenderQueueFullError(
+                f"render queue saturated for >{self._submit_timeout}s "
+                f"(disabled={self._disabled})"
+            ) from exc
         return future
 
     def shutdown(self, timeout: float | None = None) -> None:

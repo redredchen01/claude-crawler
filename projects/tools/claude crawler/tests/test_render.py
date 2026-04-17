@@ -556,6 +556,131 @@ class TestForceKillWatchdog:
             mock_kill.assert_called_once_with(12345, 2.0)
 
 
+class TestContextReuse:
+    """C1: _real_render reuses one context per handle, recycled with
+    clear_cookies/clear_permissions between renders. Saves the per-render
+    new_context() round-trip."""
+
+    def test_real_render_creates_context_lazily_and_reuses(self):
+        """Mock browser: first render creates context; second render reuses."""
+        from crawler.core.render import _real_render, _ChromiumHandle
+
+        mock_browser = MagicMock()
+        mock_context = MagicMock()
+        mock_browser.new_context.return_value = mock_context
+        mock_page = MagicMock()
+        mock_page.content.return_value = "<html>x</html>"
+        mock_context.new_page.return_value = mock_page
+
+        handle = _ChromiumHandle(
+            proc=None, playwright=None, browser=mock_browser,
+            user_data_dir=None,
+        )
+
+        # First render: lazily create context.
+        _real_render(handle, "https://x/", 1000)
+        assert mock_browser.new_context.call_count == 1
+        assert handle.context is mock_context
+        # Second render: reuse + clear.
+        _real_render(handle, "https://y/", 1000)
+        assert mock_browser.new_context.call_count == 1  # NOT called again
+        assert mock_context.clear_cookies.called
+        assert mock_context.clear_permissions.called
+
+    def test_real_teardown_closes_context_before_browser(self):
+        """C1: teardown closes the context first, then the browser."""
+        from crawler.core.render import _real_teardown, _ChromiumHandle
+
+        mock_context = MagicMock()
+        mock_browser = MagicMock()
+        mock_pw = MagicMock()
+        handle = _ChromiumHandle(
+            proc=None, playwright=mock_pw, browser=mock_browser,
+            user_data_dir=None, context=mock_context,
+        )
+        _real_teardown(handle, timeout=1.0)
+        assert mock_context.close.called
+        assert mock_browser.close.called
+
+
+class TestNetworkidleConfig:
+    """C2: RENDER_WAIT_NETWORKIDLE_MS=0 (default) skips wait_for_load_state."""
+
+    def test_real_render_skips_networkidle_when_config_zero(self):
+        from crawler.core.render import _real_render, _ChromiumHandle
+
+        mock_browser = MagicMock()
+        mock_context = MagicMock()
+        mock_browser.new_context.return_value = mock_context
+        mock_page = MagicMock()
+        mock_page.content.return_value = "<html>x</html>"
+        mock_context.new_page.return_value = mock_page
+
+        handle = _ChromiumHandle(
+            proc=None, playwright=None, browser=mock_browser,
+            user_data_dir=None,
+        )
+        with patch("crawler.core.render.RENDER_WAIT_NETWORKIDLE_MS", 0):
+            _real_render(handle, "https://x/", 1000)
+        mock_page.wait_for_load_state.assert_not_called()
+
+    def test_real_render_honors_networkidle_when_config_set(self):
+        from crawler.core.render import _real_render, _ChromiumHandle
+
+        mock_browser = MagicMock()
+        mock_context = MagicMock()
+        mock_browser.new_context.return_value = mock_context
+        mock_page = MagicMock()
+        mock_page.content.return_value = "<html>x</html>"
+        mock_context.new_page.return_value = mock_page
+
+        handle = _ChromiumHandle(
+            proc=None, playwright=None, browser=mock_browser,
+            user_data_dir=None,
+        )
+        with patch("crawler.core.render.RENDER_WAIT_NETWORKIDLE_MS", 1500):
+            _real_render(handle, "https://x/", 1000)
+        mock_page.wait_for_load_state.assert_called_once_with(
+            "networkidle", timeout=1500,
+        )
+
+
+class TestRenderQueueBackpressure:
+    """C3: bounded queue blocks submit() instead of growing unbounded."""
+
+    def test_submit_blocks_when_queue_full(self, thread_factory):
+        from crawler.core.render import RenderQueueFullError
+
+        # Render thread that never drains: render_fn blocks forever.
+        block_forever = threading.Event()
+        def hung_render(handle, url, timeout_ms):
+            block_forever.wait()
+            return "<html/>"
+
+        rt = thread_factory(
+            queue_size=2,
+            submit_timeout=0.3,
+            launch_fn=lambda: SimpleNamespace(),
+            render_fn=hung_render,
+            teardown_fn=lambda h, t: None,
+        )
+        # First submit: enters render thread, hangs there. Future is created.
+        rt.submit("https://a/")
+        # Two more submits: fill the queue (2 slots).
+        rt.submit("https://b/")
+        rt.submit("https://c/")
+        # Fourth submit must fail — queue is full and the render thread is
+        # busy on https://a/.
+        start = time.monotonic()
+        with pytest.raises(RenderQueueFullError):
+            rt.submit("https://d/")
+        elapsed = time.monotonic() - start
+        # Bounded by submit_timeout (0.3s) + scheduling slack.
+        assert 0.2 < elapsed < 1.0
+        # Release the hung render so shutdown can proceed.
+        block_forever.set()
+
+
 class TestKillProcHelper:
     def test_kill_proc_skips_already_exited(self):
         from crawler.core.render import _kill_proc
