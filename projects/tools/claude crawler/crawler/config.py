@@ -11,6 +11,24 @@ RATE_LIMIT = 1.0
 RETRY_COUNT = 3
 RETRY_BACKOFF = [1, 3, 9]  # seconds
 
+# --- HTTP fetcher ---
+# Per-request timeout (connect, read). Tuple lets connect timeouts fail fast
+# while still tolerating slow but progressing reads.
+HTTP_TIMEOUT = (10, 30)
+# Hard cap on body size (bytes). Stream-aborted past this — defends a single
+# hostile/huge response from chewing memory or starving worker time.
+MAX_RESPONSE_BYTES = 5 * 1024 * 1024  # 5 MB
+# Connection pool — sized for WORKER_COUNT plus headroom. Same Session is
+# shared across all workers; HTTPAdapter manages thread-safe pooling.
+HTTP_POOL_CONNECTIONS = 20
+HTTP_POOL_MAXSIZE = 20
+# Substrings that mark a Content-Type as "probably parseable HTML/XML".
+# Fetcher skips anything that explicitly declares a non-matching type
+# (image/, video/, application/pdf, application/zip, etc.) — saves the
+# whole-body download + parse pass on binary blobs that slipped past the
+# Frontier's extension filter (e.g. extension-less /download?id=123 URLs).
+HTML_CONTENT_TYPE_MARKERS = ("html", "xhtml", "xml", "text/plain")
+
 # --- Concurrency & rate limiting ---
 WORKER_COUNT = 8
 REQ_PER_SEC_PER_DOMAIN = 5.0
