@@ -765,7 +765,7 @@ class TestResume:
             "https://example.com/c": leaf_html,
         }
         with patch("crawler.core.engine.fetch_page_with_cache_tracking",
-                   side_effect=lambda u, *a, **kw: responses.get(u)):
+                   side_effect=lambda u, *a, **kw: (responses.get(u), False)):
             with tempfile.TemporaryDirectory() as tmpdir:
                 db_path = os.path.join(tmpdir, "test.db")
                 sj_id = run_crawl("https://example.com", db_path,
@@ -798,7 +798,7 @@ class TestResume:
             responses[u] = self._make_html()
 
         with patch("crawler.core.engine.fetch_page_with_cache_tracking",
-                   side_effect=lambda u, *a, **kw: responses.get(u)):
+                   side_effect=lambda u, *a, **kw: (responses.get(u), False)):
             with tempfile.TemporaryDirectory() as tmpdir:
                 db_path = os.path.join(tmpdir, "test.db")
                 sj_id = run_crawl("https://example.com", db_path,
@@ -1116,7 +1116,7 @@ class TestHighFanoutAndWriterDeathRegressions:
             responses[u] = leaf_html
 
         with patch("crawler.core.engine.fetch_page_with_cache_tracking",
-                   side_effect=lambda u, *a, **kw: responses.get(u, leaf_html)):
+                   side_effect=lambda u, *a, **kw: (responses.get(u, leaf_html), False)):
             with tempfile.TemporaryDirectory() as tmpdir:
                 db_path = os.path.join(tmpdir, "test.db")
                 start = _time.monotonic()
