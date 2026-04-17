@@ -15,16 +15,23 @@ _JS_MARKERS = ("__NEXT_DATA__", "data-reactroot", "__nuxt")
 
 
 def fetch_page(url: str, use_playwright: bool = False) -> str | None:
-    """Fetch HTML content from a URL.
+    """Fetch HTML content from a URL via plain HTTP.
 
-    Returns HTML string or None on failure.
+    The ``use_playwright`` flag is **deprecated and ignored** — JS rendering
+    now flows through :class:`crawler.core.render.RenderThread`. The flag
+    remains for backward-compatible call sites until the engine refactor
+    (Unit 7) replaces them with explicit render-thread submits.
+
+    Returns HTML string or ``None`` on failure.
     """
+    if use_playwright:
+        logger.debug(
+            "fetch_page(use_playwright=True) is a no-op; "
+            "route to RenderThread instead (url=%s)", url,
+        )
+
     for attempt in range(RETRY_COUNT):
         try:
-            if use_playwright:
-                logger.warning("Playwright rendering not yet implemented, returning None for %s", url)
-                return None
-
             resp = requests.get(
                 url,
                 headers={"User-Agent": USER_AGENT},
