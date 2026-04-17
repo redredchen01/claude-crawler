@@ -2,7 +2,9 @@
 
 import pytest
 
-from crawler.parser import parse_page
+from bs4 import BeautifulSoup
+
+from crawler.parser import parse_page, _extract_detail_resource
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +115,63 @@ class TestDetailPage:
     def test_tags(self):
         result = parse_page(DETAIL_HTML, "https://example.com/blog/tech/article-1")
         assert result.resources[0].tags == ["Python", "Web"]
+
+    def test_tags_scoped_to_article_container_not_sidebar(self):
+        """Regression: site-wide tag-cloud widgets in sidebar/footer must
+        not leak into per-article tag lists. Repro: 51cg1.com had an
+        ~50-tag sidebar that appeared on every article page; pre-fix the
+        parser scanned the whole DOM and assigned all 50 tags to every
+        article, drowning out the 1-3 article-specific tags."""
+        sidebar_tags = "".join(
+            f'<a rel="tag">sidebar-tag-{i}</a>' for i in range(40)
+        )
+        html = (
+            '<html><head><meta property="og:title" content="Real Article"></head>'
+            '<body>'
+            '<article>'
+            '<h1>Real Article</h1>'
+            '<p>body</p>'
+            '<div class="post-tags">'
+            '<a rel="tag">article-tag-1</a>'
+            '<a rel="tag">article-tag-2</a>'
+            '</div>'
+            '</article>'
+            f'<aside class="sidebar"><h3>Hot Tags</h3>{sidebar_tags}</aside>'
+            '</body></html>'
+        )
+        result = parse_page(html, "https://example.com/post/1")
+        tags = result.resources[0].tags
+        assert tags == ["article-tag-1", "article-tag-2"], (
+            f"Expected only the article-scoped tags; got {tags}"
+        )
+
+    def test_tags_no_container_falls_back_with_size_cap(self):
+        """When the page has neither <article> nor <main>, we fall back to
+        whole-document scanning — but apply a 30-tag cap to detect tag-cloud
+        spam. Tested via the internal helper because pages without
+        article/main classify as page_type='other' and don't reach
+        _extract_detail_resource through parse_page."""
+        cloud_tags = "".join(
+            f'<a rel="tag">cloud-tag-{i}</a>' for i in range(50)
+        )
+        html = f'<html><body><h1>Some Title</h1>{cloud_tags}</body></html>'
+        soup = BeautifulSoup(html, "lxml")
+        resource = _extract_detail_resource(soup, "https://example.com/post/1")
+        # Whole-doc scan saw 50 tags → cap kicked in → tags dropped.
+        assert resource.tags == [], (
+            f"Tag-cloud cap should drop the noise; got {resource.tags}"
+        )
+
+    def test_tags_no_container_under_cap_keeps_results(self):
+        """When no container exists but tag count is reasonable (<=30),
+        whole-doc fallback is allowed."""
+        few_tags = "".join(
+            f'<a rel="tag">small-tag-{i}</a>' for i in range(5)
+        )
+        html = f'<html><body><h1>Some Title</h1>{few_tags}</body></html>'
+        soup = BeautifulSoup(html, "lxml")
+        resource = _extract_detail_resource(soup, "https://example.com/post/1")
+        assert len(resource.tags) == 5
 
     def test_views(self):
         result = parse_page(DETAIL_HTML, "https://example.com/blog/tech/article-1")

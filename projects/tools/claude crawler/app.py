@@ -1,13 +1,59 @@
 """Streamlit Web UI for Claude Crawler."""
 
 import queue
+import re
+import sqlite3
 import threading
 import time
+from urllib.parse import urlparse, urlunparse
 
 import streamlit as st
 
 from crawler import config, storage, analysis, export
 from crawler.core.engine import run_crawl
+
+
+# Matches inputs that LOOK like 'scheme:rest' but aren't a real URL with
+# '://'. Used to reject pseudo-schemes (javascript:, mailto:, tel:, data:)
+# BEFORE the no-scheme branch prepends 'https://' to them.
+_PSEUDO_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+\-.]*:(?!//)")
+
+
+def _normalize_entry_url(raw: str) -> str | None:
+    """Coerce common user inputs into a valid http(s) URL.
+
+    Accepts forms like ``example.com``, ``example.com/path``, ``//example.com``,
+    or full URLs. Returns ``None`` if the input cannot be salvaged into a
+    URL with a host component, or if it carries a pseudo-scheme like
+    ``javascript:``, ``mailto:``, ``tel:``, or ``data:``.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    candidate = raw
+    if candidate.startswith("//"):
+        # Protocol-relative URL (//host/path) — common when copy-pasting
+        # from rendered pages.
+        candidate = "https:" + candidate
+    elif "://" not in candidate:
+        # Reject pseudo-schemes BEFORE prepending https:// — without this
+        # check, 'javascript:alert(1)' becomes 'https://javascript:alert(1)'
+        # and silently passes the http(s) allowlist below.
+        if _PSEUDO_SCHEME_RE.match(candidate):
+            return None
+        candidate = "https://" + candidate
+    parsed = urlparse(candidate)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    if parsed.scheme.lower() not in ("http", "https"):
+        return None
+    # Reject hosts containing whitespace — urlparse accepts them but
+    # downstream HTTP fetch will fail with confusing DNS errors.
+    if any(c.isspace() for c in parsed.netloc):
+        return None
+    # Return the canonical reassembly so display matches what the engine
+    # actually crawls (lowercase scheme, normalized form).
+    return urlunparse(parsed._replace(scheme=parsed.scheme.lower()))
 
 
 def main():
@@ -72,10 +118,17 @@ def render_sidebar(db_path: str):
 
         if st.button("Start Scan", disabled=st.session_state.scan_running,
                      type="primary"):
-            if not url:
-                st.error("Please enter a URL")
+            normalized = _normalize_entry_url(url)
+            if normalized is None:
+                st.error(
+                    "Invalid URL. Use a full address like "
+                    "`https://example.com/`. Bare hostnames like "
+                    "`example.com` are auto-normalized."
+                )
                 return
-            start_scan(db_path, url, max_pages, max_depth,
+            if normalized != url.strip():
+                st.info(f"Normalized URL → {normalized}")
+            start_scan(db_path, normalized, max_pages, max_depth,
                        workers=workers, req_per_sec=req_per_sec,
                        force_playwright=force_playwright)
 
@@ -84,12 +137,37 @@ def render_sidebar(db_path: str):
         st.header("History")
         jobs = storage.list_scan_jobs(db_path)
         if jobs:
-            options = {f"#{j.id} {j.domain} ({j.status})": j.id for j in jobs}
+            options = {
+                f"#{j.id} {j.domain} ({j.status}, {j.resources_found}r)": j.id
+                for j in jobs
+            }
             selected = st.selectbox("Previous Scans", list(options.keys()))
-            if st.button("Load Scan"):
-                st.session_state.scan_job_id = options[selected]
-                st.session_state.scan_running = False
-                st.rerun()
+            selected_id = options[selected]
+            col_load, col_del = st.columns(2)
+            with col_load:
+                if st.button("Load", use_container_width=True):
+                    st.session_state.scan_job_id = selected_id
+                    st.session_state.scan_running = False
+                    st.session_state.pop("pending_delete_id", None)
+                    st.rerun()
+            with col_del:
+                if st.button("Delete", use_container_width=True):
+                    st.session_state.pending_delete_id = selected_id
+            if st.session_state.get("pending_delete_id") == selected_id:
+                st.warning(f"Delete scan #{selected_id}? This cannot be undone.")
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("Confirm delete", type="primary",
+                                 use_container_width=True):
+                        storage.delete_scan_job(db_path, selected_id)
+                        if st.session_state.get("scan_job_id") == selected_id:
+                            st.session_state.scan_job_id = None
+                        st.session_state.pop("pending_delete_id", None)
+                        st.rerun()
+                with c2:
+                    if st.button("Cancel", use_container_width=True):
+                        st.session_state.pop("pending_delete_id", None)
+                        st.rerun()
 
 
 def start_scan(db_path: str, url: str, max_pages: int, max_depth: int,
@@ -228,6 +306,111 @@ def render_results(db_path: str, scan_job_id: int):
         render_failed_pages(db_path, scan_job_id)
 
 
+# Hint dict keys must match values written to pages.failure_reason by
+# crawler/core/engine.py (`http_error`, `robots_blocked`, `render_failed`,
+# `fetch_failed`). The "render disabled" condition is surfaced separately
+# via the live progress event's `warning` field, not via failure_reason.
+_FAILURE_REASON_HINTS = {
+    "http_error": (
+        "All fetch attempts failed (DNS, refused, 4xx/5xx, timeout). "
+        "Verify the URL is reachable in a browser; check that you used "
+        "https:// not http:// if the site requires TLS."
+    ),
+    "robots_blocked": (
+        "robots.txt forbids crawling these URLs. "
+        "This is the site's policy, not a bug."
+    ),
+    "render_failed": (
+        "Plain HTTP succeeded but the Playwright render attempt failed. "
+        "Check `playwright install chromium` and the application logs."
+    ),
+    "fetch_failed": (
+        "Generic fetch failure. See logs for the underlying exception."
+    ),
+}
+
+
+def _render_zero_resources_diagnosis(db_path: str, scan_job_id: int) -> None:
+    """Replace the misleading 'No resources found' message with an actionable
+    diagnosis: how many pages were fetched vs failed, and what the failure
+    reasons were. Only renders when zero resources were extracted."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        counts = {
+            row["status"]: row["c"]
+            for row in conn.execute(
+                "SELECT status, COUNT(*) AS c FROM pages "
+                "WHERE scan_job_id = ? GROUP BY status",
+                (scan_job_id,),
+            )
+        }
+        failure_groups = conn.execute(
+            "SELECT failure_reason, COUNT(*) AS c FROM pages "
+            "WHERE scan_job_id = ? AND status = 'failed' "
+            "GROUP BY failure_reason ORDER BY c DESC",
+            (scan_job_id,),
+        ).fetchall()
+
+    fetched = counts.get("fetched", 0)
+    failed = counts.get("failed", 0)
+    pending = counts.get("pending", 0)
+    total = fetched + failed + pending
+
+    if failed and not fetched:
+        # All pages failed — the misleading "No resources" goes away
+        # entirely; show what actually went wrong. Defensive: count vs
+        # group_by races (writer commits between the two queries) can
+        # produce failed>0 with empty failure_groups.
+        if not failure_groups:
+            st.error(f"Scan failed: {failed} page(s) errored out.")
+            return
+        primary = failure_groups[0]
+        reason = primary["failure_reason"] or "(unknown)"
+        st.error(
+            f"Scan failed: all {failed} page(s) errored out before "
+            f"resources could be extracted. "
+            f"Most common failure: **{reason}** ({primary['c']} of {failed})."
+        )
+        hint = _FAILURE_REASON_HINTS.get(reason)
+        if hint:
+            st.caption(hint)
+        if len(failure_groups) > 1:
+            with st.expander("All failure reasons"):
+                st.dataframe(
+                    [{"Reason": g["failure_reason"] or "(unknown)",
+                      "Count": g["c"]} for g in failure_groups],
+                    use_container_width=True, hide_index=True,
+                )
+    elif fetched and not failed:
+        # Pages loaded fine but the parser found nothing extractable.
+        st.warning(
+            f"Crawled {fetched} page(s) successfully but the parser "
+            f"extracted **0 resources**. Likely causes: the site needs "
+            f"JS rendering (try **Force Playwright** in the sidebar), or "
+            f"its HTML structure doesn't match the resource-extraction "
+            f"heuristics (looking for `<article>`, `og:title`, card grids)."
+        )
+    elif fetched and failed:
+        st.warning(
+            f"Crawled {fetched} page(s) successfully and {failed} "
+            f"failed. Parser extracted **0 resources** from the "
+            f"successful pages."
+        )
+        if failure_groups:  # race-window safe (see all-failed branch)
+            primary = failure_groups[0]
+            reason = primary["failure_reason"] or "(unknown)"
+            st.caption(
+                f"Most common failure on the {failed} failed page(s): "
+                f"**{reason}** ({primary['c']})."
+            )
+    else:
+        # Fallback — shouldn't happen normally.
+        st.info(
+            f"No resources extracted (pages: {total} total, "
+            f"{fetched} fetched, {failed} failed, {pending} pending)."
+        )
+
+
 def render_failed_pages(db_path: str, scan_job_id: int):
     """Show failed pages grouped by failure_reason so users can debug
     crawl problems without digging through logs."""
@@ -275,7 +458,7 @@ def render_failed_pages(db_path: str, scan_job_id: int):
 def render_rankings(db_path: str, scan_job_id: int):
     resources = storage.get_resources(db_path, scan_job_id)
     if not resources:
-        st.info("No resources found in this scan.")
+        _render_zero_resources_diagnosis(db_path, scan_job_id)
         return
 
     # Build DataFrame-like data for display
@@ -356,17 +539,38 @@ def render_tag_analysis(db_path: str, scan_job_id: int):
 def render_history(db_path: str):
     st.info("Enter a URL in the sidebar and click 'Start Scan' to begin.")
     jobs = storage.list_scan_jobs(db_path)
-    if jobs:
-        st.subheader("Previous Scans")
-        data = [{
-            "ID": j.id,
-            "Domain": j.domain,
-            "Status": j.status,
-            "Pages": j.pages_scanned,
-            "Resources": j.resources_found,
-            "Created": j.created_at,
-        } for j in jobs]
-        st.dataframe(data, use_container_width=True, hide_index=True)
+    if not jobs:
+        return
+
+    st.subheader("Previous Scans")
+    data = [{
+        "ID": j.id,
+        "Domain": j.domain,
+        "Status": j.status,
+        "Pages": j.pages_scanned,
+        "Resources": j.resources_found,
+        "Created": j.created_at,
+    } for j in jobs]
+    st.dataframe(data, use_container_width=True, hide_index=True)
+
+    empty_jobs = [j for j in jobs if j.resources_found == 0]
+    if empty_jobs:
+        st.caption(
+            f"{len(empty_jobs)} scan(s) found no resources — likely failed "
+            "fetches or unparseable pages."
+        )
+        confirm = st.checkbox(
+            f"Confirm delete of {len(empty_jobs)} empty scan(s)",
+            key="confirm_purge_empty",
+        )
+        if st.button("Purge empty scans", disabled=not confirm):
+            for j in empty_jobs:
+                storage.delete_scan_job(db_path, j.id)
+                if st.session_state.get("scan_job_id") == j.id:
+                    st.session_state.scan_job_id = None
+            st.session_state.pop("confirm_purge_empty", None)
+            st.success(f"Deleted {len(empty_jobs)} empty scan(s).")
+            st.rerun()
 
 
 if __name__ == "__main__":

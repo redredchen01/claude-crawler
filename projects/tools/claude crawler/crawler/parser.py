@@ -7,6 +7,11 @@ from bs4 import BeautifulSoup
 
 from crawler.models import ParseResult, Resource
 
+# Tag-cloud detection threshold for the no-container fallback path. Real
+# articles rarely tag past this; exceeding it strongly suggests a sidebar
+# /footer site-wide tag widget (the 51cg1.com bug pattern).
+_FALLBACK_TAG_CLOUD_CAP = 30
+
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -131,28 +136,42 @@ def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
             # Strip " | Site Name" or " - Site Name" suffix
             title = re.split(r"\s*[|\-–—]\s*", raw, maxsplit=1)[0].strip()
 
+    # Locate the article container once — used for both cover image and
+    # tag scoping. Without scoping, sidebar/footer "tag cloud" widgets
+    # leak into every article's tag set (the site-wide tags appear on
+    # every page, producing identical tag lists across all articles).
+    container = soup.select_one("article") or soup.select_one("main")
+
     # Cover image
     cover_url = _extract_meta(soup, "og:image")
-    if not cover_url:
-        container = soup.select_one("article") or soup.select_one("main")
-        if container:
-            img = container.find("img")
-            if img and img.get("src"):
-                cover_url = urljoin(url, img["src"])
+    if not cover_url and container:
+        img = container.find("img")
+        if img and img.get("src"):
+            cover_url = urljoin(url, img["src"])
 
-    # Tags
+    # Tags — restrict to article container when available; only fall back to
+    # whole-document search when no container exists, and apply a sanity
+    # cap (real articles rarely have 30+ tags; >30 strongly suggests a
+    # site-wide tag-cloud widget).
+    tag_scope = container if container is not None else soup
     tags: list[str] = []
     # a[rel="tag"]
-    for a in soup.select('a[rel="tag"]'):
+    for a in tag_scope.select('a[rel="tag"]'):
         t = _clean_text(a.get_text(strip=True))
         if t and t not in tags:
             tags.append(t)
     # Elements with class containing "tag" — match both a[class*="tag"] and [class*="tag"] a
     if not tags:
-        for el in soup.select('a[class*="tag"], [class*="tag"] a'):
+        for el in tag_scope.select('a[class*="tag"], [class*="tag"] a'):
             t = _clean_text(el.get_text(strip=True))
             if t and t not in tags and t != "+":
                 tags.append(t)
+    # Tag-cloud sanity check: no article legitimately has >FALLBACK_TAG_CAP
+    # tags. If the scope yielded a tag-cloud-sized list (no container
+    # guard), treat as noise and drop entirely so it doesn't drown out
+    # per-article signals.
+    if container is None and len(tags) > _FALLBACK_TAG_CLOUD_CAP:
+        tags = []
 
     # Metrics
     views = _extract_number_near_keyword(soup, ["views", "view", "浏览", "浏览量"])

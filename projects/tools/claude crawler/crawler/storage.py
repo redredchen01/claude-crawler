@@ -181,6 +181,25 @@ def list_scan_jobs(db_path: str) -> list[ScanJob]:
         return [ScanJob(**dict(r)) for r in rows]
 
 
+def delete_scan_job(db_path: str, job_id: int) -> None:
+    """Delete a scan_job and all rows that reference it.
+
+    Schema declares FKs without ON DELETE CASCADE, so we delete children
+    explicitly inside one transaction. Order matters: resource_tags →
+    tags/resources → pages → scan_jobs.
+    """
+    with get_connection(db_path) as conn:
+        conn.execute(
+            "DELETE FROM resource_tags WHERE resource_id IN "
+            "(SELECT id FROM resources WHERE scan_job_id = ?)",
+            (job_id,),
+        )
+        conn.execute("DELETE FROM resources WHERE scan_job_id = ?", (job_id,))
+        conn.execute("DELETE FROM tags WHERE scan_job_id = ?", (job_id,))
+        conn.execute("DELETE FROM pages WHERE scan_job_id = ?", (job_id,))
+        conn.execute("DELETE FROM scan_jobs WHERE id = ?", (job_id,))
+
+
 def get_scan_job_by_entry_url(db_path: str, entry_url: str) -> ScanJob | None:
     """Return the most recently created scan_job for ``entry_url``, if any."""
     with get_connection(db_path) as conn:
