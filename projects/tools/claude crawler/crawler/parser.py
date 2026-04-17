@@ -229,6 +229,57 @@ def _clean_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+# Hrefs that are not real resource URLs — used to filter image-link
+# card candidates so UI chrome (<a href="javascript:..."> login buttons
+# with avatar images, anchor-only links) doesn't pollute the card list.
+_NON_RESOURCE_HREF_PREFIXES = ("javascript:", "#", "mailto:", "tel:")
+
+
+def _is_link_card(a: BsTag) -> bool:
+    """True when an <a> looks like a card thumbnail: real resource href,
+    nested <img>, and at least one content signal (visible text, img
+    alt, or img title). Pure icon <a> tags (pagination arrows, chrome
+    with empty alt) are rejected."""
+    img = a.find("img")
+    if img is None:
+        return False
+    href = a.get("href", "") or ""
+    if not href or href.startswith(_NON_RESOURCE_HREF_PREFIXES):
+        return False
+    if a.get_text(strip=True):
+        return True
+    if (img.get("alt") or "").strip():
+        return True
+    if (img.get("title") or "").strip():
+        return True
+    return False
+
+
+# Thumbnail title is "weak" (probably a badge, not the real title) when
+# it's too short to be meaningful or matches the duration pattern. In
+# either case the list-card extractor looks for a better title via
+# same-URL sibling or img[alt].
+_WEAK_TITLE_MAX_LEN = 6
+
+
+# URL path segments that identify a listing page. Used by
+# `_detect_page_type` so that a listing URL with a moderate number of
+# thumbnails classifies as "list" even when it also carries og:title +
+# h1 (which listing pages normally do for SEO).
+_LISTING_PATH_RE = re.compile(
+    r"/(updates|list|search|archive|archives|category|categories|"
+    r"channel|channels|tag|tags|theme|themes|hot|new|recent|trending|"
+    r"popular|latest|page/\d+)/?",
+    re.I,
+)
+# Thumbnail count that tips a page into "list" unconditionally. Detail
+# pages with related-posts sidebars top out around 6–10; 12+ is a grid.
+_LIST_STRONG_THRESHOLD = 12
+# When the URL already looks like a listing, a lower thumbnail count
+# still justifies "list".
+_LIST_LISTING_URL_THRESHOLD = 6
+
+
 # Duration strings like "2:06:24" / "12:05" / "0:58" that card thumbnails
 # overlay on top of the poster image. Used to detect when a list-card's
 # derived title is actually just a duration badge and needs rescuing
@@ -543,13 +594,36 @@ def _detect_page_type(html: str, url: str, soup: BeautifulSoup) -> str:
     if "/tag/" in url or "/tags/" in url:
         return "tag"
 
-    # Detail pages — single main content with rich metadata (check before list)
     path = urlparse(url).path.strip("/")
     is_root = not path  # homepage / index
 
-    # JSON-LD VideoObject/Article/etc. is the strongest signal — sites that
-    # bother emitting it are declaring "this page is ONE item". Trust that
-    # over DOM container heuristics, which fail on sites without <article>.
+    # Repeated-card counts, computed once and reused by all signals below.
+    articles = soup.select("article")
+    dotcards = soup.select("div.card, .card")
+    link_cards = [a for a in soup.select("a[href]") if _is_link_card(a)]
+    max_cards = max(len(articles), len(dotcards), len(link_cards))
+
+    # Listing URLs expose themselves by path segment (homepage, /updates/,
+    # /search/, /category/, /tag/, etc.). Kissavs's /av/updates/ and every
+    # Wordpress archive look like this.
+    is_listing_path = is_root or bool(_LISTING_PATH_RE.search(path))
+
+    # Strong list signal — many repeated thumbnails. Detail pages with a
+    # "related posts" sidebar top out around 6–10 thumbnails; 12+ is
+    # almost certainly a grid. This check runs BEFORE detail-entity
+    # detection because listing pages ship the same og:title + h1 + first
+    # item's JSON-LD that detail pages do.
+    if max_cards >= _LIST_STRONG_THRESHOLD:
+        return "list"
+    # Listing-shaped URL + modest thumbnail count is also a list —
+    # lower bar because the URL already tells us what the page is.
+    if is_listing_path and max_cards >= _LIST_LISTING_URL_THRESHOLD:
+        return "list"
+
+    # JSON-LD VideoObject/Article/etc. is the strongest detail signal —
+    # sites that bother emitting it are declaring "this page is ONE item".
+    # Evaluated after the strong-list check so a listing page whose
+    # JSON-LD describes the first item doesn't get mis-classified.
     jsonld_blocks = _parse_jsonld_blocks(soup)
     if not is_root and _jsonld_has_detail_entity(jsonld_blocks):
         return "detail"
@@ -578,15 +652,9 @@ def _detect_page_type(html: str, url: str, soup: BeautifulSoup) -> str:
             if soup.select_one("article") and h1:
                 return "detail"
 
-    # List pages — look for repeated card-like elements
-    for selector in ["article", "div.card", ".card"]:
-        elements = soup.select(selector)
-        if len(elements) > 3:
-            return "list"
-
-    # Fallback list detection: repeated <a> with images (card grids)
-    all_links = soup.select("a[href]")
-    link_cards = [a for a in all_links if a.find("img") and a.get_text(strip=True)]
+    # Moderate list signals — used after detail detection fails.
+    if len(articles) > 3 or len(dotcards) > 3:
+        return "list"
     if len(link_cards) > 5:
         return "list"
 
@@ -1003,14 +1071,19 @@ def _extract_list_resources(soup: BeautifulSoup, url: str) -> list[Resource]:
     """Extract multiple Resources from a list/tag page."""
     resources: list[Resource] = []
 
-    # Find repeated card structures
-    cards = soup.select("article")
+    # Find repeated card structures. Rather than committing to the first
+    # non-empty tier, compute all three sources and pick whichever is
+    # richest — a page with 2 hashtag widgets matching `.card` and 87
+    # image-link cards is really 87 cards, not 2.
+    articles = soup.select("article")
+    dotcards = soup.select("div.card, .card")
+    link_cards = [a for a in soup.select("a[href]") if _is_link_card(a)]
+    cards = max(
+        (articles, dotcards, link_cards),
+        key=lambda src: len(src),
+    )
     if len(cards) <= 1:
-        cards = soup.select("div.card, .card")
-    # Fallback: repeated <a> elements with images (common in CMS card grids)
-    if len(cards) <= 1:
-        all_links = soup.select("a[href]")
-        cards = [a for a in all_links if a.find("img") and a.get_text(strip=True)]
+        cards = []
 
     for card in cards:
         # If the card itself is an <a>, use it directly; otherwise find nested <a>
@@ -1033,15 +1106,23 @@ def _extract_list_resources(soup: BeautifulSoup, url: str) -> list[Resource]:
             else:
                 title = _clean_text(a_tag.get_text(strip=True))
 
-        # When the thumbnail <a> only carries a duration overlay (e.g.
-        # `<span class="label">2:06:24</span>` inside an image link), the
-        # derived title is a timecode, not a real title. Rescue it by
-        # looking for a sibling <a> in the card's ancestors that points
-        # at the same video but carries non-duration text (typically the
-        # `<h3 class="title"><a>...</a></h3>` in the detail block).
-        if _DURATION_RE.fullmatch(title):
+        # "Weak" titles — duration badges ("2:06:24"), short promo
+        # ribbons ("精選"), or otherwise too-short text — are almost
+        # always overlay chrome on the thumbnail, not the real title.
+        # Rescue in priority order:
+        #   1. a sibling <a> in the card's ancestors that points at the
+        #      same URL (typical `<h3 class="title"><a>...</a></h3>`)
+        #   2. the thumbnail <img>'s alt attribute (banner carousels
+        #      often put the real title only in the alt)
+        if _DURATION_RE.fullmatch(title) or len(title) <= _WEAK_TITLE_MAX_LEN:
             target = urljoin(url, a_tag["href"])
             rescued = _rescue_title_from_siblings(a_tag, target, url)
+            if not rescued:
+                img = a_tag.find("img") or card.find("img")
+                if img:
+                    alt = _clean_text(img.get("alt", "") or "")
+                    if alt and len(alt) > len(title):
+                        rescued = alt
             if rescued:
                 title = rescued
 

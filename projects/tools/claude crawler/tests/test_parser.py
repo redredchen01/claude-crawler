@@ -765,6 +765,115 @@ class TestDetailMetricsScopedToContainer:
         assert result.resources[0].views == 42
 
 
+class TestListPageDetectionGeneralization:
+    """Regression: kissavs homepage had 87 image-link cards but only 2
+    `.card` widgets (hashtag buttons). The old detector committed to
+    the first non-empty tier, so `.card` (2) won over link-cards (87)
+    and the page was typed as "list" with only 2 resources returned.
+    The updates listing page was misclassified as "detail" because
+    `section[class*='content']` matched a page-level header section
+    and the page had og:title + h1.
+
+    The generalized detector now:
+      - computes article/`.card`/link-card counts up front,
+      - treats 12+ repeated cards OR (listing-URL + 6+) as definitive
+        "list" BEFORE detail detection,
+      - rejects javascript:/# anchors as card candidates.
+    """
+
+    GRID_HTML = """\
+<html><head><meta property="og:title" content="Grid Page">
+<title>Grid</title></head>
+<body>
+<h1>Grid Page</h1>
+<div class="card-widget-a"><img src="/avatar.png"/> Trending</div>
+<div class="card-widget-b"><img src="/logo.png"/> Recent</div>
+<!-- Widget .card count is 2; grid below is the real content. -->
+<div class="grid">
+"""+ "".join(
+        f'<div class="item"><a href="/video/v{i}/"><img src="/p/{i}.jpg" alt="Video {i} — full title"/></a></div>'
+        for i in range(15)
+    ) + """
+</div>
+</body></html>
+"""
+
+    LISTING_PATH_HTML = """\
+<html><head>
+<meta property="og:title" content="Latest Updates | Site">
+<title>Updates</title>
+</head>
+<body>
+<section class="content-header"><h1>Latest Updates</h1></section>
+<div class="grid">
+""" + "".join(
+        f'<div class="item"><a href="/video/u{i}/"><img src="/p/{i}.jpg" alt="Update {i}"/></a></div>'
+        for i in range(8)
+    ) + """
+</div>
+</body></html>
+"""
+
+    LOGIN_POLLUTION_HTML = """\
+<html><head><title>Grid</title></head>
+<body>
+<header>
+  <a href="javascript:void(0)" class="bind_login">
+    <img src="/avatar.svg" alt="User"/>
+    <span>登入</span>
+  </a>
+</header>
+<div class="grid">
+""" + "".join(
+        f'<div class="item"><a href="/video/g{i}/"><img src="/p/{i}.jpg" alt="Video {i}"/></a></div>'
+        for i in range(13)
+    ) + """
+</div>
+</body></html>
+"""
+
+    def test_rich_link_cards_beat_sparse_dotcards(self):
+        """`.card` count of 2 must not eclipse 15 link-cards."""
+        r = parse_page(self.GRID_HTML, "https://example.com/")
+        assert r.page_type == "list"
+        assert len(r.resources) >= 13, (
+            f"Expected ≥13 video resources, got {len(r.resources)}"
+        )
+
+    def test_listing_url_lowers_detail_threshold(self):
+        """Listing-shaped URL + 8 thumbnails = list, even with og:title + h1."""
+        r = parse_page(self.LISTING_PATH_HTML, "https://example.com/av/updates/")
+        assert r.page_type == "list"
+        assert len(r.resources) == 8
+
+    def test_javascript_anchor_not_treated_as_card(self):
+        """Login button with avatar <img> but javascript: href must not
+        leak into results."""
+        r = parse_page(self.LOGIN_POLLUTION_HTML, "https://example.com/")
+        urls = [res.url for res in r.resources]
+        assert not any(u.startswith("javascript:") for u in urls)
+        # All 13 real video cards should be present.
+        assert sum(1 for u in urls if "/video/" in u) == 13
+
+    def test_weak_title_recovers_from_img_alt(self):
+        """Banner-carousel cards where the only visible text is a short
+        promo ribbon (e.g. '精選') should recover the real title from
+        img[alt]."""
+        html = """\
+<html><head><title>Banner</title></head>
+<body>
+""" + "".join(
+            f'<div class="item"><div class="img-box"><a href="/video/b{i}/">'
+            f'<img src="/p/{i}.jpg" alt="Banner {i} — Long Real Title Here"/>'
+            f'<div class="ribbon">精選</div></a></div></div>'
+            for i in range(10)
+        ) + "</body></html>"
+        r = parse_page(html, "https://example.com/")
+        titles = [res.title for res in r.resources]
+        assert "精選" not in titles
+        assert any(t.startswith("Banner 0") for t in titles)
+
+
 class TestListCardDurationTitleRescue:
     """Regression: on kissavs.com, every card had a thumbnail <a> whose
     only visible text was the duration badge (``<span class="label">
