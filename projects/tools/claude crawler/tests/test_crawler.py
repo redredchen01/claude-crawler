@@ -133,6 +133,107 @@ class TestFrontierIsDone:
         assert f.is_done()
 
 
+class TestFrontierThreadSafety:
+    """Unit 3: concurrent push/pop must not lose or duplicate URLs."""
+
+    def test_concurrent_pushes_deduplicate(self):
+        """8 threads pushing 100 unique URLs each → 800 pushes total, but
+        dedup + shared namespace means visited_count reflects union, not sum."""
+        import threading
+        f = Frontier("https://example.com", max_pages=2000, max_depth=5)
+        f.pop()  # drain the seed so we count just the concurrent pushes
+
+        barrier = threading.Barrier(8)
+
+        def worker(worker_id: int):
+            barrier.wait()
+            for i in range(100):
+                # Each worker pushes a unique namespace of URLs.
+                f.push(f"https://example.com/w{worker_id}/p{i}", 1)
+
+        threads = [threading.Thread(target=worker, args=(wid,)) for wid in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Seed was popped; 8*100 = 800 unique URLs were pushed.
+        assert f.visited_count == 801  # 800 new + 1 seed still in _visited
+
+    def test_concurrent_pops_no_duplicates(self):
+        """Concurrent poppers from a pre-seeded frontier each get distinct items."""
+        import threading
+        f = Frontier("https://example.com", max_pages=200, max_depth=5)
+        f.pop()  # drop seed
+        for i in range(50):
+            f.push(f"https://example.com/p{i}", 1)
+
+        popped: list[tuple[str, int]] = []
+        popped_lock = threading.Lock()
+        barrier = threading.Barrier(8)
+
+        def worker():
+            barrier.wait()
+            while True:
+                item = f.pop()
+                if item is None:
+                    return
+                with popped_lock:
+                    popped.append(item)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        urls = [url for url, _ in popped]
+        assert len(urls) == 50, f"expected 50 pops, got {len(urls)}"
+        assert len(set(urls)) == 50, "duplicate URL returned to multiple workers"
+
+    def test_push_pop_interleaved_no_corruption(self):
+        """4 threads interleaving push and pop — no RuntimeError, no data loss."""
+        import threading
+        import time
+
+        f = Frontier("https://example.com", max_pages=1000, max_depth=5)
+        f.pop()
+
+        stop = threading.Event()
+        errors: list[Exception] = []
+
+        def pusher(worker_id: int):
+            try:
+                i = 0
+                while not stop.is_set():
+                    f.push(f"https://example.com/w{worker_id}/p{i}", 1)
+                    i += 1
+            except Exception as exc:
+                errors.append(exc)
+
+        def popper():
+            try:
+                while not stop.is_set():
+                    f.pop()
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=pusher, args=(0,)),
+            threading.Thread(target=pusher, args=(1,)),
+            threading.Thread(target=popper),
+            threading.Thread(target=popper),
+        ]
+        for t in threads:
+            t.start()
+        time.sleep(0.5)  # let them race for 500ms
+        stop.set()
+        for t in threads:
+            t.join()
+
+        assert errors == [], f"thread-safety errors: {errors}"
+
+
 # ── Fetcher Tests ──
 
 
