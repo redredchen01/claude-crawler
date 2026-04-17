@@ -10,6 +10,7 @@ from urllib.parse import urlparse, urlunparse
 import streamlit as st
 
 from crawler import config, storage, analysis, export
+from crawler.cache import CacheService
 from crawler.core.engine import run_crawl
 from crawler.core.url import is_private_host
 
@@ -121,6 +122,23 @@ def render_sidebar(db_path: str):
             help="Skip plain HTTP and route every URL through Chromium. Use when "
                  "you know the target site needs JS rendering.",
         )
+
+        st.subheader("Cache Management")
+        cache_service = CacheService(db_path)
+        metrics = cache_service.get_metrics()
+        col_hits, col_misses = st.columns(2)
+        with col_hits:
+            st.metric("Cached Responses", metrics["entry_count"])
+        with col_misses:
+            cache_size_mb = metrics["total_bytes"] / (1024 * 1024)
+            st.metric("Cache Size (MB)", f"{cache_size_mb:.2f}")
+
+        if st.button("🗑️ Clear HTTP Cache", key="btn_clear_cache",
+                    use_container_width=True,
+                    help="Remove all cached HTTP responses. Does not affect scan results."):
+            cache_service.invalidate_all()
+            st.success("Cache cleared!")
+            st.rerun()
 
         if st.button("Start Scan", disabled=st.session_state.scan_running,
                      type="primary"):
@@ -314,7 +332,7 @@ def render_results(db_path: str, scan_job_id: int):
         return
 
     st.subheader(f"Results: {job.domain}")
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         st.metric("Pages Scanned", job.pages_scanned)
     with col2:
@@ -322,6 +340,10 @@ def render_results(db_path: str, scan_job_id: int):
     with col3:
         overview = analysis.get_tag_overview(db_path, scan_job_id)
         st.metric("Tags Found", overview["total_tags"])
+    with col4:
+        st.metric("Cache Hits", job.cache_hits)
+    with col5:
+        st.metric("Cache Misses", job.cache_misses)
 
     tab1, tab2, tab3 = st.tabs([
         "📊 Hot Resources", "🏷️ Tag Analysis", "⚠️ Failed Pages",
