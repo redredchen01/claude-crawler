@@ -7,9 +7,10 @@ import threading
 import pytest
 
 from crawler.storage import (
-    init_db, create_scan_job, get_scan_job, update_scan_job, list_scan_jobs,
-    insert_page, insert_resource, get_resources, save_resource_with_tags,
-    get_tags, get_resources_by_tag, update_tag_counts, update_page,
+    init_db, create_scan_job, delete_scan_job, get_scan_job, update_scan_job,
+    list_scan_jobs, insert_page, insert_resource, get_resources,
+    save_resource_with_tags, get_tags, get_resources_by_tag,
+    update_tag_counts, update_page,
 )
 from crawler.models import Resource
 
@@ -318,3 +319,60 @@ class TestGetResourcesQueryCount:
         resources = get_resources(db_path, job_id)
         assert len(resources) == 1
         assert sorted(resources[0].tags) == ["a,b", "c,d", "e"]
+
+
+class TestDeleteScanJob:
+    def _seed(self, db_path: str) -> int:
+        """Create one scan with 1 page, 1 resource (with 2 tags)."""
+        sj = create_scan_job(db_path, "https://a.com", "a.com", 10, 2)
+        page_id = insert_page(db_path, sj, "https://a.com/x")
+        update_page(db_path, page_id, status="fetched")
+        save_resource_with_tags(db_path, Resource(
+            scan_job_id=sj, page_id=page_id,
+            title="t", url="https://a.com/x", cover_url="",
+            tags=["t1", "t2"], views=1, likes=1, hearts=1,
+        ))
+        return sj
+
+    def test_cascades_through_all_child_tables(self, db_path):
+        sj = self._seed(db_path)
+        assert get_scan_job(db_path, sj) is not None
+        assert get_resources(db_path, sj)
+        assert get_tags(db_path, sj)
+
+        delete_scan_job(db_path, sj)
+
+        assert get_scan_job(db_path, sj) is None
+        assert get_resources(db_path, sj) == []
+        assert get_tags(db_path, sj) == []
+        # And resource_tags should also be empty for this scan's resources.
+        with sqlite3.connect(db_path) as conn:
+            rt_count = conn.execute(
+                "SELECT COUNT(*) FROM resource_tags rt "
+                "WHERE rt.resource_id IN ("
+                "  SELECT id FROM resources WHERE scan_job_id = ?)",
+                (sj,),
+            ).fetchone()[0]
+        assert rt_count == 0
+        # And no orphaned pages.
+        with sqlite3.connect(db_path) as conn:
+            p_count = conn.execute(
+                "SELECT COUNT(*) FROM pages WHERE scan_job_id = ?", (sj,),
+            ).fetchone()[0]
+        assert p_count == 0
+
+    def test_does_not_touch_other_scans(self, db_path):
+        sj1 = self._seed(db_path)
+        sj2 = self._seed(db_path)
+        delete_scan_job(db_path, sj1)
+        assert get_scan_job(db_path, sj1) is None
+        assert get_scan_job(db_path, sj2) is not None
+        assert len(get_resources(db_path, sj2)) == 1
+
+    def test_idempotent_on_missing_id(self, db_path):
+        # Deleting a non-existent id is a no-op, not an error.
+        delete_scan_job(db_path, 99_999)
+        # And jobs that do exist are untouched.
+        sj = self._seed(db_path)
+        delete_scan_job(db_path, 99_999)
+        assert get_scan_job(db_path, sj) is not None

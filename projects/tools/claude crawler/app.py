@@ -19,7 +19,7 @@ from crawler.core.engine import run_crawl
 _PSEUDO_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+\-.]*:(?!//)")
 
 
-def _normalize_entry_url(raw: str) -> str | None:
+def _normalize_entry_url(raw: str | None) -> str | None:
     """Coerce common user inputs into a valid http(s) URL.
 
     Accepts forms like ``example.com``, ``example.com/path``, ``//example.com``,
@@ -141,31 +141,45 @@ def render_sidebar(db_path: str):
                 f"#{j.id} {j.domain} ({j.status}, {j.resources_found}r)": j.id
                 for j in jobs
             }
-            selected = st.selectbox("Previous Scans", list(options.keys()))
+            selected = st.selectbox(
+                "Previous Scans", list(options.keys()),
+                key="sidebar_history_select",
+            )
             selected_id = options[selected]
             col_load, col_del = st.columns(2)
             with col_load:
-                if st.button("Load", use_container_width=True):
+                if st.button("Load", key="sidebar_btn_load",
+                             use_container_width=True):
                     st.session_state.scan_job_id = selected_id
                     st.session_state.scan_running = False
                     st.session_state.pop("pending_delete_id", None)
                     st.rerun()
             with col_del:
-                if st.button("Delete", use_container_width=True):
+                if st.button("Delete", key="sidebar_btn_delete",
+                             use_container_width=True):
                     st.session_state.pending_delete_id = selected_id
             if st.session_state.get("pending_delete_id") == selected_id:
                 st.warning(f"Delete scan #{selected_id}? This cannot be undone.")
                 c1, c2 = st.columns(2)
                 with c1:
                     if st.button("Confirm delete", type="primary",
+                                 key="sidebar_btn_confirm_delete",
                                  use_container_width=True):
-                        storage.delete_scan_job(db_path, selected_id)
-                        if st.session_state.get("scan_job_id") == selected_id:
-                            st.session_state.scan_job_id = None
-                        st.session_state.pop("pending_delete_id", None)
-                        st.rerun()
+                        # Pop FIRST so a double-click finds the sentinel gone
+                        # and skips the second DELETE.
+                        if st.session_state.pop(
+                            "pending_delete_id", None,
+                        ) == selected_id:
+                            storage.delete_scan_job(db_path, selected_id)
+                            if st.session_state.get("scan_job_id") == selected_id:
+                                st.session_state.scan_job_id = None
+                            # Reset the selectbox so the just-deleted ID
+                            # doesn't linger as the highlighted option.
+                            st.session_state.pop("sidebar_history_select", None)
+                            st.rerun()
                 with c2:
-                    if st.button("Cancel", use_container_width=True):
+                    if st.button("Cancel", key="sidebar_btn_cancel_delete",
+                                 use_container_width=True):
                         st.session_state.pop("pending_delete_id", None)
                         st.rerun()
 
@@ -414,8 +428,6 @@ def _render_zero_resources_diagnosis(db_path: str, scan_job_id: int) -> None:
 def render_failed_pages(db_path: str, scan_job_id: int):
     """Show failed pages grouped by failure_reason so users can debug
     crawl problems without digging through logs."""
-    import sqlite3
-
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         # Aggregate by reason for the summary table.
@@ -563,12 +575,18 @@ def render_history(db_path: str):
             f"Confirm delete of {len(empty_jobs)} empty scan(s)",
             key="confirm_purge_empty",
         )
-        if st.button("Purge empty scans", disabled=not confirm):
-            for j in empty_jobs:
-                storage.delete_scan_job(db_path, j.id)
-                if st.session_state.get("scan_job_id") == j.id:
-                    st.session_state.scan_job_id = None
-            st.session_state.pop("confirm_purge_empty", None)
+        if st.button("Purge empty scans", key="purge_empty_btn",
+                     disabled=not confirm):
+            # Always clear the checkbox state — even if a per-row delete
+            # raises mid-loop. Without try/finally the sticky checkbox
+            # auto-re-arms next render and silently re-purges.
+            try:
+                for j in empty_jobs:
+                    storage.delete_scan_job(db_path, j.id)
+                    if st.session_state.get("scan_job_id") == j.id:
+                        st.session_state.scan_job_id = None
+            finally:
+                st.session_state.pop("confirm_purge_empty", None)
             st.success(f"Deleted {len(empty_jobs)} empty scan(s).")
             st.rerun()
 

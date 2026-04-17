@@ -19,6 +19,10 @@ import time
 
 import requests
 from requests.adapters import HTTPAdapter
+from requests.exceptions import (
+    ChunkedEncodingError, ContentDecodingError, InvalidSchema, InvalidURL,
+    MissingSchema, SSLError, TooManyRedirects, URLRequired,
+)
 
 from crawler.config import (
     HTML_CONTENT_TYPE_MARKERS, HTTP_POOL_CONNECTIONS, HTTP_POOL_MAXSIZE,
@@ -30,6 +34,15 @@ logger = logging.getLogger(__name__)
 
 _JS_MARKERS = ("__NEXT_DATA__", "data-reactroot", "__nuxt")
 _STREAM_CHUNK_BYTES = 64 * 1024
+
+# Non-retryable: configuration errors, redirect loops, body-stream corruption.
+# Returning None immediately (vs. retrying 3× with backoff) saves up to 13s
+# per request and keeps the failure_reason classifier from drowning real
+# transient blips in permanent-failure noise.
+_NO_RETRY_EXCEPTIONS = (
+    InvalidURL, InvalidSchema, MissingSchema, URLRequired,
+    TooManyRedirects, SSLError, ChunkedEncodingError, ContentDecodingError,
+)
 
 
 def _build_session() -> requests.Session:
@@ -79,11 +92,18 @@ def _content_type_is_html(content_type: str) -> bool:
 
 
 def _read_capped_body(resp: requests.Response) -> bytes | None:
-    """Stream the response body up to ``MAX_RESPONSE_BYTES``; ``None`` past cap."""
+    """Stream the response body up to ``MAX_RESPONSE_BYTES``; ``None`` past cap.
+
+    On cap-exceeded, explicitly closes the response. urllib3 won't return a
+    half-read connection to the pool — being explicit makes the connection
+    drop deterministic instead of relying on ``__exit__`` semantics that
+    sometimes try (and fail) to drain first.
+    """
     cl = resp.headers.get("Content-Length")
     if cl:
         try:
             if int(cl) > MAX_RESPONSE_BYTES:
+                resp.close()
                 return None
         except ValueError:
             pass  # malformed Content-Length: fall through to streaming check
@@ -95,9 +115,30 @@ def _read_capped_body(resp: requests.Response) -> bytes | None:
             continue
         total += len(chunk)
         if total > MAX_RESPONSE_BYTES:
+            resp.close()
             return None
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+def _decode_body(resp: requests.Response, body: bytes) -> str:
+    """Decode ``body`` using the best available encoding signal.
+
+    ``requests`` defaults ``resp.encoding`` to ``ISO-8859-1`` when the
+    server returns ``Content-Type: text/html`` with no charset (per
+    RFC 2616) — applied blindly that mojibakes UTF-8 pages. Use
+    ``apparent_encoding`` (chardet) when the header is silent on charset.
+    """
+    encoding = resp.encoding
+    ctype = resp.headers.get("Content-Type", "").lower()
+    if encoding is None or "charset=" not in ctype:
+        # apparent_encoding triggers chardet on the body — only call it
+        # when the header genuinely doesn't tell us.
+        encoding = resp.apparent_encoding or encoding or "utf-8"
+    try:
+        return body.decode(encoding, errors="replace")
+    except LookupError:
+        return body.decode("utf-8", errors="replace")
 
 
 def _attempt_fetch(url: str) -> str | None:
@@ -123,12 +164,7 @@ def _attempt_fetch(url: str) -> str | None:
             )
             return None
 
-        encoding = resp.encoding or "utf-8"
-        try:
-            return body.decode(encoding, errors="replace")
-        except LookupError:
-            # Response declared an encoding Python doesn't recognize.
-            return body.decode("utf-8", errors="replace")
+        return _decode_body(resp, body)
 
 
 def fetch_page(url: str, use_playwright: bool = False) -> str | None:
@@ -150,6 +186,11 @@ def fetch_page(url: str, use_playwright: bool = False) -> str | None:
     for attempt in range(RETRY_COUNT):
         try:
             return _attempt_fetch(url)
+        except _NO_RETRY_EXCEPTIONS as exc:
+            # Permanent failure: malformed URL, redirect loop, SSL handshake
+            # failure, body-stream corruption. Retrying just burns backoff time.
+            logger.warning("Non-retryable fetch failure for %s: %s", url, exc)
+            return None
         except Exception as exc:
             backoff = (
                 RETRY_BACKOFF[attempt]

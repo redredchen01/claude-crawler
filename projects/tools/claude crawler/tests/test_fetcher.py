@@ -16,7 +16,8 @@ from crawler.core import fetcher
 def _mk_response(*, status: int = 200, content_type: str = "text/html",
                  body: bytes = b"<html><body>hi</body></html>",
                  content_length: str | None = None,
-                 encoding: str | None = "utf-8") -> MagicMock:
+                 encoding: str | None = "utf-8",
+                 apparent_encoding: str | None = "utf-8") -> MagicMock:
     """Build a MagicMock that quacks like a streaming requests.Response."""
     resp = MagicMock()
     resp.status_code = status
@@ -24,6 +25,10 @@ def _mk_response(*, status: int = 200, content_type: str = "text/html",
     if content_length is not None:
         resp.headers["Content-Length"] = content_length
     resp.encoding = encoding
+    # apparent_encoding is consulted by _decode_body when the response
+    # header lacks a charset. Set explicitly so MagicMock's auto-attr
+    # doesn't return an un-decodable Mock object.
+    resp.apparent_encoding = apparent_encoding
     if status >= 400:
         resp.raise_for_status.side_effect = Exception(f"HTTP {status}")
     else:
@@ -48,8 +53,11 @@ class TestSessionReuse:
 
     def test_session_uses_pooled_adapter(self):
         adapter = fetcher._SESSION.get_adapter("https://example.com/")
-        # The pool's connection cap reflects HTTP_POOL_MAXSIZE.
-        assert adapter._pool_maxsize == config.HTTP_POOL_MAXSIZE
+        # Pool config lives in the adapter's stored kwargs (public-ish
+        # interface preserved across requests/urllib3 versions). Don't
+        # reach into urllib3-private `_pool_maxsize`.
+        kw = adapter.poolmanager.connection_pool_kw
+        assert kw["maxsize"] == config.HTTP_POOL_MAXSIZE
 
     def test_fetch_routes_through_module_session(self):
         """Multiple calls go through the same Session, not new ones."""
@@ -149,22 +157,47 @@ class TestResponseSizeCap:
 # ---------------------------------------------------------------------------
 
 class TestEncoding:
-    def test_decodes_using_response_encoding(self):
+    def test_uses_header_charset_when_present(self):
+        """Content-Type with explicit charset wins over apparent_encoding."""
         body = "héllo".encode("latin-1")
         with patch.object(fetcher._SESSION, "get") as mock_get:
-            resp = _mk_response(body=body, encoding="latin-1")
+            resp = _mk_response(
+                body=body,
+                content_type="text/html; charset=latin-1",
+                encoding="latin-1",
+                apparent_encoding="utf-8",  # would mis-decode
+            )
             mock_get.return_value = resp
             assert fetcher.fetch_page("https://example.com/x") == "héllo"
 
-    def test_falls_back_when_encoding_missing(self):
+    def test_uses_apparent_encoding_when_header_lacks_charset(self):
+        """No charset in header → use chardet's apparent_encoding (utf-8 for
+        a UTF-8 page that requests would otherwise mojibake as latin-1)."""
+        body = "中文".encode("utf-8")
         with patch.object(fetcher._SESSION, "get") as mock_get:
-            resp = _mk_response(body=b"hello", encoding=None)
+            resp = _mk_response(
+                body=body,
+                content_type="text/html",  # no charset
+                encoding="ISO-8859-1",  # what requests defaults to per RFC
+                apparent_encoding="utf-8",
+            )
+            mock_get.return_value = resp
+            assert fetcher.fetch_page("https://example.com/x") == "中文"
+
+    def test_falls_back_to_utf8_when_everything_missing(self):
+        with patch.object(fetcher._SESSION, "get") as mock_get:
+            resp = _mk_response(body=b"hello", encoding=None,
+                                apparent_encoding=None)
             mock_get.return_value = resp
             assert fetcher.fetch_page("https://example.com/x") == "hello"
 
     def test_unknown_encoding_falls_back_to_utf8(self):
         with patch.object(fetcher._SESSION, "get") as mock_get:
-            resp = _mk_response(body=b"hi", encoding="totally-fake-encoding")
+            resp = _mk_response(
+                body=b"hi",
+                content_type="text/html; charset=totally-fake",
+                encoding="totally-fake-encoding",
+            )
             mock_get.return_value = resp
             assert fetcher.fetch_page("https://example.com/x") == "hi"
 
@@ -201,3 +234,54 @@ class TestRetry:
              patch("crawler.core.fetcher.time.sleep"):
             mock_get.return_value = _mk_response(status=500)
             assert fetcher.fetch_page("https://example.com/x") is None
+
+
+class TestNonRetryableExceptions:
+    """Configuration / content errors return None immediately without
+    burning ~13s of retry backoff."""
+
+    @pytest.mark.parametrize("exc_cls,name", [
+        ("InvalidURL", "InvalidURL"),
+        ("MissingSchema", "MissingSchema"),
+        ("InvalidSchema", "InvalidSchema"),
+        ("URLRequired", "URLRequired"),
+        ("TooManyRedirects", "TooManyRedirects"),
+        ("SSLError", "SSLError"),
+    ])
+    def test_no_retry_on_permanent_failures(self, exc_cls, name):
+        from requests import exceptions as rexc
+        exc = getattr(rexc, exc_cls)("permanent")
+
+        slept = []
+
+        def fake_sleep(s):
+            slept.append(s)
+
+        with patch.object(fetcher._SESSION, "get",
+                          side_effect=exc) as mock_get, \
+             patch("crawler.core.fetcher.time.sleep", side_effect=fake_sleep):
+            assert fetcher.fetch_page("https://example.com/x") is None
+        # Exactly one attempt, zero backoff sleeps.
+        assert mock_get.call_count == 1, f"{name} should not retry"
+        assert slept == [], f"{name} should not sleep on backoff"
+
+    def test_no_retry_on_chunked_encoding_error_mid_stream(self):
+        """Body-stream corruption is permanent — retrying gets the same
+        garbage back. Verifies the new exception happens AFTER headers OK
+        but DURING iter_content."""
+        from requests.exceptions import ChunkedEncodingError
+
+        def explode_iter(*args, **kwargs):
+            yield b"<html>"
+            raise ChunkedEncodingError("connection reset mid-body")
+
+        slept = []
+        with patch.object(fetcher._SESSION, "get") as mock_get, \
+             patch("crawler.core.fetcher.time.sleep",
+                   side_effect=lambda s: slept.append(s)):
+            resp = _mk_response()
+            resp.iter_content.side_effect = explode_iter
+            mock_get.return_value = resp
+            assert fetcher.fetch_page("https://example.com/x") is None
+        assert mock_get.call_count == 1
+        assert slept == []
