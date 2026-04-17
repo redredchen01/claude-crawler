@@ -96,6 +96,19 @@ _ICON_URL_RE = re.compile(
 # article covers virtually always exceed this on at least one axis.
 _MIN_COVER_DIMENSION = 50
 
+# --- Published date extraction --------------------------------------------
+#
+# The previous fallback regex `\d{4}[-/]\d{2}[-/]\d{2}` ran over the
+# entire `soup.get_text()` — so copyright footers ("© 2010") and stray
+# date strings were happily attributed as the article's publish date.
+# Plus CJK formats like "2025年3月15日" weren't recognised at all. The
+# helper below: container-scoped fallback, supports CJK + slash + ISO,
+# normalises everything to `YYYY-MM-DD`.
+
+_DATE_ISO_RE = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})(?:T[\d:.+\-Z]*)?\b")
+_DATE_SLASH_RE = re.compile(r"\b(\d{4})/(\d{1,2})/(\d{1,2})\b")
+_DATE_CJK_RE = re.compile(r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日?")
+
 
 def _class_tokens(el: BsTag) -> str:
     """Return the element's class list joined with spaces (empty if none)."""
@@ -657,6 +670,81 @@ def _pick_cover_image(soup, container, base_url: str) -> str:
     return urljoin(base_url, qualifying[0][1])
 
 
+def _normalize_date_triple(year: int, month: int, day: int) -> str:
+    """Validate and zero-pad a (year, month, day) triple to ``YYYY-MM-DD``.
+
+    Returns ``""`` if the triple isn't a plausible publish date (year out
+    of 1990..2099, month not 1..12, day not 1..31).
+    """
+    if not (1990 <= year <= 2099):
+        return ""
+    if not (1 <= month <= 12):
+        return ""
+    if not (1 <= day <= 31):
+        return ""
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def _extract_published_date(soup: BeautifulSoup, container) -> str:
+    """Pick the article's publish date with container-scoped regex fallback.
+
+    Resolution order:
+      1. ``<time datetime>`` inside container (truncated to date).
+      2. ``<meta property="article:published_time">``.
+      3. ``<time datetime>`` anywhere in the document.
+      4. Regex over ``container.get_text()`` only — never the whole page,
+         so footer copyright dates ("© 2010") and unrelated date strings
+         in nav/sidebar don't get attributed.
+
+    Output is always normalised to ``YYYY-MM-DD`` (or empty string).
+    Recognised regex formats: ISO ``YYYY-MM-DD[T...]``, slash
+    ``YYYY/M/D``, CJK ``YYYY年M月D日``.
+    """
+    def _from_datetime_attr(time_tag) -> str:
+        if not time_tag or not time_tag.get("datetime"):
+            return ""
+        # Truncate ISO datetime to date portion.
+        dt = time_tag["datetime"].strip()
+        m = _DATE_ISO_RE.search(dt)
+        if not m:
+            return ""
+        return _normalize_date_triple(int(m[1]), int(m[2]), int(m[3]))
+
+    if container is not None:
+        t = container.find("time", attrs={"datetime": True})
+        result = _from_datetime_attr(t)
+        if result:
+            return result
+
+    meta_dt = _extract_meta(soup, "article:published_time")
+    if meta_dt:
+        m = _DATE_ISO_RE.search(meta_dt)
+        if m:
+            normalised = _normalize_date_triple(int(m[1]), int(m[2]), int(m[3]))
+            if normalised:
+                return normalised
+
+    # Fallback: any <time datetime> in the doc (cases where container is
+    # missing or the publish-time time tag lives outside <article>).
+    t = soup.find("time", attrs={"datetime": True})
+    result = _from_datetime_attr(t)
+    if result:
+        return result
+
+    # Regex fallback runs only on the container — keeps copyright footers
+    # and stray sidebar dates out of the result.
+    if container is None:
+        return ""
+    text = container.get_text(" ", strip=True)
+    for regex in (_DATE_ISO_RE, _DATE_SLASH_RE, _DATE_CJK_RE):
+        m = regex.search(text)
+        if m:
+            normalised = _normalize_date_triple(int(m[1]), int(m[2]), int(m[3]))
+            if normalised:
+                return normalised
+    return ""
+
+
 def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
     """Extract a single Resource from a detail page."""
     # Title — og:title first, then h1, then <title> (with suffix-strip).
@@ -751,18 +839,9 @@ def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
         if len(segments) >= 2:
             category = segments[0]
 
-    # Published date
-    published_at = ""
-    time_tag = soup.find("time")
-    if time_tag and time_tag.get("datetime"):
-        published_at = time_tag["datetime"]
-    if not published_at:
-        published_at = _extract_meta(soup, "article:published_time")
-    if not published_at:
-        text = soup.get_text()
-        m = re.search(r"\d{4}[-/]\d{2}[-/]\d{2}", text)
-        if m:
-            published_at = m.group()
+    # Published date — see _extract_published_date for the container-scoped
+    # fallback rules and CJK / slash format support.
+    published_at = _extract_published_date(soup, container)
 
     return Resource(
         title=title,

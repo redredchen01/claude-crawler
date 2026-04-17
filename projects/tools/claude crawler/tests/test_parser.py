@@ -1113,3 +1113,231 @@ class TestDetailCoverIntegration:
         """
         result = parse_page(html, "https://example.com/post/1")
         assert result.resources[0].cover_url == "https://example.com/uploads/cover.jpg"
+
+
+# ---------------------------------------------------------------------------
+# Unit 3 — Published date precision (CJK + container-scoped + year-guard)
+# ---------------------------------------------------------------------------
+
+from crawler.parser import _extract_published_date, _normalize_date_triple
+
+
+class TestNormalizeDateTriple:
+    def test_pads_single_digit_month_day(self):
+        assert _normalize_date_triple(2025, 3, 5) == "2025-03-05"
+
+    def test_two_digit_month_day_unchanged(self):
+        assert _normalize_date_triple(2025, 12, 31) == "2025-12-31"
+
+    def test_year_below_1990_rejected(self):
+        assert _normalize_date_triple(1989, 6, 15) == ""
+
+    def test_year_above_2099_rejected(self):
+        assert _normalize_date_triple(2100, 1, 1) == ""
+
+    def test_invalid_month_rejected(self):
+        assert _normalize_date_triple(2025, 13, 1) == ""
+        assert _normalize_date_triple(2025, 0, 1) == ""
+
+    def test_invalid_day_rejected(self):
+        assert _normalize_date_triple(2025, 6, 32) == ""
+        assert _normalize_date_triple(2025, 6, 0) == ""
+
+
+class TestExtractPublishedDate:
+    def _parse(self, html: str):
+        return BeautifulSoup(html, "lxml")
+
+    def test_iso_datetime_in_container_truncated_to_date(self):
+        soup = self._parse("""
+        <html><body>
+            <article>
+                <time datetime="2025-03-15T10:00:00Z">March 15, 2025</time>
+            </article>
+        </body></html>
+        """)
+        article = soup.find("article")
+        assert _extract_published_date(soup, article) == "2025-03-15"
+
+    def test_iso_date_only_in_container(self):
+        soup = self._parse("""
+        <html><body>
+            <article>
+                <time datetime="2025-03-15">x</time>
+            </article>
+        </body></html>
+        """)
+        article = soup.find("article")
+        assert _extract_published_date(soup, article) == "2025-03-15"
+
+    def test_meta_article_published_time_used_as_fallback(self):
+        soup = self._parse("""
+        <html><head>
+            <meta property="article:published_time"
+                  content="2025-03-15T10:00:00Z">
+        </head><body>
+            <article><h1>x</h1></article>
+        </body></html>
+        """)
+        article = soup.find("article")
+        assert _extract_published_date(soup, article) == "2025-03-15"
+
+    def test_container_time_wins_over_sidebar_time(self):
+        soup = self._parse("""
+        <html><body>
+            <article>
+                <time datetime="2025-03-15">x</time>
+            </article>
+            <aside>
+                <time datetime="2024-01-01">old post</time>
+            </aside>
+        </body></html>
+        """)
+        article = soup.find("article")
+        assert _extract_published_date(soup, article) == "2025-03-15"
+
+    def test_cjk_format_in_container(self):
+        soup = self._parse("""
+        <html><body>
+            <article>
+                <h1>x</h1>
+                <p>发布于 2025年3月15日</p>
+            </article>
+        </body></html>
+        """)
+        article = soup.find("article")
+        assert _extract_published_date(soup, article) == "2025-03-15"
+
+    def test_cjk_with_zero_padding(self):
+        soup = self._parse("""
+        <html><body>
+            <article><p>2025年03月05日</p></article>
+        </body></html>
+        """)
+        article = soup.find("article")
+        assert _extract_published_date(soup, article) == "2025-03-05"
+
+    def test_slash_format_in_container(self):
+        soup = self._parse("""
+        <html><body>
+            <article><p>Posted 2025/3/15</p></article>
+        </body></html>
+        """)
+        article = soup.find("article")
+        assert _extract_published_date(soup, article) == "2025-03-15"
+
+    def test_copyright_footer_year_not_picked(self):
+        """Container has no date; copyright in footer (outside container)
+        must not be returned. Bare year alone shouldn't match anyway."""
+        soup = self._parse("""
+        <html><body>
+            <article>
+                <h1>x</h1>
+                <p>body without dates</p>
+            </article>
+            <footer>© 2010 Example Corp</footer>
+        </body></html>
+        """)
+        article = soup.find("article")
+        assert _extract_published_date(soup, article) == ""
+
+    def test_bare_year_alone_doesnt_match(self):
+        """`2025` alone has no month/day — regex requires a triple."""
+        soup = self._parse("""
+        <html><body>
+            <article><p>Year is 2025</p></article>
+        </body></html>
+        """)
+        article = soup.find("article")
+        assert _extract_published_date(soup, article) == ""
+
+    def test_invalid_date_components_rejected(self):
+        """`2025-13-45` has invalid month/day — falls through to next regex."""
+        soup = self._parse("""
+        <html><body>
+            <article><p>Build 2025-13-45 v2</p></article>
+        </body></html>
+        """)
+        article = soup.find("article")
+        assert _extract_published_date(soup, article) == ""
+
+    def test_no_date_anywhere_returns_empty(self):
+        soup = self._parse("<html><body><article>nothing</article></body></html>")
+        article = soup.find("article")
+        assert _extract_published_date(soup, article) == ""
+
+    def test_no_container_skips_regex_fallback(self):
+        """When _pick_main_container returns None, regex fallback over the
+        whole soup is intentionally skipped to avoid copyright noise."""
+        soup = self._parse("""
+        <html><body>
+            <p>2025-03-15</p>
+            <footer>© 2010</footer>
+        </body></html>
+        """)
+        # No <article>/<main> means no container; meta + <time> also absent.
+        # Even though a date exists in <p>, we don't run regex on the whole
+        # document — return empty rather than risk copyright noise.
+        assert _extract_published_date(soup, None) == ""
+
+    def test_doc_level_time_used_when_container_has_no_time(self):
+        """Container exists but has no <time>; doc-level <time> in header
+        is used as the structured fallback before regex."""
+        soup = self._parse("""
+        <html><body>
+            <header>
+                <time datetime="2025-03-15">x</time>
+            </header>
+            <article>
+                <h1>x</h1><p>body</p>
+            </article>
+        </body></html>
+        """)
+        article = soup.find("article")
+        assert _extract_published_date(soup, article) == "2025-03-15"
+
+    def test_first_match_wins_in_container(self):
+        soup = self._parse("""
+        <html><body>
+            <article>
+                <p>Posted 2025-03-15. Updated 2025-04-01.</p>
+            </article>
+        </body></html>
+        """)
+        article = soup.find("article")
+        assert _extract_published_date(soup, article) == "2025-03-15"
+
+
+class TestDetailDateRegression:
+    """End-to-end: detail page with copyright-only footer must not
+    return the copyright year as published_at."""
+
+    def test_copyright_footer_does_not_pollute_published_at(self):
+        html = """
+        <html><head>
+            <meta property="og:title" content="Real Article">
+        </head><body>
+        <article>
+            <h1>Real Article</h1>
+            <p>body without dates</p>
+        </article>
+        <footer>© 2010 Example Corp — All rights reserved</footer>
+        </body></html>
+        """
+        result = parse_page(html, "https://example.com/post/1")
+        # Pre-fix: returned "2010" via global regex. Now: empty.
+        assert result.resources[0].published_at == ""
+
+    def test_cjk_date_round_trip_through_parse_page(self):
+        html = """
+        <html><head>
+            <meta property="og:title" content="Real Article">
+        </head><body>
+        <article>
+            <h1>Real Article</h1>
+            <p>发布日期：2025年3月15日</p>
+        </article>
+        </body></html>
+        """
+        result = parse_page(html, "https://example.com/post/1")
+        assert result.resources[0].published_at == "2025-03-15"
