@@ -2075,3 +2075,327 @@ class TestMicrodataExtractor:
             '<div itemscope><span itemprop="name">X</span></div>'
         ))
         assert out == {}
+
+
+# ---------------------------------------------------------------------------
+# Plan 005 Unit 4 — JSON-LD extractor (full field coverage)
+# ---------------------------------------------------------------------------
+
+class TestJsonLdExtractorFieldCoverage:
+    """_extract_jsonld(blocks) consolidates metrics + all structured
+    fields from schema.org JSON-LD entities. Input is pre-parsed
+    entity list (BS4-independent so priority tests can use dict literals)."""
+
+    def test_video_object_full(self):
+        from crawler.parser import _extract_jsonld
+        blocks = [{
+            "@type": "VideoObject",
+            "name": "Grace 029",
+            "image": "https://cdn/p.jpg",
+            "description": "A video description.",
+            "datePublished": "2026-04-17",
+            "articleSection": "Roleplay",
+            "keywords": "python, web, perf",
+            "interactionStatistic": [
+                {"@type": "InteractionCounter",
+                 "interactionType": {"@type": "WatchAction"},
+                 "userInteractionCount": 14143},
+                {"@type": "InteractionCounter",
+                 "interactionType": {"@type": "LikeAction"},
+                 "userInteractionCount": 3096},
+            ],
+        }]
+        out = _extract_jsonld(blocks)
+        assert out == {
+            "title": "Grace 029",
+            "cover_url": "https://cdn/p.jpg",
+            "description": "A video description.",
+            "published_at": "2026-04-17",
+            "category": "Roleplay",
+            "tags": ["python", "web", "perf"],
+            "views": 14143,
+            "likes": 3096,
+        }
+
+    def test_no_detail_type_returns_empty(self):
+        from crawler.parser import _extract_jsonld
+        blocks = [{"@type": "BreadcrumbList", "itemListElement": []}]
+        assert _extract_jsonld(blocks) == {}
+
+    def test_empty_blocks(self):
+        from crawler.parser import _extract_jsonld
+        assert _extract_jsonld([]) == {}
+
+    def test_article_plus_breadcrumb_picks_article(self):
+        from crawler.parser import _extract_jsonld
+        blocks = [
+            {"@type": "BreadcrumbList", "itemListElement": [{"name": "Home"}]},
+            {"@type": "Article", "name": "Article Title",
+             "image": "https://cdn/a.jpg"},
+        ]
+        out = _extract_jsonld(blocks)
+        assert out["title"] == "Article Title"
+        assert out["cover_url"] == "https://cdn/a.jpg"
+
+    def test_image_as_dict(self):
+        from crawler.parser import _extract_jsonld
+        blocks = [{
+            "@type": "Article",
+            "name": "X",
+            "image": {"@type": "ImageObject", "url": "https://cdn/i.jpg"},
+        }]
+        assert _extract_jsonld(blocks)["cover_url"] == "https://cdn/i.jpg"
+
+    def test_image_as_list(self):
+        from crawler.parser import _extract_jsonld
+        blocks = [{
+            "@type": "Article",
+            "name": "X",
+            "image": ["https://cdn/first.jpg", "https://cdn/second.jpg"],
+        }]
+        assert _extract_jsonld(blocks)["cover_url"] == "https://cdn/first.jpg"
+
+    def test_thumbnail_url_fallback(self):
+        from crawler.parser import _extract_jsonld
+        blocks = [{
+            "@type": "Article",
+            "name": "X",
+            "thumbnailUrl": "https://cdn/thumb.jpg",
+        }]
+        assert _extract_jsonld(blocks)["cover_url"] == "https://cdn/thumb.jpg"
+
+    def test_keywords_as_list(self):
+        from crawler.parser import _extract_jsonld
+        blocks = [{"@type": "Article", "name": "X",
+                   "keywords": ["python", "web", "perf"]}]
+        assert _extract_jsonld(blocks)["tags"] == ["python", "web", "perf"]
+
+    def test_keywords_cjk_delimiters(self):
+        from crawler.parser import _extract_jsonld
+        blocks = [{"@type": "Article", "name": "X",
+                   "keywords": "偶像，巨乳、痴女;纪录片"}]
+        assert _extract_jsonld(blocks)["tags"] == ["偶像", "巨乳", "痴女", "纪录片"]
+
+    def test_keywords_stuffed_dropped(self):
+        from crawler.parser import _extract_jsonld
+        blocks = [{"@type": "Article", "name": "X",
+                   "keywords": ",".join(f"w{i}" for i in range(25))}]
+        assert "tags" not in _extract_jsonld(blocks)
+
+    def test_at_type_as_list(self):
+        """schema.org allows multiple types on one entity."""
+        from crawler.parser import _extract_jsonld
+        blocks = [{"@type": ["CreativeWork", "VideoObject"], "name": "X"}]
+        assert _extract_jsonld(blocks)["title"] == "X"
+
+    def test_uploaddate_fallback(self):
+        from crawler.parser import _extract_jsonld
+        blocks = [{"@type": "VideoObject", "name": "X",
+                   "uploadDate": "2026-01-15"}]
+        assert _extract_jsonld(blocks)["published_at"] == "2026-01-15"
+
+    def test_metrics_schema_url_form(self):
+        """Some sites write http://schema.org/WatchAction — must be parsed."""
+        from crawler.parser import _extract_jsonld
+        blocks = [{
+            "@type": "VideoObject",
+            "name": "X",
+            "interactionStatistic": [{
+                "@type": "InteractionCounter",
+                "interactionType": "http://schema.org/WatchAction",
+                "userInteractionCount": 42,
+            }],
+        }]
+        assert _extract_jsonld(blocks)["views"] == 42
+
+    def test_picks_more_complete_entity(self):
+        """When multiple detail entities exist, prefer name+image."""
+        from crawler.parser import _extract_jsonld
+        blocks = [
+            {"@type": "Article", "name": "Poor"},
+            {"@type": "Article", "name": "Rich", "image": "https://cdn/i.jpg"},
+        ]
+        assert _extract_jsonld(blocks)["title"] == "Rich"
+
+    def test_placeholder_image_rejected(self):
+        from crawler.parser import _extract_jsonld
+        blocks = [{"@type": "Article", "name": "X",
+                   "image": "https://cdn/default-cover.png"}]
+        assert "cover_url" not in _extract_jsonld(blocks)
+
+
+# ---------------------------------------------------------------------------
+# Plan 005 Unit 5 — merge_by_priority (pure) + _extract_structured (wrapper)
+# ---------------------------------------------------------------------------
+
+class TestMergeByPriority:
+    """Pure-dict tests for priority/validation/omit semantics — no BS4."""
+
+    def test_single_source(self):
+        from crawler.parser import _merge_by_priority
+        merged, prov, desc = _merge_by_priority([
+            ("jsonld", {"title": "T", "views": 10}),
+        ])
+        assert merged == {"title": "T", "views": 10}
+        assert prov["title"] == "jsonld"
+        assert prov["views"] == "jsonld"
+        assert prov["tags"] == "missing"
+        assert desc == ""
+
+    def test_higher_priority_wins(self):
+        from crawler.parser import _merge_by_priority
+        merged, prov, _ = _merge_by_priority([
+            ("jsonld", {"title": "From JSON-LD"}),
+            ("opengraph", {"title": "From OG"}),
+        ])
+        assert merged["title"] == "From JSON-LD"
+        assert prov["title"] == "jsonld"
+
+    def test_fills_missing_from_lower(self):
+        from crawler.parser import _merge_by_priority
+        merged, prov, _ = _merge_by_priority([
+            ("jsonld", {"views": 100}),
+            ("opengraph", {"title": "OG Title"}),
+        ])
+        assert merged == {"views": 100, "title": "OG Title"}
+        assert prov["views"] == "jsonld"
+        assert prov["title"] == "opengraph"
+
+    def test_description_propagates_separately(self):
+        from crawler.parser import _merge_by_priority
+        merged, prov, desc = _merge_by_priority([
+            ("jsonld", {"title": "T", "description": "desc from jl"}),
+        ])
+        assert desc == "desc from jl"
+        # description is NOT in merged_fields or provenance
+        assert "description" not in merged
+        assert "description" not in prov
+
+    def test_description_first_source_wins(self):
+        from crawler.parser import _merge_by_priority
+        _, _, desc = _merge_by_priority([
+            ("jsonld", {"description": "jl"}),
+            ("opengraph", {"description": "og"}),
+        ])
+        assert desc == "jl"
+
+    def test_description_falls_through_to_lower_priority(self):
+        from crawler.parser import _merge_by_priority
+        _, _, desc = _merge_by_priority([
+            ("jsonld", {"title": "T"}),
+            ("opengraph", {"description": "og desc"}),
+        ])
+        assert desc == "og desc"
+
+    def test_invalid_views_falls_through(self):
+        """JSON-LD returns views as string → invalid, OG doesn't have
+        views, so field stays missing (DOM will fill later in Unit 6)."""
+        from crawler.parser import _merge_by_priority
+        merged, prov, _ = _merge_by_priority([
+            ("jsonld", {"views": "not-an-int"}),
+        ])
+        assert "views" not in merged
+        assert prov["views"] == "missing"
+
+    def test_views_zero_is_valid(self):
+        """Correctness #2: JSON-LD-declared 0 is a real signal."""
+        from crawler.parser import _merge_by_priority
+        merged, prov, _ = _merge_by_priority([
+            ("jsonld", {"views": 0}),
+        ])
+        assert merged["views"] == 0
+        assert prov["views"] == "jsonld"
+
+    def test_views_negative_rejected(self):
+        from crawler.parser import _merge_by_priority
+        merged, prov, _ = _merge_by_priority([
+            ("jsonld", {"views": -5}),
+        ])
+        assert "views" not in merged
+        assert prov["views"] == "missing"
+
+    def test_views_bool_rejected(self):
+        """bool is a subclass of int in Python — explicit reject to
+        prevent `{"views": True}` from becoming views=1."""
+        from crawler.parser import _merge_by_priority
+        merged, _, _ = _merge_by_priority([("jsonld", {"views": True})])
+        assert "views" not in merged
+
+    def test_empty_tags_list_rejected(self):
+        from crawler.parser import _merge_by_priority
+        merged, _, _ = _merge_by_priority([("jsonld", {"tags": []})])
+        assert "tags" not in merged
+
+    def test_placeholder_cover_rejected(self):
+        from crawler.parser import _merge_by_priority
+        merged, _, _ = _merge_by_priority([
+            ("jsonld", {"cover_url": "https://site/static/default.png"}),
+        ])
+        assert "cover_url" not in merged
+
+    def test_non_http_cover_rejected(self):
+        from crawler.parser import _merge_by_priority
+        merged, _, _ = _merge_by_priority([
+            ("jsonld", {"cover_url": "not a url"}),
+        ])
+        assert "cover_url" not in merged
+
+    def test_fields_outside_whitelist_ignored(self):
+        """Defense: unknown fields silently dropped (don't let a future
+        extractor typo pollute merged_fields)."""
+        from crawler.parser import _merge_by_priority
+        merged, _, _ = _merge_by_priority([
+            ("jsonld", {"title": "T", "unknown_field": "x"}),
+        ])
+        assert "unknown_field" not in merged
+
+    def test_all_sources_empty_produces_all_missing(self):
+        from crawler.parser import _merge_by_priority
+        merged, prov, desc = _merge_by_priority([])
+        assert merged == {}
+        assert desc == ""
+        from crawler.raw_data import PROVENANCE_FIELDS, PROVENANCE_MISSING
+        for field in PROVENANCE_FIELDS:
+            assert prov[field] == PROVENANCE_MISSING
+
+
+class TestExtractStructuredIntegration:
+    """Thin integration test for the BS4-aware wrapper — priority logic
+    is covered by TestMergeByPriority, here we only verify that the four
+    source extractors are wired correctly."""
+
+    def test_kissavs_style_jsonld_video_wins(self):
+        from crawler.parser import _extract_structured
+        html = """
+            <meta property="og:title" content="OG Title">
+            <script type="application/ld+json">
+            {"@type":"VideoObject","name":"JSON-LD Title",
+             "interactionStatistic":[{"@type":"InteractionCounter",
+                "interactionType":{"@type":"WatchAction"},
+                "userInteractionCount":5000}]}
+            </script>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        merged, prov, _ = _extract_structured(soup)
+        # JSON-LD name wins over OG title
+        assert merged["title"] == "JSON-LD Title"
+        assert prov["title"] == "jsonld"
+        assert merged["views"] == 5000
+        assert prov["views"] == "jsonld"
+
+    def test_og_only_when_no_jsonld(self):
+        from crawler.parser import _extract_structured
+        html = '<meta property="og:title" content="Only OG">'
+        soup = BeautifulSoup(html, "lxml")
+        merged, prov, _ = _extract_structured(soup)
+        assert merged["title"] == "Only OG"
+        assert prov["title"] == "opengraph"
+
+    def test_completely_empty_page(self):
+        from crawler.parser import _extract_structured
+        soup = BeautifulSoup("<p>nothing</p>", "lxml")
+        merged, prov, desc = _extract_structured(soup)
+        assert merged == {}
+        assert desc == ""
+        from crawler.raw_data import PROVENANCE_MISSING
+        assert prov["title"] == PROVENANCE_MISSING

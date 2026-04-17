@@ -834,6 +834,199 @@ def _extract_microdata(soup: BeautifulSoup) -> dict:
     return out
 
 
+def _jsonld_image_url(value) -> str | None:
+    """Extract a URL from schema.org's varied `image`/`thumbnailUrl` shape:
+    str | {url: str} | list[str|dict]."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        url = value.get("url")
+        return url if isinstance(url, str) else None
+    if isinstance(value, list):
+        for item in value:
+            u = _jsonld_image_url(item)
+            if u:
+                return u
+    return None
+
+
+def _jsonld_first_string(value) -> str | None:
+    """Take a scalar or first-in-list string from a schema.org property."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        for v in value:
+            if isinstance(v, str) and v:
+                return v
+    return None
+
+
+def _extract_jsonld(blocks: list) -> dict:
+    """JSON-LD entity list → unified field dict. Picks the first entity
+    whose @type is in `_JSONLD_DETAIL_TYPES`; for multiple matches,
+    prefers the one with both a name and an image (most complete).
+    Falls back to document order on ties.
+
+    Input is the flattened entity list from `_parse_jsonld_blocks`;
+    caller must run that first (keeps `_extract_jsonld` BS4-free so
+    merge/priority tests don't need HTML fixtures)."""
+    # Pick primary detail entity
+    detail_entities = []
+    for item in blocks:
+        if not isinstance(item, dict):
+            continue
+        t = item.get("@type")
+        types = t if isinstance(t, list) else [t] if isinstance(t, str) else []
+        if any(tt in _JSONLD_DETAIL_TYPES for tt in types if isinstance(tt, str)):
+            detail_entities.append(item)
+    if not detail_entities:
+        return {}
+    # Completeness preference: has name AND image > only name > first
+    primary = max(
+        detail_entities,
+        key=lambda e: (bool(e.get("name") or e.get("headline")) + bool(e.get("image"))),
+    )
+
+    out: dict = {}
+
+    title = _jsonld_first_string(primary.get("name")) or _jsonld_first_string(
+        primary.get("headline")
+    )
+    if title:
+        out["title"] = _strip_title_site_suffix(title, require_chain=True)
+
+    cover = _jsonld_image_url(primary.get("image")) or _jsonld_image_url(
+        primary.get("thumbnailUrl")
+    )
+    if cover and _valid_cover_url(cover):
+        out["cover_url"] = cover
+
+    desc = _jsonld_first_string(primary.get("description"))
+    if desc:
+        out["description"] = desc
+
+    category = _jsonld_first_string(
+        primary.get("articleSection")
+    ) or _jsonld_first_string(primary.get("genre"))
+    if category:
+        out["category"] = category
+
+    published = _jsonld_first_string(
+        primary.get("datePublished")
+    ) or _jsonld_first_string(primary.get("uploadDate"))
+    if published:
+        out["published_at"] = published
+
+    tags = _parse_tags_keywords(primary.get("keywords"))
+    if tags and _tags_pass_stuffing_gate(tags):
+        out["tags"] = tags
+
+    # Metrics — delegates to the existing helper so any callers still
+    # depending on that function behaviorally get the same numbers.
+    metrics = _extract_jsonld_metrics(blocks)
+    for k in ("views", "likes", "hearts"):
+        if k in metrics:
+            out[k] = metrics[k]
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Merge by priority (pure function — unit-testable without BS4)
+# ---------------------------------------------------------------------------
+
+def _is_valid_field(field: str, value) -> bool:
+    """Whether `value` for `field` is acceptable to enter merged_fields.
+    Invalid values fall through to the next priority source or DOM."""
+    if field in ("views", "likes", "hearts"):
+        # >= 0 (not > 0) — JSON-LD-declared 0 is a real signal
+        # (Correctness #2 in parser.py). Reject string/float.
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    if field == "cover_url":
+        return isinstance(value, str) and _valid_cover_url(value)
+    if field == "tags":
+        return (
+            isinstance(value, list)
+            and len(value) > 0
+            and all(isinstance(t, str) and t for t in value)
+        )
+    if field in ("title", "category", "published_at"):
+        return isinstance(value, str) and 0 < len(value) < 500
+    return False
+
+
+def _merge_by_priority(
+    source_outputs: list[tuple[str, dict]],
+) -> tuple[dict, dict, str]:
+    """Merge source extractor outputs by list order.
+
+    `source_outputs` is `[(source_name, field_dict), ...]` in decreasing
+    priority. Returns `(merged_fields, provenance, description_value)`.
+
+    - `merged_fields` holds the first valid value per field
+    - `provenance` maps each field that was hit to the winning source
+      name; fields not in any source map to `PROVENANCE_MISSING`
+    - `description_value` is the first valid (non-empty) description
+      string across sources; never enters `merged_fields` or
+      `provenance` (it's a raw_data sibling, not a tracked field)
+
+    Pure Python — no BS4 dependency, so priority logic can be unit-
+    tested with dict literals instead of HTML fixtures.
+    """
+    from crawler.raw_data import (
+        PROVENANCE_MISSING,
+        PROVENANCE_FIELDS,
+    )
+
+    merged: dict = {}
+    provenance: dict = {}
+    description_value = ""
+
+    for source_name, fields in source_outputs:
+        if not isinstance(fields, dict):
+            continue
+        for field, value in fields.items():
+            if field == "description":
+                if not description_value and isinstance(value, str) and value:
+                    description_value = value
+                continue
+            if field not in PROVENANCE_FIELDS:
+                continue  # defensive — ignore fields outside whitelist
+            if field in merged:
+                continue  # higher priority source already won
+            if _is_valid_field(field, value):
+                merged[field] = value
+                provenance[field] = source_name
+
+    # Fill in "missing" entries for any whitelist field never hit
+    for field in PROVENANCE_FIELDS:
+        provenance.setdefault(field, PROVENANCE_MISSING)
+
+    return merged, provenance, description_value
+
+
+def _extract_structured(soup: BeautifulSoup) -> tuple[dict, dict, str]:
+    """Thin BS4-aware wrapper: run all four source extractors, feed
+    their outputs into `_merge_by_priority`, return merged result.
+
+    Priority order: JSON-LD > OpenGraph > Twitter Cards > microdata."""
+    from crawler.raw_data import (
+        PROVENANCE_JSONLD,
+        PROVENANCE_OG,
+        PROVENANCE_TWITTER,
+        PROVENANCE_MICRODATA,
+    )
+
+    blocks = _parse_jsonld_blocks(soup)
+    source_outputs = [
+        (PROVENANCE_JSONLD, _extract_jsonld(blocks)),
+        (PROVENANCE_OG, _extract_opengraph(soup)),
+        (PROVENANCE_TWITTER, _extract_twitter_cards(soup)),
+        (PROVENANCE_MICRODATA, _extract_microdata(soup)),
+    ]
+    return _merge_by_priority(source_outputs)
+
+
 # ---------------------------------------------------------------------------
 # Page-type detection
 # ---------------------------------------------------------------------------
