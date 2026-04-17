@@ -84,9 +84,11 @@ _METRIC_YEAR_CONTEXT_RE = re.compile(
 _LAZY_SRC_ATTRS = ("data-src", "data-lazy-src", "data-original", "src")
 
 # URL-pattern blocklist for non-cover images: site logos, user avatars,
-# tracking pixels, decorative spacers, generic placeholders.
+# tracking pixels, decorative spacers, generic placeholders. Word-bounded
+# so legitimate names like "iconic-art.jpg" don't get filtered, but
+# "site-logo.png" / "/avatars/u123.jpg" do.
 _ICON_URL_RE = re.compile(
-    r"/(logo|icon|avatar|pixel|blank|spacer|placeholder)[\b./_-]", re.I,
+    r"\b(logos?|icons?|avatars?|pixels?|blank|spacer|placeholder)\b", re.I,
 )
 
 # Below this dimension, a declared <img width/height> is treated as a
@@ -817,10 +819,9 @@ def _extract_list_resources(soup: BeautifulSoup, url: str) -> list[Resource]:
         res_url = urljoin(url, a_tag["href"])
 
         # Cover — same picker as detail pages so the two paths share the
-        # lazy-load + icon/avatar / size filter rules. Pass `None` for
-        # soup so list cards don't grab the page-wide og:image (each card
-        # needs its own thumbnail).
-        cover = _pick_cover_image(BeautifulSoup("", "lxml"), card, url)
+        # lazy-load + icon/avatar / size filter rules. soup=None skips
+        # the page-wide og:image step (each card needs its own thumbnail).
+        cover = _pick_cover_image(None, card, url)
 
         # Tags (optional in cards) — same scoring path as detail pages so
         # the two extractors don't drift in behavior.

@@ -855,3 +855,261 @@ class TestKissavsStyleStructuredSite:
         before it as category."""
         r = parse_page(self.HTML, "https://example.com/video/grace-029/")
         assert r.resources[0].category == "角色剧情"
+
+
+# ---------------------------------------------------------------------------
+# Unit 2 — Cover image picker (og → twitter → largest qualifying)
+# ---------------------------------------------------------------------------
+
+from crawler.parser import (
+    _pick_cover_image, _resolve_img_src, _img_qualifies,
+)
+
+
+def _img(html: str):
+    return BeautifulSoup(html, "lxml").find("img")
+
+
+class TestResolveImgSrc:
+    def test_data_src_wins_over_src(self):
+        i = _img('<img data-src="real.jpg" src="placeholder.gif">')
+        assert _resolve_img_src(i) == "real.jpg"
+
+    def test_data_src_wins_over_data_lazy_and_data_original(self):
+        # _LAZY_SRC_ATTRS priority: data-src > data-lazy-src > data-original > src
+        i = _img(
+            '<img data-original="x.jpg" data-lazy-src="y.jpg" '
+            'data-src="z.jpg" src="placeholder.gif">'
+        )
+        assert _resolve_img_src(i) == "z.jpg"
+
+    def test_data_lazy_wins_when_no_data_src(self):
+        i = _img('<img data-lazy-src="y.jpg" data-original="x.jpg">')
+        assert _resolve_img_src(i) == "y.jpg"
+
+    def test_falls_back_to_src(self):
+        i = _img('<img src="real.jpg">')
+        assert _resolve_img_src(i) == "real.jpg"
+
+    def test_srcset_picks_largest(self):
+        i = _img(
+            '<img srcset="small.jpg 320w, medium.jpg 640w, large.jpg 1024w">'
+        )
+        assert _resolve_img_src(i) == "large.jpg"
+
+    def test_srcset_no_w_descriptors_picks_first(self):
+        i = _img('<img srcset="a.jpg, b.jpg">')
+        assert _resolve_img_src(i) in ("a.jpg", "b.jpg")
+
+    def test_no_src_returns_empty(self):
+        i = _img('<img>')
+        assert _resolve_img_src(i) == ""
+
+    def test_whitespace_only_src_returns_empty(self):
+        i = _img('<img src="   ">')
+        assert _resolve_img_src(i) == ""
+
+
+class TestImgQualifies:
+    @pytest.mark.parametrize("src", [
+        "data:image/png;base64,iVBOR...",
+        "data:image/gif;base64,R0lGODlh...",
+    ])
+    def test_data_uri_disqualifies(self, src):
+        i = _img('<img>')
+        assert _img_qualifies(i, src) is False
+
+    @pytest.mark.parametrize("src", [
+        "/static/logo.png",
+        "/img/avatar/u123.jpg",
+        "/static/icon-fb.svg",
+        "https://cdn.example.com/blank.gif",
+        "/spacer.gif",
+        "/assets/placeholder/default.png",
+        "/img/pixel-tracking.png",
+    ])
+    def test_icon_url_patterns_disqualify(self, src):
+        i = _img('<img>')
+        assert _img_qualifies(i, src) is False
+
+    def test_small_dimensions_disqualify(self):
+        i = _img('<img width="32" height="32">')
+        assert _img_qualifies(i, "/real.jpg") is False
+
+    def test_one_axis_large_qualifies(self):
+        # Banner-shape image: 1000×40. Qualifies because at least one
+        # axis is ≥ _MIN_COVER_DIMENSION.
+        i = _img('<img width="1000" height="40">')
+        assert _img_qualifies(i, "/real.jpg") is True
+
+    def test_no_dimensions_qualifies(self):
+        i = _img('<img>')
+        assert _img_qualifies(i, "/real.jpg") is True
+
+    def test_normal_image_qualifies(self):
+        i = _img('<img width="800" height="600">')
+        assert _img_qualifies(i, "/real.jpg") is True
+
+    def test_empty_src_disqualifies(self):
+        assert _img_qualifies(_img('<img>'), "") is False
+
+
+class TestPickCoverImage:
+    def _parse(self, html: str):
+        return BeautifulSoup(html, "lxml")
+
+    def test_og_image_wins_over_container_img(self):
+        soup = self._parse("""
+        <html><head>
+            <meta property="og:image" content="https://example.com/cover.jpg">
+        </head><body>
+            <article><img src="/decoy.jpg"></article>
+        </body></html>
+        """)
+        article = soup.find("article")
+        assert _pick_cover_image(soup, article, "https://example.com/post") \
+            == "https://example.com/cover.jpg"
+
+    def test_og_image_data_uri_falls_through(self):
+        soup = self._parse("""
+        <html><head>
+            <meta property="og:image" content="data:image/png;base64,xyz">
+        </head><body>
+            <article><img src="/real.jpg"></article>
+        </body></html>
+        """)
+        article = soup.find("article")
+        result = _pick_cover_image(soup, article, "https://example.com/")
+        assert result.endswith("/real.jpg")
+
+    def test_twitter_image_when_no_og_image(self):
+        soup = self._parse("""
+        <html><head>
+            <meta name="twitter:image" content="https://cdn.example.com/tw.jpg">
+        </head><body>
+            <article><img src="/decoy.jpg"></article>
+        </body></html>
+        """)
+        article = soup.find("article")
+        assert _pick_cover_image(soup, article, "https://example.com/") \
+            == "https://cdn.example.com/tw.jpg"
+
+    def test_lazy_load_in_container(self):
+        soup = self._parse("""
+        <html><body>
+            <article>
+                <img data-src="https://cdn.example.com/real.jpg"
+                     src="/spacer.gif">
+            </article>
+        </body></html>
+        """)
+        article = soup.find("article")
+        assert _pick_cover_image(soup, article, "https://example.com/") \
+            == "https://cdn.example.com/real.jpg"
+
+    def test_skips_logo_picks_real(self):
+        soup = self._parse("""
+        <html><body>
+            <article>
+                <img src="/static/logo.png">
+                <img src="/cover-real.jpg">
+            </article>
+        </body></html>
+        """)
+        article = soup.find("article")
+        result = _pick_cover_image(soup, article, "https://example.com/")
+        assert result.endswith("/cover-real.jpg")
+
+    def test_picks_largest_by_dimension(self):
+        soup = self._parse("""
+        <html><body>
+            <article>
+                <img src="/small.jpg" width="100" height="100">
+                <img src="/big.jpg" width="1200" height="800">
+                <img src="/medium.jpg" width="600" height="400">
+            </article>
+        </body></html>
+        """)
+        article = soup.find("article")
+        result = _pick_cover_image(soup, article, "https://example.com/")
+        assert result.endswith("/big.jpg")
+
+    def test_all_disqualified_returns_empty(self):
+        soup = self._parse("""
+        <html><body>
+            <article>
+                <img src="/static/logo.png">
+                <img src="data:image/gif;base64,R0lG">
+                <img src="/avatar/u1.jpg">
+            </article>
+        </body></html>
+        """)
+        article = soup.find("article")
+        assert _pick_cover_image(soup, article, "https://example.com/") == ""
+
+    def test_no_container_no_meta_returns_empty(self):
+        soup = self._parse("<html><body></body></html>")
+        assert _pick_cover_image(soup, None, "https://example.com/") == ""
+
+    def test_soup_none_skips_meta_step(self):
+        """List-card path passes soup=None — only container scan runs,
+        page-wide og:image isn't consulted (each card needs its own)."""
+        soup = self._parse("""
+        <html><head>
+            <meta property="og:image" content="https://example.com/page-cover.jpg">
+        </head><body>
+            <article><img src="/card-cover.jpg"></article>
+        </body></html>
+        """)
+        article = soup.find("article")
+        result = _pick_cover_image(None, article, "https://example.com/")
+        assert result.endswith("/card-cover.jpg")
+        assert "page-cover" not in result
+
+    def test_relative_url_resolved_against_base(self):
+        soup = self._parse("""
+        <html><body>
+            <article><img src="/path/cover.jpg"></article>
+        </body></html>
+        """)
+        article = soup.find("article")
+        assert _pick_cover_image(soup, article, "https://example.com/") \
+            == "https://example.com/path/cover.jpg"
+
+
+class TestDetailCoverIntegration:
+    def test_lazy_loaded_detail_cover(self):
+        """End-to-end: detail page with lazy-loaded cover gets the real
+        image, not the placeholder."""
+        html = """
+        <html><head>
+            <meta property="og:title" content="Real Article">
+        </head><body>
+        <article>
+            <h1>Real Article</h1>
+            <img data-src="https://cdn.example.com/real-cover.jpg"
+                 src="/spacer.gif">
+            <p>body</p>
+        </article>
+        </body></html>
+        """
+        result = parse_page(html, "https://example.com/post/1")
+        assert result.resources[0].cover_url == \
+            "https://cdn.example.com/real-cover.jpg"
+
+    def test_detail_skips_logo_picks_real(self):
+        """Detail page with logo as first <img> picks the real cover."""
+        html = """
+        <html><head>
+            <meta property="og:title" content="Real Article">
+        </head><body>
+        <article>
+            <h1>Real Article</h1>
+            <img src="/static/site-logo.png">
+            <img src="/uploads/cover.jpg">
+            <p>body</p>
+        </article>
+        </body></html>
+        """
+        result = parse_page(html, "https://example.com/post/1")
+        assert result.resources[0].cover_url == "https://example.com/uploads/cover.jpg"
