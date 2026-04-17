@@ -171,6 +171,13 @@ def render_progress():
     pages_done = prog.get("pages_done", 0)
     pages_total = prog.get("pages_total", 1)
     current_url = prog.get("current_url", "")
+    warning = prog.get("warning")
+    if warning == "render_disabled":
+        st.warning(
+            "JS rendering disabled — Chromium failed repeatedly. "
+            "Remaining JS-rendered pages will be marked failed. "
+            "Check `playwright install chromium` and the application logs."
+        )
 
     started = st.session_state.get("scan_started_at")
     elapsed = time.monotonic() - started if started else 0

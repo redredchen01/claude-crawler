@@ -18,27 +18,22 @@ class Frontier:
     ``_visited``, and ``_pending_batch`` so worker threads can concurrently
     ``push`` discovered links while another worker ``pop``\\s the next URL.
 
-    Two modes:
-      * **Plain**: ``pop()`` returns ``(url, depth)`` 2-tuples. Used by tests
-        only.
-      * **Writer-aware**: when ``writer`` and ``scan_job_id`` are supplied,
-        ``push()`` stages the URL in ``_pending_batch`` (under the lock,
-        microseconds-fast), and the worker calls :meth:`flush_batch` after
-        finishing its link iteration. ``flush_batch`` makes a single
-        ``insert_pages_batch`` round-trip to the writer (one fsync per page,
-        not per link) and only then moves the URLs into ``_visited`` and
-        ``_queue``. This keeps the lock-held region trivial even when a
-        page discovers thousands of links.
+    ``push()`` stages the URL in ``_pending_batch`` (under the lock,
+    microseconds-fast), and the worker calls :meth:`flush_batch` after
+    finishing its link iteration. ``flush_batch`` makes a single
+    ``insert_pages_batch`` round-trip to the writer (one fsync per page,
+    not per link) and only then moves the URLs into ``_visited`` and
+    ``_queue``. This keeps the lock-held region trivial even when a page
+    discovers thousands of links. ``pop()`` always returns 3-tuples
+    ``(url, depth, page_id)``.
     """
 
     def __init__(self, seed_url: str, max_pages: int, max_depth: int,
-                 *, writer=None, scan_job_id: int | None = None,
-                 auto_seed: bool = True):
+                 *, writer, scan_job_id: int, auto_seed: bool = True):
         self._max_pages = max_pages
         self._max_depth = max_depth
         self._writer = writer
         self._scan_job_id = scan_job_id
-        self._writer_mode = writer is not None and scan_job_id is not None
         self._queue: collections.deque = collections.deque()
         self._visited: set[str] = set()
         self._pending_batch: list[tuple[str, int]] = []
@@ -51,14 +46,10 @@ class Frontier:
             normalized = _normalize_url(seed_url)
             with self._lock:
                 self._visited.add(normalized)
-                if self._writer_mode:
-                    self._pending_batch.append((normalized, 0))
-                else:
-                    self._queue.append((normalized, 0))
-            if self._writer_mode:
-                # Flush the seed immediately so the engine sees a populated
-                # queue on the first pop().
-                self.flush_batch()
+                self._pending_batch.append((normalized, 0))
+            # Flush the seed immediately so the engine sees a populated
+            # queue on the first pop().
+            self.flush_batch()
 
     def _is_allowed(self, url: str) -> bool:
         """Check domain match and extension filter. Pure — no shared state."""
@@ -72,8 +63,8 @@ class Frontier:
         return True
 
     def push(self, url: str, depth: int) -> None:
-        """Stage URL for the next batch flush (writer mode) or enqueue
-        directly (plain mode). Thread-safe; lock-held region is microseconds.
+        """Stage URL for the next batch flush. Thread-safe; lock-held
+        region is microseconds (just dedup + list.append).
         """
         if depth > self._max_depth:
             return
@@ -86,27 +77,21 @@ class Frontier:
             if normalized in self._visited:
                 return
             self._visited.add(normalized)
-            if self._writer_mode:
-                self._pending_batch.append((normalized, depth))
-            else:
-                self._queue.append((normalized, depth))
+            self._pending_batch.append((normalized, depth))
 
     def flush_batch(self) -> int:
         """Persist all staged URLs via one writer round-trip and move them
         onto the in-memory queue with their assigned page_ids.
 
         Called by the worker after iterating a parsed page's links. Returns
-        the number of URLs flushed. No-op (returns 0) in plain mode or when
-        the staging buffer is empty.
+        the number of URLs flushed (0 when the staging buffer is empty).
 
-        On writer failure the staged URLs are NOT moved to the queue; they
-        also don't get rolled back from ``_visited`` because re-adding them
-        on the next discovery would just dedup against the visited set.
-        Caller (the engine) is expected to detect the writer failure via
+        On writer failure the staged URLs are returned to ``_pending_batch``
+        for retry AND removed from ``_visited`` so they remain eligible for
+        re-discovery within the same run (B2). The caller (the engine) is
+        also expected to detect persistent writer failure via
         :meth:`WriterThread.is_alive` and abort the scan.
         """
-        if not self._writer_mode:
-            return 0
         with self._lock:
             if not self._pending_batch:
                 return 0
@@ -119,23 +104,24 @@ class Frontier:
                 self._scan_job_id, batch,
             )
         except BaseException:
-            # Roll the staged items back into the buffer so a future flush
-            # can retry them. They stay in `_visited` so re-discovery in the
-            # same run will dedup; that's acceptable since the engine should
-            # be aborting anyway when a writer call fails.
+            # Roll the staged items back into the buffer for retry, AND
+            # remove them from _visited so they remain eligible for
+            # re-discovery in the same run if the writer recovers
+            # (e.g., transient queue saturation).
             with self._lock:
                 self._pending_batch = batch + self._pending_batch
+                for url, _ in batch:
+                    self._visited.discard(url)
             raise
         with self._lock:
             for (url, depth), page_id in zip(batch, page_ids):
                 self._queue.append((url, depth, page_id))
         return len(batch)
 
-    def pop(self):
-        """Return next item or None if empty.
+    def pop(self) -> tuple[str, int, int] | None:
+        """Return next ``(url, depth, page_id)`` or ``None`` if empty.
 
-        Tuple shape depends on mode: ``(url, depth)`` in plain mode,
-        ``(url, depth, page_id)`` in writer-aware mode. Thread-safe.
+        Thread-safe.
         """
         with self._lock:
             if not self._queue:

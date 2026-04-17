@@ -98,13 +98,17 @@ class InsertPagesBatchRequest:
 
 @dataclass
 class PageWriteRequest:
-    """Worker-to-writer request. No reply needed; writer commits per message."""
+    """Worker-to-writer request. Writer commits per message and (when ``reply``
+    is supplied) signals success/failure to the worker via that Future so
+    counter increments only happen on confirmed-committed writes.
+    """
     scan_job_id: int
     page_id: int
     parse_result: ParseResult | None
     page_status: str                  # "fetched" | "failed"
     page_type: str = "other"
     failure_reason: str | None = None
+    reply: Future | None = None       # Future[bool] — True on commit, exception on rollback
 
 
 @dataclass

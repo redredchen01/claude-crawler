@@ -146,6 +146,29 @@ class TestBrowserDeadHeuristic:
     def test_does_not_flag_unrelated_errors(self, msg):
         assert not _is_browser_dead_error(RuntimeError(msg))
 
+    def test_typed_target_closed_error_recognized(self):
+        """B4: TargetClosedError (narrowest typed match) is detected even
+        with a non-matching substring message."""
+        if render_mod._TargetClosedError is None:
+            pytest.skip("playwright._impl._errors.TargetClosedError unavailable")
+        exc = render_mod._TargetClosedError("any message at all")
+        assert _is_browser_dead_error(exc)
+
+    def test_playwright_error_with_dead_marker_recognized(self):
+        """B4: PlaywrightError + dead-marker substring match passes."""
+        if render_mod._PlaywrightError is None:
+            pytest.skip("playwright.sync_api.Error unavailable")
+        exc = render_mod._PlaywrightError("Browser has been closed unexpectedly")
+        assert _is_browser_dead_error(exc)
+
+    def test_playwright_error_without_dead_marker_does_not_match(self):
+        """B4: PlaywrightError with a non-dead message must not be flagged
+        as dead — typed class is necessary but not sufficient."""
+        if render_mod._PlaywrightError is None:
+            pytest.skip("playwright.sync_api.Error unavailable")
+        exc = render_mod._PlaywrightError("Timeout 30000ms exceeded waiting for selector")
+        assert not _is_browser_dead_error(exc)
+
 
 class TestHappyPath:
     def test_three_submits_resolve(self, thread_factory):
@@ -444,6 +467,38 @@ class TestDaemonAndAtexit:
         )
         # _handle stays None.
         rt._atexit_kill_chromium()  # must not raise
+
+
+class TestIsDisabled:
+    """B3: render thread exposes is_disabled() and engine consults it."""
+
+    def test_is_disabled_false_initially(self, thread_factory):
+        rt = thread_factory(
+            launch_fn=lambda: SimpleNamespace(),
+            render_fn=lambda h, u, t: "",
+            teardown_fn=lambda h, t: None,
+        )
+        assert rt.is_disabled() is False
+
+    def test_is_disabled_true_after_circuit_breaker_trips(self, thread_factory):
+        attempts = SimpleNamespace(n=0)
+
+        def always_fail():
+            attempts.n += 1
+            raise RuntimeError(f"launch failure {attempts.n}")
+
+        rt = thread_factory(
+            retry_count=0, restart_backoffs=(0.0, 0.0),
+            max_consecutive_failures=3,
+            launch_fn=always_fail,
+            render_fn=lambda h, u, t: "",
+            teardown_fn=lambda h, t: None,
+        )
+        for i in range(3):
+            f = rt.submit(f"https://attempt{i}/")
+            with pytest.raises(RuntimeError):
+                f.result(timeout=2.0)
+        assert rt.is_disabled() is True
 
 
 class TestForceKillWatchdog:

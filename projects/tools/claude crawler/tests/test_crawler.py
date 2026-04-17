@@ -18,9 +18,61 @@ from crawler.parser import parse_page
 # ── Frontier Tests ──
 
 
+def _fake_writer():
+    """MagicMock writer that hands out incrementing page_ids on
+    insert_pages_batch. Used by Frontier-only unit tests so they don't need
+    a real WriterThread."""
+    from itertools import count
+    from unittest.mock import MagicMock
+    writer = MagicMock()
+    counter = count(start=1)
+
+    def fake_batch(scan_job_id, items):
+        return [next(counter) for _ in items]
+
+    writer.insert_pages_batch.side_effect = fake_batch
+    return writer
+
+
+def _make_frontier(seed_url: str, max_pages: int = 100, max_depth: int = 3,
+                   *, auto_seed: bool = True):
+    """Construct a Frontier with a fake writer for unit testing.
+
+    Wraps push() to auto-flush so unit tests can keep treating push as if
+    it immediately enqueues. Production callers (the engine) batch+flush
+    explicitly; unit tests don't need to mirror that ceremony.
+    """
+    f = Frontier(
+        seed_url, max_pages=max_pages, max_depth=max_depth,
+        writer=_fake_writer(), scan_job_id=1, auto_seed=auto_seed,
+    )
+    real_push = f.push
+
+    def auto_flush_push(url, depth):
+        real_push(url, depth)
+        f.flush_batch()
+
+    f.push = auto_flush_push  # type: ignore[method-assign]
+
+    # Also wrap pop to return 2-tuples for back-compat with the legacy
+    # tests' unpacking. Tests that explicitly want page_id use
+    # TestFrontierWriterMode (which calls Frontier directly).
+    real_pop = f.pop
+
+    def two_tuple_pop():
+        item = real_pop()
+        if item is None:
+            return None
+        url, depth, _page_id = item
+        return (url, depth)
+
+    f.pop = two_tuple_pop  # type: ignore[method-assign]
+    return f
+
+
 class TestFrontierBFS:
     def test_bfs_order(self):
-        f = Frontier("https://example.com", max_pages=100, max_depth=3)
+        f = _make_frontier("https://example.com", max_pages=100, max_depth=3)
         f.push("https://example.com/a", 1)
         f.push("https://example.com/b", 1)
         url1, d1 = f.pop()  # seed
@@ -32,20 +84,20 @@ class TestFrontierBFS:
         assert url3 == "https://example.com/b"
 
     def test_pop_empty(self):
-        f = Frontier("https://example.com", max_pages=100, max_depth=3)
+        f = _make_frontier("https://example.com", max_pages=100, max_depth=3)
         f.pop()  # consume seed
         assert f.pop() is None
 
 
 class TestFrontierDomainFilter:
     def test_reject_different_domain(self):
-        f = Frontier("https://example.com", max_pages=100, max_depth=3)
+        f = _make_frontier("https://example.com", max_pages=100, max_depth=3)
         f.push("https://other.com/page", 1)
         f.pop()  # seed
         assert f.pop() is None
 
     def test_accept_same_domain(self):
-        f = Frontier("https://example.com", max_pages=100, max_depth=3)
+        f = _make_frontier("https://example.com", max_pages=100, max_depth=3)
         f.push("https://example.com/page", 1)
         f.pop()  # seed
         result = f.pop()
@@ -55,13 +107,13 @@ class TestFrontierDomainFilter:
 
 class TestFrontierDepthLimit:
     def test_reject_over_max_depth(self):
-        f = Frontier("https://example.com", max_pages=100, max_depth=2)
+        f = _make_frontier("https://example.com", max_pages=100, max_depth=2)
         f.push("https://example.com/deep", 3)
         f.pop()  # seed
         assert f.pop() is None
 
     def test_accept_at_max_depth(self):
-        f = Frontier("https://example.com", max_pages=100, max_depth=2)
+        f = _make_frontier("https://example.com", max_pages=100, max_depth=2)
         f.push("https://example.com/ok", 2)
         f.pop()  # seed
         assert f.pop() is not None
@@ -69,7 +121,7 @@ class TestFrontierDepthLimit:
 
 class TestFrontierMaxPages:
     def test_stop_at_max_pages(self):
-        f = Frontier("https://example.com", max_pages=2, max_depth=5)
+        f = _make_frontier("https://example.com", max_pages=2, max_depth=5)
         f.push("https://example.com/a", 1)
         # visited = {seed, /a} = 2, which is max_pages
         f.push("https://example.com/b", 1)  # should be rejected
@@ -80,7 +132,7 @@ class TestFrontierMaxPages:
 
 class TestFrontierDuplicates:
     def test_reject_duplicate_url(self):
-        f = Frontier("https://example.com", max_pages=100, max_depth=3)
+        f = _make_frontier("https://example.com", max_pages=100, max_depth=3)
         f.push("https://example.com/a", 1)
         f.push("https://example.com/a", 1)  # duplicate
         f.pop()  # seed
@@ -90,14 +142,14 @@ class TestFrontierDuplicates:
 
 class TestFrontierNormalization:
     def test_strip_fragment(self):
-        f = Frontier("https://example.com", max_pages=100, max_depth=3)
+        f = _make_frontier("https://example.com", max_pages=100, max_depth=3)
         f.push("https://example.com/page#section", 1)
         f.pop()  # seed
         url, _ = f.pop()
         assert "#" not in url
 
     def test_trailing_slash_dedup(self):
-        f = Frontier("https://example.com", max_pages=100, max_depth=3)
+        f = _make_frontier("https://example.com", max_pages=100, max_depth=3)
         f.push("https://example.com/page/", 1)
         f.push("https://example.com/page", 1)  # same after normalization
         f.pop()  # seed
@@ -105,7 +157,7 @@ class TestFrontierNormalization:
         assert f.pop() is None
 
     def test_skip_extensions(self):
-        f = Frontier("https://example.com", max_pages=100, max_depth=3)
+        f = _make_frontier("https://example.com", max_pages=100, max_depth=3)
         f.push("https://example.com/image.jpg", 1)
         f.push("https://example.com/style.css", 1)
         f.push("https://example.com/file.pdf", 1)
@@ -115,7 +167,7 @@ class TestFrontierNormalization:
 
 class TestFrontierVisitedCount:
     def test_visited_count(self):
-        f = Frontier("https://example.com", max_pages=100, max_depth=3)
+        f = _make_frontier("https://example.com", max_pages=100, max_depth=3)
         assert f.visited_count == 1  # seed
         f.push("https://example.com/a", 1)
         assert f.visited_count == 2
@@ -123,12 +175,12 @@ class TestFrontierVisitedCount:
 
 class TestFrontierIsDone:
     def test_done_when_empty(self):
-        f = Frontier("https://example.com", max_pages=100, max_depth=3)
+        f = _make_frontier("https://example.com", max_pages=100, max_depth=3)
         f.pop()
         assert f.is_done()
 
     def test_done_when_max_pages_and_drained(self):
-        f = Frontier("https://example.com", max_pages=1, max_depth=3)
+        f = _make_frontier("https://example.com", max_pages=1, max_depth=3)
         f.pop()  # drain the seed
         # queue empty, no more URLs can be pushed (max_pages reached)
         f.push("https://example.com/a", 1)  # rejected by max_pages
@@ -142,7 +194,7 @@ class TestFrontierThreadSafety:
         """8 threads pushing 100 unique URLs each → 800 pushes total, but
         dedup + shared namespace means visited_count reflects union, not sum."""
         import threading
-        f = Frontier("https://example.com", max_pages=2000, max_depth=5)
+        f = _make_frontier("https://example.com", max_pages=2000, max_depth=5)
         f.pop()  # drain the seed so we count just the concurrent pushes
 
         barrier = threading.Barrier(8)
@@ -165,7 +217,7 @@ class TestFrontierThreadSafety:
     def test_concurrent_pops_no_duplicates(self):
         """Concurrent poppers from a pre-seeded frontier each get distinct items."""
         import threading
-        f = Frontier("https://example.com", max_pages=200, max_depth=5)
+        f = _make_frontier("https://example.com", max_pages=200, max_depth=5)
         f.pop()  # drop seed
         for i in range(50):
             f.push(f"https://example.com/p{i}", 1)
@@ -198,7 +250,7 @@ class TestFrontierThreadSafety:
         import threading
         import time
 
-        f = Frontier("https://example.com", max_pages=1000, max_depth=5)
+        f = _make_frontier("https://example.com", max_pages=1000, max_depth=5)
         f.pop()
 
         stop = threading.Event()
@@ -491,15 +543,43 @@ class TestEngineConcurrent:
 
     @patch("crawler.core.engine.fetch_page")
     def test_r6a_zero_resource_retry_via_render(self, mock_fetch, fast_engine_patches):
-        """List page with zero resources from HTTP → render retry yields resources."""
-        # HTTP path: list page with NO og:title, NO article — parser will
-        # classify it as "list" (lots of links) but extract zero resources.
+        """B6/R16: list page with zero resources from HTTP → render retry yields
+        resources. Asserts unconditionally — no `if resources:` escape hatch.
+
+        The HTTP body is a list-classified page (many same-domain links, no
+        article markers, no og:title) that the parser extracts zero
+        resources from. This triggers R6a, which routes the URL through
+        render thread; the rendered HTML carries a real article and a tag.
+        """
+        from crawler.parser import parse_page
+        from concurrent.futures import Future
+
+        # HTTP path: 5 bare `<article>` elements satisfy the parser's
+        # "list" classification (>3 articles), but each lacks the inner
+        # `<a href>` that the resource extractor requires, so resources
+        # comes back empty. This is the exact gap R6a is designed to close.
         http_html = (
             '<html><body>'
-            + ('<a href="/cat/a">A</a>' * 30)
+            + ''.join(
+                f'<article><h2>article {i}</h2><p>summary {i}</p></article>'
+                for i in range(5)
+            )
             + '</body></html>'
         )
-        # Render path: same URL but with structured resources.
+        # Sanity: confirm the test fixture actually exercises R6a's
+        # precondition (list page + zero resources). If parsing rules drift,
+        # this assertion catches it BEFORE the test silently no-ops.
+        precheck = parse_page(http_html, "https://example.com/list")
+        assert precheck.page_type == "list", (
+            f"R6a test fixture must produce a 'list'-classified page; "
+            f"parser returned page_type={precheck.page_type!r}"
+        )
+        assert len(precheck.resources) == 0, (
+            f"R6a test fixture must produce ZERO resources; "
+            f"parser found {len(precheck.resources)}"
+        )
+
+        # Render path: same URL but with a real article + tag.
         rendered_html = (
             '<html><head><meta property="og:title" content="From Render"></head>'
             '<body><article><h1>From Render</h1>'
@@ -509,13 +589,16 @@ class TestEngineConcurrent:
         )
         mock_fetch.return_value = http_html
 
-        # Patch the render submit so we don't spawn Chromium.
-        from concurrent.futures import Future
-        rendered_future = Future()
+        # Spy on RenderThread.submit so we can assert the R6a branch fired.
+        rendered_future: Future = Future()
         rendered_future.set_result(rendered_html)
+        submit_calls: list[str] = []
 
-        with patch("crawler.core.render.RenderThread.submit",
-                   return_value=rendered_future):
+        def spy_submit(self, url):
+            submit_calls.append(url)
+            return rendered_future
+
+        with patch("crawler.core.render.RenderThread.submit", spy_submit):
             with tempfile.TemporaryDirectory() as tmpdir:
                 db_path = os.path.join(tmpdir, "test.db")
                 job_id = run_crawl(
@@ -525,12 +608,18 @@ class TestEngineConcurrent:
                 from crawler.storage import get_resources
                 resources = get_resources(db_path, job_id)
 
-        # If the parser classifies the http_html as "list" with zero
-        # resources, R6a kicks in and rendered_html is parsed instead.
-        # Otherwise this test is a no-op verification — we still assert the
-        # crawl completed without error.
-        if resources:
-            assert any("retry-tag" in r.tags for r in resources)
+        # R16 acceptance: R6a fired exactly once and rendered HTML was parsed.
+        assert submit_calls == ["https://example.com/list"], (
+            f"R6a render fallback should have fired exactly once; "
+            f"submit calls: {submit_calls}"
+        )
+        assert len(resources) >= 1, (
+            "R6a should have produced at least one resource from rendered HTML"
+        )
+        assert any("retry-tag" in r.tags for r in resources), (
+            f"Rendered HTML's tag should be present; got tags: "
+            f"{[r.tags for r in resources]}"
+        )
 
     @patch("crawler.core.engine.fetch_page")
     def test_force_playwright_bypasses_http(self, mock_fetch, fast_engine_patches):
@@ -834,6 +923,49 @@ class TestFrontierWriterMode:
         # No new writer calls.
         assert writer.insert_pages_batch.call_count == seed_calls
 
+    def test_flush_batch_failure_clears_visited_for_re_discovery(self):
+        """B2: when flush_batch fails, the staged URLs are removed from
+        _visited so they remain eligible for re-discovery in the same run
+        if the writer recovers (transient saturation)."""
+        from crawler.core.frontier import Frontier
+        from unittest.mock import MagicMock
+
+        writer = MagicMock()
+        # Seed flush succeeds; the second batch flush raises.
+        writer.insert_pages_batch.side_effect = [[1], RuntimeError("transient")]
+
+        frontier = Frontier(
+            "https://example.com", 100, 3,
+            writer=writer, scan_job_id=1,
+        )
+        frontier.push("https://example.com/a", 1)
+        frontier.push("https://example.com/b", 1)
+        # Confirm staged URLs entered _visited before the flush.
+        with frontier._lock:
+            assert "https://example.com/a" in frontier._visited
+            assert "https://example.com/b" in frontier._visited
+
+        with pytest.raises(RuntimeError, match="transient"):
+            frontier.flush_batch()
+
+        # B2 contract: visited entries removed so re-discovery succeeds.
+        with frontier._lock:
+            assert "https://example.com/a" not in frontier._visited
+            assert "https://example.com/b" not in frontier._visited
+            # And they're back in pending_batch for retry.
+            assert ("https://example.com/a", 1) in frontier._pending_batch
+            assert ("https://example.com/b", 1) in frontier._pending_batch
+
+        # Re-pushing the same URL after the failure works (it's not blocked
+        # by the visited set anymore).
+        frontier.push("https://example.com/a", 1)
+        # Pending_batch now has the original 2 (rollback) + 1 freshly
+        # re-pushed `a` (because the rollback also removed `a` from visited
+        # so the second push re-stages it).
+        with frontier._lock:
+            stages = [u for u, _ in frontier._pending_batch]
+        assert stages.count("https://example.com/a") == 2
+
     def test_flush_batch_failure_keeps_pending_for_retry(self):
         from crawler.core.frontier import Frontier
         from unittest.mock import MagicMock
@@ -954,6 +1086,119 @@ class TestEngineShutdownBound:
         )
         assert "executor.shutdown(wait=False, cancel_futures=True)" in source, (
             "engine.run_crawl missing the cancel_futures shutdown call"
+        )
+
+
+class TestPhaseBRegressions:
+    """B6/R17: behavioral regression tests for the P1 findings the prior
+    review surfaced. Each test exercises a real failure mode end-to-end."""
+
+    def test_high_fanout_page_does_not_lock_workers(self, fast_engine_patches):
+        """R17a: a 5K-link seed page must complete discovery in well under
+        the pre-A5 lock-contention regime (where 5K pushes meant 5K
+        synchronous writer round-trips). The functional assertion here is
+        binary: does the crawl complete at all? Combined with the
+        chunking from autofix F10, this also exercises the SQLite
+        IN-clause boundary fix indirectly."""
+        import time as _time
+
+        link_count = 5000
+        urls = [f"https://example.com/p{i}" for i in range(link_count)]
+        seed_html = (
+            "<html><body>"
+            + "".join(f'<a href="{u}">l</a>' for u in urls)
+            + "</body></html>"
+        )
+        leaf_html = "<html><body>" + ("content " * 200) + "</body></html>"
+        responses = {"https://example.com/": seed_html}
+        for u in urls:
+            responses[u] = leaf_html
+
+        with patch("crawler.core.engine.fetch_page",
+                   side_effect=lambda u, *a, **kw: responses.get(u, leaf_html)):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = os.path.join(tmpdir, "test.db")
+                start = _time.monotonic()
+                # Cap pages_submitted so the test focuses on discovery cost,
+                # not network simulation. With max_pages=10, the engine pops
+                # 10 leaf URLs after the seed is processed.
+                run_crawl(
+                    "https://example.com", db_path,
+                    max_pages=10, workers=8, req_per_sec=20.0,
+                )
+                elapsed = _time.monotonic() - start
+
+                import sqlite3
+                with sqlite3.connect(db_path) as c:
+                    pending = c.execute(
+                        "SELECT COUNT(*) FROM pages WHERE status='pending'"
+                    ).fetchone()[0]
+
+        # Discovery cost (single 5K-link batch flush) was previously
+        # bottlenecked by per-link writer round-trips; with A5 batching it
+        # should comfortably complete in seconds.
+        assert elapsed < 15.0, f"high-fanout discovery too slow: {elapsed:.1f}s"
+        # Discovery actually persisted the links — most of the 5K links
+        # should remain pending in the pages table for resume.
+        assert pending >= 4000, (
+            f"expected >=4000 pending discovered links; got {pending}"
+        )
+
+    def test_writer_persistent_failure_aborts_scan_within_bound(
+        self, fast_engine_patches,
+    ):
+        """R17b: a persistent writer-side failure must trigger the engine's
+        writer-health check (A6), abort the scan, and finalize via the
+        direct-conn fallback. Bound: completes in <15s (multiple wait-loop
+        ticks of 0.5s each, plus shutdown overhead)."""
+        import time as _time
+
+        # Force every PageWriteRequest to fail by raising in the writer's
+        # save_resource_with_tags. Per-message exceptions don't kill the
+        # writer (per design), so the engine relies on B1's reply-Future
+        # propagation + repeated worker-side `WriterUnavailableError`
+        # variants. For this test, we want a truly fatal scenario, so we
+        # patch the writer's _open_connection to raise — that DOES set
+        # last_exception and the wait-loop health check fires.
+        from crawler.core import writer as writer_mod
+        original_open = writer_mod.WriterThread._open_connection
+
+        call_count = {"n": 0}
+        def failing_open(self):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # Let the very first connection succeed so the engine starts.
+                # Subsequent reconnects (if any) fail.
+                return original_open(self)
+            raise RuntimeError("simulated persistent DB error")
+
+        # Easier: patch is_alive to return False starting on the first call.
+        # The wait-loop's health check at engine.py fires immediately on the
+        # first wait-iteration tick and aborts the scan with final_status='failed'.
+        def always_dead_is_alive(self):
+            return False
+
+        body = "<html><body>" + ("content " * 200) + "</body></html>"
+        with patch("crawler.core.engine.fetch_page", return_value=body):
+            with patch.object(writer_mod.WriterThread, "is_alive",
+                              always_dead_is_alive):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    db_path = os.path.join(tmpdir, "test.db")
+                    start = _time.monotonic()
+                    job_id = run_crawl(
+                        "https://example.com", db_path,
+                        max_pages=20, workers=4, req_per_sec=20.0,
+                    )
+                    elapsed = _time.monotonic() - start
+
+                    from crawler.storage import get_scan_job
+                    job = get_scan_job(db_path, job_id)
+
+        assert elapsed < 15.0, (
+            f"writer-death abort exceeded bound: {elapsed:.1f}s"
+        )
+        assert job.status == "failed", (
+            f"expected scan_jobs.status='failed' after writer death; got {job.status!r}"
         )
 
 

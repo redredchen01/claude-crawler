@@ -26,7 +26,7 @@ import threading
 from concurrent.futures import (
     Future, ThreadPoolExecutor, FIRST_COMPLETED, TimeoutError as FuturesTimeoutError,
 )
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -49,6 +49,13 @@ from crawler.storage import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Generous bound for the writer's write_page → commit round-trip. Workers
+# wait at most this long before giving up (and not incrementing counters).
+# Should comfortably exceed the writer's per-message processing time even
+# under high load; a true writer death is caught by WriterUnavailableError
+# from the bounded queue.put much sooner than this.
+WRITE_REPLY_TIMEOUT = 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +113,11 @@ class _WorkerContext:
     robots_lock: threading.Lock
     counters: "_Counters"
     counters_lock: threading.Lock
+    # B3: latch ensures the "render disabled" UI warning fires exactly once
+    # per scan, not once per page that hits the disabled path.
+    render_disabled_warned: threading.Event = field(
+        default_factory=threading.Event,
+    )
 
 
 @dataclass
@@ -179,17 +191,30 @@ def _process_one_page(url: str, depth: int, page_id: int,
         for resource in result.resources:
             resource.url = _normalize_url(resource.url)
 
-        ctx.writer.write_page(PageWriteRequest(
-            scan_job_id=ctx.scan_job_id,
-            page_id=page_id,
-            parse_result=result,
-            page_status="fetched",
-            page_type=result.page_type,
-        ))
-
-        with ctx.counters_lock:
-            ctx.counters.pages_done += 1
-            ctx.counters.resources_found += len(result.resources)
+        # B1: await the writer's commit acknowledgement before incrementing
+        # counters. If the write rolls back (FK violation, persistent disk
+        # error, writer-dead WriterUnavailableError), the page row stays
+        # 'pending' for resume — and our in-memory counters reflect reality
+        # rather than overstating success.
+        write_reply: Future = Future()
+        try:
+            ctx.writer.write_page(PageWriteRequest(
+                scan_job_id=ctx.scan_job_id,
+                page_id=page_id,
+                parse_result=result,
+                page_status="fetched",
+                page_type=result.page_type,
+                reply=write_reply,
+            ))
+            write_reply.result(timeout=WRITE_REPLY_TIMEOUT)
+        except BaseException as exc:
+            logger.warning(
+                "write_page failed for %s: %s — counters not incremented", url, exc,
+            )
+        else:
+            with ctx.counters_lock:
+                ctx.counters.pages_done += 1
+                ctx.counters.resources_found += len(result.resources)
 
         # Stage discovered links under Frontier's lock (microsecond critical
         # section), then flush the whole batch via one writer round-trip
@@ -237,7 +262,24 @@ def _fetch_html(ctx: _WorkerContext, url: str) -> tuple[str | None, str | None]:
 
 
 def _try_render(ctx: _WorkerContext, url: str) -> str | None:
-    """Submit to render thread; return HTML or None on any failure."""
+    """Submit to render thread; return HTML or None on any failure.
+
+    B3: short-circuits if the render thread has disabled itself (crash
+    circuit breaker tripped). Emits a one-time UI warning event so the
+    user sees that JS rendering stopped working rather than every JS page
+    silently turning into a failed page.
+    """
+    if ctx.render_thread.is_disabled():
+        if not ctx.render_disabled_warned.is_set():
+            ctx.render_disabled_warned.set()
+            ctx.coalescer.emit({
+                "pages_done": ctx.counters.pages_done,
+                "pages_total": ctx.max_pages,
+                "current_url": url,
+                "status": "running",
+                "warning": "render_disabled",
+            })
+        return None
     try:
         future = ctx.render_thread.submit(url)
         # Use slightly less than the render-thread's own timeout so the
@@ -382,14 +424,7 @@ def run_crawl(
                 item = frontier.pop()
                 if item is None:
                     break
-                # Writer-aware Frontier always yields 3-tuples in
-                # production; the 2-tuple branch is only reached if
-                # someone constructs Frontier without a writer (tests).
-                if len(item) == 3:
-                    url, depth, page_id = item
-                else:
-                    url, depth = item
-                    page_id = writer.insert_page(scan_job_id, url, depth)
+                url, depth, page_id = item
                 pages_submitted += 1
                 in_flight.add(executor.submit(
                     _process_one_page, url, depth, page_id, ctx,

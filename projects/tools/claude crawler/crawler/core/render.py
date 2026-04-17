@@ -276,15 +276,44 @@ def _kill_proc(proc: subprocess.Popen, timeout: float) -> None:
         logger.exception("Error tearing down Chromium PID %d", proc.pid)
 
 
+_BROWSER_DEAD_MARKERS = (
+    "browser has been closed",
+    "browser has disconnected",
+    "target closed",
+    "target page, context or browser has been closed",
+)
+
+# Typed exceptions: load lazily and tolerate Playwright not being importable
+# or restructuring its internals across versions. Substring fallback below
+# handles the case where neither typed class matches.
+try:  # pragma: no cover — import-time wiring
+    from playwright.sync_api import Error as _PlaywrightError
+except ImportError:
+    _PlaywrightError = None  # type: ignore[assignment]
+try:  # pragma: no cover
+    from playwright._impl._errors import TargetClosedError as _TargetClosedError
+except (ImportError, AttributeError):
+    _TargetClosedError = None  # type: ignore[assignment]
+
+
 def _is_browser_dead_error(exc: BaseException) -> bool:
-    """Heuristic: detect "browser has crashed / disconnected" Playwright errors."""
+    """Detect 'browser crashed / disconnected' Playwright errors.
+
+    Layered detection:
+      1. ``TargetClosedError`` — narrowest typed match if available.
+      2. Any ``playwright.sync_api.Error`` whose message matches a
+         browser-dead marker (typed class narrows scope, substring confirms
+         it's a death rather than e.g. a navigation timeout).
+      3. Substring-only fallback — protects against Playwright being absent
+         or the typed hierarchy shifting in a future release.
+    """
+    if _TargetClosedError is not None and isinstance(exc, _TargetClosedError):
+        return True
     msg = str(exc).lower()
-    return (
-        "browser has been closed" in msg
-        or "browser has disconnected" in msg
-        or "target closed" in msg
-        or "target page, context or browser has been closed" in msg
-    )
+    msg_matches = any(marker in msg for marker in _BROWSER_DEAD_MARKERS)
+    if _PlaywrightError is not None and isinstance(exc, _PlaywrightError):
+        return msg_matches
+    return msg_matches
 
 
 # --- The thread itself ---
@@ -419,6 +448,16 @@ class RenderThread:
         if self._handle is None or getattr(self._handle, "proc", None) is None:
             return None
         return self._handle.proc.pid
+
+    def is_disabled(self) -> bool:
+        """True after the crash circuit-breaker has tripped — every future
+        :meth:`submit` will fail fast with ``RuntimeError`` rather than
+        re-attempting a Chromium that just won't launch.
+
+        The engine consults this in its render fallback path so it doesn't
+        keep paying ``submit`` round-trips after the breaker has tripped.
+        """
+        return self._disabled
 
     def _atexit_kill_chromium(self) -> None:
         """Last-resort SIGKILL of Chromium PID at interpreter exit.

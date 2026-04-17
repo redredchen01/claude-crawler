@@ -254,7 +254,17 @@ class WriterThread:
             page_ids = self._insert_pages_batch(conn, request)
             request.future.set_result(page_ids)
         elif isinstance(request, PageWriteRequest):
-            self._write_page(conn, request)
+            try:
+                self._write_page(conn, request)
+            except BaseException as exc:
+                # Resolve reply Future with the failure so the worker can
+                # avoid incrementing counters for a write that didn't land.
+                if request.reply is not None and not request.reply.done():
+                    request.reply.set_exception(exc)
+                raise
+            else:
+                if request.reply is not None and not request.reply.done():
+                    request.reply.set_result(True)
         elif isinstance(request, ScanJobUpdateRequest):
             self._update_scan_job(conn, request)
         else:
@@ -396,9 +406,13 @@ class WriterThread:
 
     @staticmethod
     def _fail_pending_future(request, exc: BaseException) -> None:
-        future = getattr(request, "future", None)
-        if future is not None and not future.done():
-            future.set_exception(exc)
+        # InsertPageRequest / InsertPagesBatchRequest expose `.future`;
+        # PageWriteRequest exposes `.reply`. Either way, the field carries a
+        # Future the caller awaits, so failing both sites is uniform.
+        for attr in ("future", "reply"):
+            future = getattr(request, attr, None)
+            if future is not None and not future.done():
+                future.set_exception(exc)
 
 
 def _safe_rollback(conn: sqlite3.Connection) -> None:
