@@ -158,13 +158,21 @@ def get_scan_job(db_path: str, job_id: int) -> ScanJob | None:
         return ScanJob(**dict(row))
 
 
-def update_scan_job(db_path: str, job_id: int, **kwargs):
+def update_scan_job(db_path: str, job_id: int,
+                    conn: sqlite3.Connection | None = None, **kwargs):
+    """Update scan_job columns. If `conn` is provided, uses it without committing
+    (caller manages transaction); otherwise opens its own connection.
+    """
     if not kwargs:
         return
     sets = ", ".join(f"{k} = ?" for k in kwargs)
     vals = list(kwargs.values()) + [job_id]
-    with get_connection(db_path) as conn:
-        conn.execute(f"UPDATE scan_jobs SET {sets} WHERE id = ?", vals)
+    sql = f"UPDATE scan_jobs SET {sets} WHERE id = ?"
+    if conn is not None:
+        conn.execute(sql, vals)
+        return
+    with get_connection(db_path) as own_conn:
+        own_conn.execute(sql, vals)
 
 
 def list_scan_jobs(db_path: str) -> list[ScanJob]:
@@ -188,13 +196,21 @@ def insert_page(db_path: str, scan_job_id: int, url: str,
             return None
 
 
-def update_page(db_path: str, page_id: int, **kwargs):
+def update_page(db_path: str, page_id: int,
+                conn: sqlite3.Connection | None = None, **kwargs):
+    """Update page columns. If `conn` is provided, uses it without committing
+    (caller manages transaction); otherwise opens its own connection.
+    """
     if not kwargs:
         return
     sets = ", ".join(f"{k} = ?" for k in kwargs)
     vals = list(kwargs.values()) + [page_id]
-    with get_connection(db_path) as conn:
-        conn.execute(f"UPDATE pages SET {sets} WHERE id = ?", vals)
+    sql = f"UPDATE pages SET {sets} WHERE id = ?"
+    if conn is not None:
+        conn.execute(sql, vals)
+        return
+    with get_connection(db_path) as own_conn:
+        own_conn.execute(sql, vals)
 
 
 # --- Resource CRUD ---
