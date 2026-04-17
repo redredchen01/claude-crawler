@@ -4,7 +4,24 @@ import pytest
 
 from bs4 import BeautifulSoup
 
-from crawler.parser import parse_page, _extract_detail_resource, _pick_main_container
+from crawler.parser import (
+    parse_page,
+    _extract_detail_resource,
+    _extract_metric,
+    _extract_published_date,
+    _img_qualifies,
+    _normalize_date_triple,
+    _parse_metric_number,
+    _pick_cover_image,
+    _pick_main_container,
+    _resolve_img_src,
+)
+# Constants imported separately so test boundary assertions track config drift.
+from crawler.parser import (
+    _FALLBACK_TAG_CLOUD_CAP,
+    _METRIC_SIBLING_CAP,
+    _MIN_COVER_DIMENSION,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -592,8 +609,6 @@ class TestDetailResourceMultiArticleRegression:
 # Unit 1 — Metric extraction precision (K/M/B + 万/千/亿 + year guard)
 # ---------------------------------------------------------------------------
 
-from crawler.parser import _extract_metric, _parse_metric_number
-
 
 class TestParseMetricNumber:
     def test_plain_int(self):
@@ -861,11 +876,6 @@ class TestKissavsStyleStructuredSite:
 # Unit 2 — Cover image picker (og → twitter → largest qualifying)
 # ---------------------------------------------------------------------------
 
-from crawler.parser import (
-    _pick_cover_image, _resolve_img_src, _img_qualifies,
-)
-
-
 def _img(html: str):
     return BeautifulSoup(html, "lxml").find("img")
 
@@ -923,14 +933,27 @@ class TestImgQualifies:
         "/static/logo.png",
         "/img/avatar/u123.jpg",
         "/static/icon-fb.svg",
-        "https://cdn.example.com/blank.gif",
         "/spacer.gif",
         "/assets/placeholder/default.png",
-        "/img/pixel-tracking.png",
     ])
     def test_icon_url_patterns_disqualify(self, src):
         i = _img('<img>')
         assert _img_qualifies(i, src) is False
+
+    @pytest.mark.parametrize("src", [
+        # ce:review autofix: tightened icon regex must NOT reject these
+        # legitimate cover slugs that contain the icon-tokens as substrings.
+        "/uploads/iconic-art.jpg",
+        "/cover/hero-blank-canvas.jpg",  # "blank" no longer in icon list
+        "/uploads/pixel-art-cover.png",  # "pixel" no longer in icon list
+        "/cover-iconic-photo.jpg",
+        "/products/2024-spacers-tutorial-thumb.jpg",  # "spacer" needs token isolation
+    ])
+    def test_legitimate_cover_slugs_pass(self, src):
+        i = _img('<img>')
+        assert _img_qualifies(i, src) is True, (
+            f"{src} should qualify — icon regex too aggressive"
+        )
 
     def test_small_dimensions_disqualify(self):
         i = _img('<img width="32" height="32">')
@@ -1119,9 +1142,6 @@ class TestDetailCoverIntegration:
 # Unit 3 — Published date precision (CJK + container-scoped + year-guard)
 # ---------------------------------------------------------------------------
 
-from crawler.parser import _extract_published_date, _normalize_date_triple
-
-
 class TestNormalizeDateTriple:
     def test_pads_single_digit_month_day(self):
         assert _normalize_date_triple(2025, 3, 5) == "2025-03-05"
@@ -1129,8 +1149,16 @@ class TestNormalizeDateTriple:
     def test_two_digit_month_day_unchanged(self):
         assert _normalize_date_triple(2025, 12, 31) == "2025-12-31"
 
-    def test_year_below_1990_rejected(self):
-        assert _normalize_date_triple(1989, 6, 15) == ""
+    def test_year_below_1970_rejected(self):
+        # ce:review autofix lowered the floor from 1990 → 1970 so digitised
+        # pre-1990 archive content survives. 1969 still rejected.
+        assert _normalize_date_triple(1969, 6, 15) == ""
+
+    def test_year_at_1970_floor_accepted(self):
+        assert _normalize_date_triple(1970, 1, 1) == "1970-01-01"
+
+    def test_year_1989_accepted_after_floor_lowered(self):
+        assert _normalize_date_triple(1989, 6, 15) == "1989-06-15"
 
     def test_year_above_2099_rejected(self):
         assert _normalize_date_triple(2100, 1, 1) == ""
@@ -1341,3 +1369,171 @@ class TestDetailDateRegression:
         """
         result = parse_page(html, "https://example.com/post/1")
         assert result.resources[0].published_at == "2025-03-15"
+
+
+# ---------------------------------------------------------------------------
+# ce:review autofix — bugs caught by reviewer pass on Units 1–3
+# ---------------------------------------------------------------------------
+
+class TestExtractMetricSharedParentBug:
+    """F1 (P0): when multiple metric keywords share a parent, each keyword
+    must anchor its OWN number — not collapse to the first match."""
+
+    def test_views_likes_hearts_in_one_span_return_distinct_numbers(self):
+        s = BeautifulSoup(
+            "<div><span>views 1234 likes 5678 hearts 12</span></div>",
+            "lxml",
+        )
+        assert _extract_metric(s, ["views"]) == 1234
+        assert _extract_metric(s, ["likes"]) == 5678
+        assert _extract_metric(s, ["hearts"]) == 12
+
+    def test_number_before_keyword_still_works(self):
+        # `12.3K views` — number lives BEFORE keyword. After-then-before
+        # slice covers this shape.
+        s = BeautifulSoup("<div><span>12.3K views</span></div>", "lxml")
+        assert _extract_metric(s, ["views"]) == 12300
+
+    def test_after_keyword_wins_when_both_sides_have_numbers(self):
+        # The canonical "label: value" reading order has number after the
+        # keyword, so it should beat a stray number to the left.
+        s = BeautifulSoup(
+            "<div><span>1234 — views 9999</span></div>", "lxml",
+        )
+        assert _extract_metric(s, ["views"]) == 9999
+
+
+class TestExtractMetricSiblingYearLeak:
+    """F2 (P1): year_guard must be recomputed (or OR'd) per sibling so a
+    sibling whose own text is © 2010 doesn't leak the year."""
+
+    def test_sibling_with_copyright_does_not_leak_year(self):
+        s = BeautifulSoup(
+            '<div><span>views</span><span>© 2010 Example</span></div>',
+            "lxml",
+        )
+        assert _extract_metric(s, ["views"]) == 0
+
+    def test_sibling_traversal_capped(self):
+        # Far-downstream siblings should not be considered. Build a parent
+        # with > _METRIC_SIBLING_CAP empty siblings and one number at the end.
+        siblings = "".join(
+            f'<span>noise{i}</span>' for i in range(_METRIC_SIBLING_CAP + 2)
+        )
+        html = f'<div><span>views</span>{siblings}<span>9999</span></div>'
+        s = BeautifulSoup(html, "lxml")
+        # Far-end 9999 is past the cap → returns 0.
+        assert _extract_metric(s, ["views"]) == 0
+
+
+class TestResolveImgSrcLazySrcsetPriority:
+    """F6 (P1): when a placeholder lives in `src` and the real image is in
+    `srcset`, srcset must win over plain src (but explicit lazy attrs still
+    win over srcset)."""
+
+    def test_srcset_beats_plain_src(self):
+        i = _img(
+            '<img src="placeholder.gif" '
+            'srcset="real-1024w.jpg 1024w, real-640w.jpg 640w">'
+        )
+        assert _resolve_img_src(i) == "real-1024w.jpg"
+
+    def test_data_src_beats_srcset(self):
+        # Explicit lazy attr is the strongest signal — overrides srcset.
+        i = _img(
+            '<img data-src="lazy-real.jpg" '
+            'srcset="something.jpg 1024w" src="placeholder.gif">'
+        )
+        assert _resolve_img_src(i) == "lazy-real.jpg"
+
+    def test_density_descriptor_2x_picked_over_1x(self):
+        # 2x descriptor maps to ordinal score and beats unspecified.
+        i = _img('<img srcset="img.jpg, img-2x.jpg 2x, img-3x.jpg 3x">')
+        assert _resolve_img_src(i) == "img-3x.jpg"
+
+    def test_negative_width_skipped(self):
+        i = _img('<img srcset="real.jpg 1024w, decoy.jpg -100w">')
+        assert _resolve_img_src(i) == "real.jpg"
+
+
+class TestPickCoverZeroAreaTiebreaker:
+    """Correctness #5 (P2): when multiple qualifying images all have no
+    declared dimensions, prefer the LAST one (later = closer to the real
+    cover; first = often byline avatar / decorative top image)."""
+
+    def test_zero_area_tie_picks_last(self):
+        soup = BeautifulSoup("""
+        <html><body><article>
+            <img src="byline-avatar-no-size.jpg">
+            <img src="decorative-divider.jpg">
+            <img src="real-cover.jpg">
+        </article></body></html>
+        """, "lxml")
+        article = soup.find("article")
+        assert _pick_cover_image(soup, article, "https://example.com/") == \
+            "https://example.com/real-cover.jpg"
+
+
+class TestJsonLdZeroNotOverridden:
+    """Correctness #2 (P1): JSON-LD-declared `0` is a real signal, not a
+    fallback trigger. The detail extractor must distinguish "no JSON-LD
+    metric" from "JSON-LD said 0"."""
+
+    def test_jsonld_zero_views_not_overridden_by_dom(self):
+        html = """
+        <html>
+        <head>
+            <meta property="og:title" content="Real Article">
+            <script type="application/ld+json">
+            {
+              "@context": "https://schema.org",
+              "@type": "Article",
+              "interactionStatistic": [
+                {"@type": "InteractionCounter",
+                 "interactionType": "https://schema.org/WatchAction",
+                 "userInteractionCount": 0}
+              ]
+            }
+            </script>
+        </head>
+        <body>
+            <article>
+                <h1>Real Article</h1>
+                <p>views 9999</p>
+            </article>
+        </body></html>
+        """
+        result = parse_page(html, "https://example.com/post/1")
+        # JSON-LD said 0 explicitly; DOM scan must not override it.
+        assert result.resources[0].views == 0
+
+
+class TestIsoDateRegexNoTrailingBoundary:
+    """Correctness #3 (P2): `_DATE_ISO_RE` previously had a trailing `\\b`
+    that failed when ISO-T was followed by a non-bracket char like `Tabc`.
+    Now matches up to the optional time block then stops (no boundary)."""
+
+    def test_iso_followed_by_unexpected_char_still_matches_date(self):
+        soup = BeautifulSoup(
+            '<html><body><article>'
+            '<time datetime="2025-03-15Tweird-suffix">x</time>'
+            '</article></body></html>',
+            "lxml",
+        )
+        article = soup.find("article")
+        # Date portion still extracts cleanly even when the time-tail is junk.
+        assert _extract_published_date(soup, article) == "2025-03-15"
+
+
+class TestMetricSiblingCapBoundary:
+    """Maintainability F3: assert against the constant, not a hardcoded
+    number, so the test tracks if someone bumps _METRIC_SIBLING_CAP."""
+
+    def test_traversal_uses_constant(self):
+        # Cap+1 inline siblings; the metric in the (cap+2)-th is unreachable.
+        sibs = "".join(
+            f'<span>x{i}</span>' for i in range(_METRIC_SIBLING_CAP)
+        )
+        html = f'<div><span>views</span>{sibs}<span>9999</span></div>'
+        s = BeautifulSoup(html, "lxml")
+        assert _extract_metric(s, ["views"]) == 0

@@ -79,16 +79,25 @@ _METRIC_YEAR_CONTEXT_RE = re.compile(
 # rejects data: URIs, filters obvious icon/logo URL patterns, drops
 # tiny declared dimensions, and prefers the largest qualifying image.
 
-# Lazy-load attribute priority — sites use one of these to hold the real
-# image URL while `src` carries a placeholder.
-_LAZY_SRC_ATTRS = ("data-src", "data-lazy-src", "data-original", "src")
+# Lazy-load + srcset priority lives next to `_resolve_img_src` further
+# down — see _LAZY_OVERRIDE_ATTRS / _parse_srcset for the actual order.
 
 # URL-pattern blocklist for non-cover images: site logos, user avatars,
-# tracking pixels, decorative spacers, generic placeholders. Word-bounded
-# so legitimate names like "iconic-art.jpg" don't get filtered, but
-# "site-logo.png" / "/avatars/u123.jpg" do.
+# decorative spacers, generic placeholders. The token must sit at a path-
+# segment boundary (between `/` `_` `-` `.` and one of the same), so:
+#   - "/static/site-logo.png"     → filtered (logo bounded by - and .)
+#   - "/avatars/u123.jpg"         → filtered (avatars bounded by /)
+#   - "/uploads/iconic-art.jpg"   → kept (icon embedded in iconic, no boundary)
+#   - "/cover-icon-set.jpg"       → kept (icon embedded in icon-set isn't
+#                                          itself isolated; same on -set side)
+# Removed `pixel` and `blank` from the list — they appear in legitimate
+# cover slugs (pixel art, blank-canvas studios) more often than as
+# tracking/decoration.
+_ICON_URL_BOUNDARY = r"(?:^|[/._-])"
 _ICON_URL_RE = re.compile(
-    r"\b(logos?|icons?|avatars?|pixels?|blank|spacer|placeholder)\b", re.I,
+    rf"{_ICON_URL_BOUNDARY}(logos?|icons?|avatars?|spacer|placeholder)"
+    rf"(?=[/._-]|$)",
+    re.I,
 )
 
 # Below this dimension, a declared <img width/height> is treated as a
@@ -105,7 +114,11 @@ _MIN_COVER_DIMENSION = 50
 # helper below: container-scoped fallback, supports CJK + slash + ISO,
 # normalises everything to `YYYY-MM-DD`.
 
-_DATE_ISO_RE = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})(?:T[\d:.+\-Z]*)?\b")
+# `\b` after the day digit fails on shapes like `2025-03-15Tabc` because
+# `T` is a word char on both sides; using a negative-lookbehind-free guard
+# (no trailing boundary, plus the `\d{1,2}` upper limit on day) keeps the
+# match safe — invalid triples get caught by _normalize_date_triple.
+_DATE_ISO_RE = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})(?:T[\d:.+\-Z]*)?")
 _DATE_SLASH_RE = re.compile(r"\b(\d{4})/(\d{1,2})/(\d{1,2})\b")
 _DATE_CJK_RE = re.compile(r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日?")
 
@@ -405,6 +418,12 @@ def _parse_metric_number(text: str, *, year_guard: bool) -> int | None:
     return None
 
 
+# Cap on `parent.next_siblings` traversal — beyond a few inline siblings
+# we're pulling text from arbitrary downstream nodes, which produces noise
+# (a card's "Trending" section ranks above the article's actual metric).
+_METRIC_SIBLING_CAP = 3
+
+
 def _extract_metric(scope: BsTag, keywords: list[str]) -> int:
     """Find a metric value near any of ``keywords`` inside ``scope``.
 
@@ -414,11 +433,17 @@ def _extract_metric(scope: BsTag, keywords: list[str]) -> int:
     the scope (article container in detail pages, card in list pages) —
     this function never walks past it.
 
+    The keyword *anchors* the search: only digits appearing AFTER the
+    keyword inside the parent text are considered. This stops the
+    "<span>views 1234 likes 5678</span>" collision where every metric
+    keyword used to return the same first number.
+
     Returns ``0`` when nothing matched, preserving the prior "no metric =
     zero" contract.
     """
     for kw in keywords:
-        for el in scope.find_all(string=re.compile(re.escape(kw), re.I)):
+        kw_re = re.compile(re.escape(kw), re.I)
+        for el in scope.find_all(string=kw_re):
             parent = el.parent
             if parent is None:
                 continue
@@ -431,11 +456,28 @@ def _extract_metric(scope: BsTag, keywords: list[str]) -> int:
             ):
                 continue
             parent_text = parent.get_text(" ", strip=True)
-            year_guard = bool(_METRIC_YEAR_CONTEXT_RE.search(parent_text))
-            value = _parse_metric_number(parent_text, year_guard=year_guard)
-            if value is not None:
-                return value
+            parent_year_guard = bool(_METRIC_YEAR_CONTEXT_RE.search(parent_text))
+            # Slice parent_text around the keyword's position — the
+            # keyword anchor is otherwise discarded by get_text(), letting
+            # adjacent "likes 5678" leak into "views" extraction when both
+            # share a parent. Search "after keyword" first (canonical
+            # `views 1234` shape), then "before keyword" (`12.3K views`
+            # shape with the number on the left).
+            kw_match = kw_re.search(parent_text)
+            if kw_match:
+                after_kw = parent_text[kw_match.end():]
+                before_kw = parent_text[:kw_match.start()]
+                slices = (after_kw, before_kw)
+            else:
+                slices = (parent_text,)
+            for chunk in slices:
+                value = _parse_metric_number(chunk, year_guard=parent_year_guard)
+                if value is not None:
+                    return value
+            sibling_count = 0
             for sib in parent.next_siblings:
+                if sibling_count >= _METRIC_SIBLING_CAP:
+                    break
                 sib_text = (
                     sib.get_text(" ", strip=True)
                     if hasattr(sib, "get_text")
@@ -443,15 +485,17 @@ def _extract_metric(scope: BsTag, keywords: list[str]) -> int:
                 )
                 if not sib_text:
                     continue
-                value = _parse_metric_number(sib_text, year_guard=year_guard)
+                sibling_count += 1
+                # Recompute year_guard per sibling — a sibling whose own
+                # text declares a copyright must trip the guard even if
+                # the keyword's parent didn't (Adversarial F2).
+                sib_year_guard = parent_year_guard or bool(
+                    _METRIC_YEAR_CONTEXT_RE.search(sib_text)
+                )
+                value = _parse_metric_number(sib_text, year_guard=sib_year_guard)
                 if value is not None:
                     return value
     return 0
-
-
-# Old name kept as alias so any external import path or stale test still
-# compiles. Internal call sites use _extract_metric directly.
-_extract_number_near_keyword = _extract_metric
 
 
 # ---------------------------------------------------------------------------
@@ -579,34 +623,79 @@ def _pick_main_container(soup: BeautifulSoup):
     return None
 
 
-def _resolve_img_src(img: BsTag) -> str:
-    """Walk lazy-load attrs in priority order, picking the first non-empty.
+def _parse_srcset(srcset: str) -> str:
+    """Pick the largest URL from an HTML5 ``srcset`` attribute.
 
-    Special-cases ``srcset`` (when present) by selecting the largest
-    declared width. Returns ``""`` if no usable URL is present.
+    Recognises both width descriptors (``url 1024w``) and density
+    descriptors (``url 2x``). Negative or zero descriptors are skipped.
+    When all entries lack a parseable descriptor, the first URL wins.
     """
-    for attr in _LAZY_SRC_ATTRS:
+    best_url = ""
+    best_score = 0  # 0 means "no descriptor seen" — first valid entry wins
+    for entry in srcset.split(","):
+        parts = entry.strip().split()
+        if not parts:
+            continue
+        url_part = parts[0]
+        score = 0
+        if len(parts) >= 2:
+            desc = parts[1]
+            if desc.endswith("w"):
+                try:
+                    w = int(desc[:-1])
+                    if w > 0:
+                        score = w
+                except ValueError:
+                    pass
+            elif desc.endswith("x"):
+                try:
+                    # Density descriptors compare ordinally against each
+                    # other; map to a notional pixel-width by multiplying.
+                    x = float(desc[:-1])
+                    if x > 0:
+                        score = int(x * 1000)
+                except ValueError:
+                    pass
+        # First non-empty URL wins when no descriptor seen anywhere; later
+        # entries with a real (positive) descriptor overtake.
+        if not best_url:
+            best_url = url_part
+            best_score = score
+        elif score > best_score:
+            best_url = url_part
+            best_score = score
+    return best_url
+
+
+# Explicit lazy-load attrs that always override `src` (which is usually
+# the placeholder when these are present).
+_LAZY_OVERRIDE_ATTRS = ("data-src", "data-lazy-src", "data-original")
+
+
+def _resolve_img_src(img: BsTag) -> str:
+    """Walk image-source attrs in priority order, picking the best URL.
+
+    Order: explicit lazy attrs (data-src/data-lazy-src/data-original) →
+    ``srcset`` (largest descriptor) → plain ``src``. The previous order
+    treated ``src`` as a lazy attr ahead of ``srcset``, so a placeholder
+    ``src`` would beat a real ``srcset`` URL — see Adversarial F6.
+    Returns ``""`` if no usable URL is present.
+    """
+    for attr in _LAZY_OVERRIDE_ATTRS:
         val = img.get(attr)
         if val and isinstance(val, str) and val.strip():
             return val.strip()
+
     srcset = img.get("srcset")
-    if srcset and isinstance(srcset, str):
-        # `url1 320w, url2 640w, url3 1024w` — keep the largest by Nw token.
-        best_url, best_w = "", -1
-        for entry in srcset.split(","):
-            parts = entry.strip().split()
-            if not parts:
-                continue
-            url_part = parts[0]
-            w = 0
-            if len(parts) >= 2 and parts[1].endswith("w"):
-                try:
-                    w = int(parts[1][:-1])
-                except ValueError:
-                    pass
-            if w > best_w:
-                best_url, best_w = url_part, w
-        return best_url
+    if srcset and isinstance(srcset, str) and srcset.strip():
+        result = _parse_srcset(srcset)
+        if result:
+            return result
+
+    src = img.get("src")
+    if src and isinstance(src, str) and src.strip():
+        return src.strip()
+
     return ""
 
 
@@ -627,7 +716,11 @@ def _img_qualifies(img: BsTag, src: str) -> bool:
     return True
 
 
-def _pick_cover_image(soup, container, base_url: str) -> str:
+def _pick_cover_image(
+    soup: BeautifulSoup | None,
+    container: BsTag | None,
+    base_url: str,
+) -> str:
     """Pick the most likely cover image for the resource.
 
     Priority: ``og:image`` (from <head>) → ``twitter:image`` meta →
@@ -636,6 +729,12 @@ def _pick_cover_image(soup, container, base_url: str) -> str:
     ``og:image``/``twitter:image`` skip ``data:`` URIs (placeholder
     payloads SEO scrapers sometimes return); container scan applies the
     full lazy-load + icon/avatar / size filter.
+
+    When multiple qualifying images have no declared dimensions (zero
+    area), the **last** one wins — covers virtually always appear after
+    the article title, while the first un-sized image is more likely a
+    decorative author byline / share-icon that slipped past the URL
+    filter.
 
     Pass ``soup=None`` to skip the meta-tag step (used by list-card
     extraction, where each card needs its own thumbnail rather than the
@@ -650,8 +749,8 @@ def _pick_cover_image(soup, container, base_url: str) -> str:
     if container is None:
         return ""
 
-    qualifying: list[tuple[int, str]] = []
-    for img in container.find_all("img"):
+    qualifying: list[tuple[int, int, str]] = []
+    for index, img in enumerate(container.find_all("img")):
         src = _resolve_img_src(img)
         if not _img_qualifies(img, src):
             continue
@@ -660,23 +759,26 @@ def _pick_cover_image(soup, container, base_url: str) -> str:
             h = int(img.get("height", 0) or 0)
         except (TypeError, ValueError):
             w = h = 0
-        qualifying.append((w * h, src))
+        qualifying.append((w * h, index, src))
 
     if not qualifying:
         return ""
-    # Largest by declared area (0 area = no W/H attrs); ties resolved by
-    # document order (Python's sort is stable).
-    qualifying.sort(key=lambda t: t[0], reverse=True)
-    return urljoin(base_url, qualifying[0][1])
+    # Sort key: largest declared area first; for the zero-area tie group,
+    # later index wins (covers come after the title — the first <img> is
+    # likely a byline avatar / share icon that slipped past _img_qualifies).
+    qualifying.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    return urljoin(base_url, qualifying[0][2])
 
 
 def _normalize_date_triple(year: int, month: int, day: int) -> str:
     """Validate and zero-pad a (year, month, day) triple to ``YYYY-MM-DD``.
 
     Returns ``""`` if the triple isn't a plausible publish date (year out
-    of 1990..2099, month not 1..12, day not 1..31).
+    of 1970..2099, month not 1..12, day not 1..31). Year floor at 1970
+    (Unix epoch) to capture digitised pre-2000 archives without weakening
+    the regex's "must have full triple" guard against bare copyright years.
     """
-    if not (1990 <= year <= 2099):
+    if not (1970 <= year <= 2099):
         return ""
     if not (1 <= month <= 12):
         return ""
@@ -794,16 +896,18 @@ def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
     jsonld_metrics = _extract_jsonld_metrics(_parse_jsonld_blocks(soup))
     # Scope the DOM heuristic to the article container (or <body>) so
     # sidebar widgets and footer "© 2025" noise don't get attributed.
+    # Use explicit `in` check rather than `or` — a JSON-LD-declared `0`
+    # is a real signal, not a fallback trigger (Correctness #2).
     metric_scope = container or soup.body or soup
-    views = jsonld_metrics.get("views") or _extract_metric(
-        metric_scope, ["views", "view", "浏览", "浏览量"]
-    )
-    likes = jsonld_metrics.get("likes") or _extract_metric(
-        metric_scope, ["likes", "like", "赞", "点赞"]
-    )
-    hearts = jsonld_metrics.get("hearts") or _extract_metric(
-        metric_scope, ["hearts", "heart", "爱心", "收藏"]
-    )
+
+    def _metric(key: str, kws: list[str]) -> int:
+        if key in jsonld_metrics:
+            return jsonld_metrics[key]
+        return _extract_metric(metric_scope, kws)
+
+    views = _metric("views", ["views", "view", "浏览", "浏览量"])
+    likes = _metric("likes", ["likes", "like", "赞", "点赞"])
+    hearts = _metric("hearts", ["hearts", "heart", "爱心", "收藏"])
 
     # Category priority: breadcrumb > detected category link (from the
     # tag block) > URL first segment. Breadcrumb wins because it's the
