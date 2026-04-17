@@ -285,8 +285,8 @@ class TestFetchPageWithCache:
 
             fetch_page_with_cache("https://example.com/page", cache_service)
 
-            # Verify None values were passed initially
+            # Verify None values were passed initially (positional args, not kwargs)
             call_args = mock_attempt.call_args
-            assert call_args.kwargs.get("cached_etag") is None
-            assert call_args.kwargs.get("cached_last_modified") is None
-            assert call_args.kwargs.get("cached_body") is None
+            assert call_args.args[1] is None  # cached_etag
+            assert call_args.args[2] is None  # cached_last_modified
+            assert call_args.args[3] is None  # cached_body

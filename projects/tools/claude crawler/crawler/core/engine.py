@@ -35,7 +35,8 @@ from crawler.config import (
     USER_AGENT, WORKER_COUNT, WRITER_REPLY_TIMEOUT,
     ZERO_RESOURCE_RETRY_PAGE_TYPES,
 )
-from crawler.core.fetcher import fetch_page, needs_js_rendering
+from crawler.cache import CacheService
+from crawler.core.fetcher import fetch_page_with_cache_tracking, needs_js_rendering
 from crawler.core.frontier import Frontier
 from crawler.core.progress import ProgressCoalescer
 from crawler.core.ratelimit import DomainRateLimiter
@@ -107,6 +108,7 @@ class _WorkerContext:
     robots_lock: threading.Lock
     counters: "_Counters"
     counters_lock: threading.Lock
+    cache_service: CacheService
     # B3: latch ensures the "render disabled" UI warning fires exactly once
     # per scan, not once per page that hits the disabled path.
     render_disabled_warned: threading.Event = field(
@@ -118,6 +120,8 @@ class _WorkerContext:
 class _Counters:
     pages_done: int = 0
     resources_found: int = 0
+    cache_hits: int = 0
+    cache_misses: int = 0
 
 
 def _emit_progress(ctx: _WorkerContext, current_url: str, status: str = "running") -> None:
@@ -276,16 +280,23 @@ def _process_one_page(url: str, depth: int, page_id: int,
 
 
 def _fetch_html(ctx: _WorkerContext, url: str) -> tuple[str | None, str | None]:
-    """Tiered fetch: plain HTTP, then Playwright fallback when needed."""
+    """Tiered fetch: plain HTTP with caching, then Playwright fallback when needed."""
     if ctx.force_playwright:
         rendered = _try_render(ctx, url)
         if rendered is None:
             return None, "render_failed"
         return rendered, None
 
-    html = fetch_page(url)
+    html, was_cached = fetch_page_with_cache_tracking(url, ctx.cache_service)
     if html is None:
         return None, "http_error"
+
+    # Track cache hits/misses
+    with ctx.counters_lock:
+        if was_cached:
+            ctx.counters.cache_hits += 1
+        else:
+            ctx.counters.cache_misses += 1
 
     if needs_js_rendering(html):
         rendered = _try_render(ctx, url)
@@ -427,6 +438,7 @@ def run_crawl(
     counters_lock = threading.Lock()
     robots_cache: dict = {}
     robots_lock = threading.Lock()
+    cache_service = CacheService(db_path)
 
     ctx = _WorkerContext(
         scan_job_id=scan_job_id,
@@ -441,6 +453,7 @@ def run_crawl(
         robots_lock=robots_lock,
         counters=counters,
         counters_lock=counters_lock,
+        cache_service=cache_service,
     )
 
     # Build executor explicitly (not via `with`) so we control the order in
@@ -530,6 +543,8 @@ def run_crawl(
         with counters_lock:
             final_pages_done = counters.pages_done
             final_resources_found = counters.resources_found
+            final_cache_hits = counters.cache_hits
+            final_cache_misses = counters.cache_misses
 
         # A6: terminal scan_job update via writer if alive; otherwise direct
         # connection bypass so the scan_jobs row doesn't stay 'running'
@@ -544,6 +559,8 @@ def run_crawl(
                     status=final_status,
                     pages_scanned=final_pages_done,
                     resources_found=final_resources_found,
+                    cache_hits=final_cache_hits,
+                    cache_misses=final_cache_misses,
                 ))
                 terminal_written = True
             except Exception:
@@ -560,6 +577,7 @@ def run_crawl(
             _direct_finalize_scan_job(
                 db_path, scan_job_id, final_status,
                 final_pages_done, final_resources_found,
+                final_cache_hits, final_cache_misses,
             )
 
         coalescer.emit({

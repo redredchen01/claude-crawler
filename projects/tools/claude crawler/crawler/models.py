@@ -16,6 +16,8 @@ class ScanJob:
     resources_found: int = 0
     created_at: str = ""
     completed_at: str | None = None
+    cache_hits: int = 0
+    cache_misses: int = 0
 
 
 @dataclass
@@ -119,3 +121,5 @@ class ScanJobUpdateRequest:
     status: str                        # "completed" | "failed" | "cancelled"
     pages_scanned: int = 0
     resources_found: int = 0
+    cache_hits: int = 0
+    cache_misses: int = 0
