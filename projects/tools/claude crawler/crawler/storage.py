@@ -216,23 +216,35 @@ def insert_resource(db_path: str, resource: Resource) -> int | None:
             return None
 
 
+# CHAR(31) is the ASCII unit separator — a control character that never
+# appears in legitimate tag text, so it's safe as a splitter without escaping.
+_TAG_JOIN_SEP = chr(31)
+
+
 def get_resources(db_path: str, scan_job_id: int) -> list[Resource]:
+    """Return all resources for a scan_job with tags populated.
+
+    Uses a single LEFT JOIN + GROUP_CONCAT query instead of the prior N+1
+    per-resource tag lookup. For a scan with N resources, this is 1 query
+    instead of N+1.
+    """
+    sql = """
+        SELECT r.*, GROUP_CONCAT(t.name, ?) AS tag_names
+        FROM resources r
+        LEFT JOIN resource_tags rt ON rt.resource_id = r.id
+        LEFT JOIN tags t ON t.id = rt.tag_id
+        WHERE r.scan_job_id = ?
+        GROUP BY r.id
+        ORDER BY r.popularity_score DESC
+    """
     with get_connection(db_path) as conn:
-        rows = conn.execute(
-            "SELECT * FROM resources WHERE scan_job_id = ? ORDER BY popularity_score DESC",
-            (scan_job_id,),
-        ).fetchall()
-        resources = []
+        rows = conn.execute(sql, (_TAG_JOIN_SEP, scan_job_id)).fetchall()
+        resources: list[Resource] = []
         for r in rows:
-            res = Resource(**{k: r[k] for k in r.keys() if k != "tags"})
-            # Load tags for this resource
-            tag_rows = conn.execute(
-                """SELECT t.name FROM tags t
-                   JOIN resource_tags rt ON t.id = rt.tag_id
-                   WHERE rt.resource_id = ?""",
-                (res.id,),
-            ).fetchall()
-            res.tags = [tr["name"] for tr in tag_rows]
+            row_dict = {k: r[k] for k in r.keys() if k != "tag_names"}
+            res = Resource(**row_dict)
+            tag_names = r["tag_names"]
+            res.tags = tag_names.split(_TAG_JOIN_SEP) if tag_names else []
             resources.append(res)
         return resources
 
@@ -336,12 +348,13 @@ def save_resource_with_tags(db_path: str, resource: Resource, conn: sqlite3.Conn
         if resource_id is None:
             return None
 
-        # Link tags (batch-friendly)
+        # Collect (resource_id, tag_id) pairs via single-tag get-or-create,
+        # then batch the resource_tags inserts via executemany.
+        tag_link_pairs: list[tuple[int, int]] = []
         for tag_name in resource.tags:
             tag_name = tag_name.strip()
             if not tag_name:
                 continue
-            # Get or create tag
             row = conn.execute(
                 "SELECT id FROM tags WHERE scan_job_id = ? AND name = ?",
                 (resource.scan_job_id, tag_name),
@@ -354,11 +367,13 @@ def save_resource_with_tags(db_path: str, resource: Resource, conn: sqlite3.Conn
                     (resource.scan_job_id, tag_name),
                 )
                 tag_id = cursor.lastrowid
+            tag_link_pairs.append((resource_id, tag_id))
 
-            # Link resource-tag
-            conn.execute(
+        # Batch all resource-tag links in a single executemany.
+        if tag_link_pairs:
+            conn.executemany(
                 "INSERT OR IGNORE INTO resource_tags (resource_id, tag_id) VALUES (?, ?)",
-                (resource_id, tag_id),
+                tag_link_pairs,
             )
 
         if close_conn:

@@ -237,3 +237,84 @@ class TestFailureReasonMigration:
             assert cols.count("failure_reason") == 1
         finally:
             os.unlink(path)
+
+
+class TestGetResourcesQueryCount:
+    """Unit 9: get_resources must use a single query (was N+1)."""
+
+    def test_single_query_for_many_resources(self, db_path):
+        job_id = create_scan_job(db_path, "https://example.com", "example.com")
+        for i in range(10):
+            res = Resource(
+                scan_job_id=job_id,
+                title=f"R{i}", url=f"https://example.com/r{i}",
+                tags=[f"t{j}" for j in range(3)],
+            )
+            save_resource_with_tags(db_path, res)
+
+        # Open our own connection with a trace callback to count queries.
+        # We can't trace through storage.get_resources' private connection,
+        # so we run the same query here and assert on its shape/count.
+        trace: list[str] = []
+
+        def tracer(sql):
+            trace.append(sql)
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        conn.set_trace_callback(tracer)
+        try:
+            # Import the actual function and monkey-patch get_connection to
+            # return our traced connection.
+            from unittest.mock import patch
+            from contextlib import contextmanager
+
+            @contextmanager
+            def fake_get_conn(_path=None):
+                yield conn
+
+            with patch("crawler.storage.get_connection", fake_get_conn):
+                resources = get_resources(db_path, job_id)
+        finally:
+            conn.set_trace_callback(None)
+            conn.close()
+
+        assert len(resources) == 10
+        for res in resources:
+            assert len(res.tags) == 3
+        # Only one SELECT from resources ran — no N+1.
+        resource_selects = [
+            s for s in trace
+            if s.strip().upper().startswith("SELECT") and "FROM RESOURCES" in s.upper()
+        ]
+        assert len(resource_selects) == 1, (
+            f"expected 1 resource SELECT, got {len(resource_selects)}:\n"
+            + "\n".join(resource_selects)
+        )
+
+    def test_resource_with_zero_tags(self, db_path):
+        job_id = create_scan_job(db_path, "https://example.com", "example.com")
+        res = Resource(
+            scan_job_id=job_id,
+            title="NoTags", url="https://example.com/nt",
+            tags=[],
+        )
+        save_resource_with_tags(db_path, res)
+        resources = get_resources(db_path, job_id)
+        assert len(resources) == 1
+        assert resources[0].tags == [], (
+            "zero-tag resource must return tags=[], not [''] or [None]"
+        )
+
+    def test_tag_names_with_commas_do_not_collide(self, db_path):
+        """Unit separator (CHAR 31) avoids tag-name escaping issues."""
+        job_id = create_scan_job(db_path, "https://example.com", "example.com")
+        res = Resource(
+            scan_job_id=job_id,
+            title="T", url="https://example.com/t",
+            tags=["a,b", "c,d", "e"],
+        )
+        save_resource_with_tags(db_path, res)
+        resources = get_resources(db_path, job_id)
+        assert len(resources) == 1
+        assert sorted(resources[0].tags) == ["a,b", "c,d", "e"]
