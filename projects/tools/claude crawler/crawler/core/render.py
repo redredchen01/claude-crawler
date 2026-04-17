@@ -236,6 +236,9 @@ def _real_render(handle: _ChromiumHandle, url: str, timeout_ms: int) -> str:
                 handle.context.close()
             except Exception:
                 pass
+            # Drop the broken context first so a raise from new_context()
+            # leaves us in a re-buildable state (next render's None branch
+            # will retry the rebuild).
             handle.context = None
             handle.context = handle.browser.new_context()
 
