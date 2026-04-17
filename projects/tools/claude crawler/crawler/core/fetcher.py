@@ -16,6 +16,7 @@ per host instead of once per page (~10-40s saved at typical RTTs).
 import logging
 import re
 import time
+from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -24,11 +25,17 @@ from requests.exceptions import (
     MissingSchema, SSLError, TooManyRedirects, URLRequired,
 )
 
+from crawler import config
 from crawler.config import (
     HTML_CONTENT_TYPE_MARKERS, HTTP_POOL_CONNECTIONS, HTTP_POOL_MAXSIZE,
     HTTP_TIMEOUT, JS_BODY_MIN_LENGTH, MAX_RESPONSE_BYTES, RETRY_BACKOFF,
     RETRY_COUNT, USER_AGENT,
 )
+from crawler.core.url import is_private_host
+
+# ALLOW_PRIVATE_HOSTS and MAX_REDIRECTS are read via `config.NAME` at call
+# time (not imported as constants) so tests and operators can flip them
+# without re-importing the module.
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +64,11 @@ def _build_session() -> requests.Session:
         pool_connections=HTTP_POOL_CONNECTIONS,
         pool_maxsize=HTTP_POOL_MAXSIZE,
         max_retries=0,
+        # pool_block=False (default): when a host's pool is saturated, urllib3
+        # creates a fresh ad-hoc connection rather than blocking the worker.
+        # The ad-hoc connection isn't pooled (closed after use) — explicit
+        # here so the choice survives the next reviewer asking about it.
+        pool_block=False,
     )
     sess.mount("http://", adapter)
     sess.mount("https://", adapter)
@@ -141,14 +153,54 @@ def _decode_body(resp: requests.Response, body: bytes) -> str:
         return body.decode("utf-8", errors="replace")
 
 
+def _follow_redirects_safely(url: str) -> requests.Response | None:
+    """GET ``url``, following redirects manually so each hop's host can be
+    SSRF-checked. Returns the final 2xx Response (caller closes), or None
+    if a hop targets a private host or the chain exceeds MAX_REDIRECTS.
+
+    With ``allow_redirects=False`` we still get cookies/headers handled by
+    the Session — the only thing we lose is automatic Location handling,
+    which we recreate with explicit per-hop validation.
+    """
+    from urllib.parse import urljoin
+    current = url
+    for _ in range(config.MAX_REDIRECTS + 1):
+        if not config.ALLOW_PRIVATE_HOSTS:
+            host = urlparse(current).hostname
+            if is_private_host(host):
+                logger.warning(
+                    "Refusing fetch — host %r is private/loopback (SSRF gate). "
+                    "URL=%s", host, current,
+                )
+                return None
+        resp = _SESSION.get(
+            current, timeout=HTTP_TIMEOUT, stream=True, allow_redirects=False,
+        )
+        if not resp.is_redirect:
+            return resp
+        location = resp.headers.get("Location")
+        resp.close()
+        if not location:
+            return None
+        # Resolve relative redirects against the URL we just hit.
+        current = urljoin(current, location)
+    logger.warning("Redirect chain exceeded MAX_REDIRECTS=%d for %s",
+                   config.MAX_REDIRECTS, url)
+    return None
+
+
 def _attempt_fetch(url: str) -> str | None:
     """One fetch attempt. Returns HTML, or ``None`` on any drop reason.
 
     Drop reasons: HTTP error, non-HTML Content-Type, body over cap, request
-    error. Each path logs at debug/warning level so a zero-resource scan can
-    be diagnosed from the logs without code changes.
+    error, SSRF gate (private/loopback host in the redirect chain). Each
+    path logs at debug/warning level so a zero-resource scan can be
+    diagnosed from the logs without code changes.
     """
-    with _SESSION.get(url, timeout=HTTP_TIMEOUT, stream=True) as resp:
+    resp = _follow_redirects_safely(url)
+    if resp is None:
+        return None
+    with resp:
         resp.raise_for_status()
 
         ctype = resp.headers.get("Content-Type", "")

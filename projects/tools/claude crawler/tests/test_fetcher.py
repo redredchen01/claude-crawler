@@ -21,6 +21,9 @@ def _mk_response(*, status: int = 200, content_type: str = "text/html",
     """Build a MagicMock that quacks like a streaming requests.Response."""
     resp = MagicMock()
     resp.status_code = status
+    # _follow_redirects_safely consults is_redirect; default False so the
+    # tests don't enter the redirect loop unintentionally.
+    resp.is_redirect = False
     resp.headers = {"Content-Type": content_type}
     if content_length is not None:
         resp.headers["Content-Length"] = content_length
@@ -285,3 +288,107 @@ class TestNonRetryableExceptions:
             assert fetcher.fetch_page("https://example.com/x") is None
         assert mock_get.call_count == 1
         assert slept == []
+
+
+# ---------------------------------------------------------------------------
+# SSRF gate: redirect-chain validation
+# ---------------------------------------------------------------------------
+
+class TestRedirectSafety:
+    def _redirect_resp(self, location: str, status: int = 302) -> MagicMock:
+        """A 30x response with a Location header. is_redirect=True so
+        _follow_redirects_safely follows it (instead of treating it as
+        the final response)."""
+        r = MagicMock()
+        r.status_code = status
+        r.is_redirect = True
+        r.headers = {"Location": location}
+        r.close = MagicMock()
+        return r
+
+    def test_follows_redirect_chain_to_public_target(self, monkeypatch):
+        from crawler import config
+        monkeypatch.setattr(config, "ALLOW_PRIVATE_HOSTS", True)
+        responses = [
+            self._redirect_resp("https://example.com/final"),
+            _mk_response(),
+        ]
+
+        def fake_get(url, **kwargs):
+            return responses.pop(0)
+
+        with patch.object(fetcher._SESSION, "get", side_effect=fake_get):
+            assert fetcher.fetch_page("https://example.com/start") is not None
+
+    def test_blocks_redirect_to_private_host(self, monkeypatch):
+        """Public URL → 302 → AWS metadata IP must be refused without
+        fetching the body. Classic SSRF chain."""
+        from crawler import config
+        monkeypatch.setattr(config, "ALLOW_PRIVATE_HOSTS", False)
+
+        # Sequence: first request returns a 302 to the metadata IP. The
+        # SSRF gate fires BEFORE the second request is issued.
+        responses = [self._redirect_resp("http://169.254.169.254/latest/meta-data/")]
+
+        def fake_get(url, **kwargs):
+            return responses.pop(0)
+
+        with patch.object(fetcher._SESSION, "get",
+                          side_effect=fake_get) as mock_get, \
+             patch("crawler.core.fetcher.time.sleep"):
+            assert fetcher.fetch_page("https://public.example.com/x") is None
+        # Exactly one GET fired — the would-be second hop was vetoed.
+        assert mock_get.call_count == 1
+
+    def test_blocks_redirect_chain_exceeding_cap(self, monkeypatch):
+        """An infinite-redirect chain (or > MAX_REDIRECTS) is dropped."""
+        from crawler import config
+        monkeypatch.setattr(config, "ALLOW_PRIVATE_HOSTS", True)
+
+        def fake_get(url, **kwargs):
+            return self._redirect_resp("https://example.com/loop")
+
+        with patch.object(fetcher._SESSION, "get",
+                          side_effect=fake_get) as mock_get, \
+             patch("crawler.core.fetcher.time.sleep"):
+            assert fetcher.fetch_page("https://example.com/start") is None
+        # MAX_REDIRECTS + 1 attempts before giving up.
+        assert mock_get.call_count == config.MAX_REDIRECTS + 1
+
+    def test_redirect_without_location_header_drops(self, monkeypatch):
+        from crawler import config
+        monkeypatch.setattr(config, "ALLOW_PRIVATE_HOSTS", True)
+
+        bad = MagicMock()
+        bad.status_code = 302
+        bad.is_redirect = True
+        bad.headers = {}  # no Location
+        bad.close = MagicMock()
+
+        with patch.object(fetcher._SESSION, "get", return_value=bad), \
+             patch("crawler.core.fetcher.time.sleep"):
+            assert fetcher.fetch_page("https://example.com/x") is None
+
+    def test_relative_redirect_resolved_against_current_url(self, monkeypatch):
+        """302 → '/path' (relative) must resolve against the current URL,
+        not the original entry URL."""
+        from crawler import config
+        monkeypatch.setattr(config, "ALLOW_PRIVATE_HOSTS", True)
+
+        responses = [
+            self._redirect_resp("/relative-path"),
+            _mk_response(),
+        ]
+        seen_urls: list[str] = []
+
+        def fake_get(url, **kwargs):
+            seen_urls.append(url)
+            return responses.pop(0)
+
+        with patch.object(fetcher._SESSION, "get", side_effect=fake_get):
+            fetcher.fetch_page("https://example.com/start/here")
+
+        assert seen_urls == [
+            "https://example.com/start/here",
+            "https://example.com/relative-path",
+        ]

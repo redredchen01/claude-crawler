@@ -22,9 +22,21 @@ HTTP_TIMEOUT = (5, 15)
 # Hard cap on body size (bytes). Stream-aborted past this — defends a single
 # hostile/huge response from chewing memory or starving worker time.
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024  # 5 MB
-# Connection pool — sized for WORKER_COUNT plus headroom. Same Session is
-# shared across all workers; HTTPAdapter manages thread-safe pooling.
-HTTP_POOL_CONNECTIONS = 20
+# Connection pool — same Session shared across all workers; HTTPAdapter
+# manages thread-safe pooling.
+#
+# HTTP_POOL_CONNECTIONS bounds the number of distinct host buckets kept
+# in memory (LRU evicted past this). A frontier whose discovered links
+# point at many domains will churn buckets, defeating the connection-
+# reuse win on each evicted host. Sized at WORKER_COUNT*4 with a 50
+# floor to handle multi-domain crawls without sacrificing same-domain
+# pooling.
+#
+# HTTP_POOL_MAXSIZE bounds the number of *concurrent* connections to a
+# single host. With WORKER_COUNT=8 (the typical case), 20 leaves slack
+# so the pool isn't the bottleneck on hosts that accept many parallel
+# requests.
+HTTP_POOL_CONNECTIONS = 50  # ≈ WORKER_COUNT * 6 with WORKER_COUNT=8
 HTTP_POOL_MAXSIZE = 20
 # Substrings that mark a Content-Type as "probably parseable HTML/XML".
 # Fetcher skips anything that explicitly declares a non-matching type
@@ -32,6 +44,20 @@ HTTP_POOL_MAXSIZE = 20
 # whole-body download + parse pass on binary blobs that slipped past the
 # Frontier's extension filter (e.g. extension-less /download?id=123 URLs).
 HTML_CONTENT_TYPE_MARKERS = ("html", "xhtml", "xml", "text/plain")
+
+# --- SSRF gate ---
+# When False, the URL normalizer rejects entry URLs and the fetcher refuses
+# to follow redirects whose host resolves to a private/loopback/link-local
+# /reserved IP (10.0.0.0/8, 192.168.0.0/16, 169.254.x AWS metadata, ::1,
+# fe80::/10, etc.). Default True preserves local-dev convenience (scanning
+# localhost during development). Flip to False before exposing this UI to
+# untrusted users — otherwise a pasted URL can pivot into your internal
+# network via a 302 redirect. See crawler.core.url.is_private_host.
+ALLOW_PRIVATE_HOSTS = True
+# Cap on redirect-chain length when following manually (with per-hop host
+# validation). 5 matches Chrome's redirect cap and is enough for legit
+# CDN/auth flows without giving an attacker an unbounded chain.
+MAX_REDIRECTS = 5
 
 # --- Concurrency & rate limiting ---
 WORKER_COUNT = 8

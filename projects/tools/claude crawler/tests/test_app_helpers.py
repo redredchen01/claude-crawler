@@ -90,6 +90,30 @@ class TestNormalizeEntryUrl:
     def test_rejects_whitespace_in_host(self, raw):
         assert _normalize_entry_url(raw) is None
 
+    def test_allows_private_hosts_when_flag_on(self, monkeypatch):
+        """Default (ALLOW_PRIVATE_HOSTS=True) preserves local-dev: scanning
+        localhost/internal IPs works without a config flip."""
+        from crawler import config
+        monkeypatch.setattr(config, "ALLOW_PRIVATE_HOSTS", True)
+        assert _normalize_entry_url("http://localhost/") == "http://localhost/"
+        assert _normalize_entry_url("https://10.0.0.1/x") == "https://10.0.0.1/x"
+
+    @pytest.mark.parametrize("raw", [
+        "http://localhost/",
+        "https://127.0.0.1/",
+        "https://10.0.0.5/path",
+        "https://192.168.1.1/",
+        "https://169.254.169.254/latest/meta-data/",
+        "https://[::1]/",
+    ])
+    def test_rejects_private_hosts_when_flag_off(self, raw, monkeypatch):
+        """With the SSRF gate enabled (hosted-mode), private/loopback/
+        link-local hosts are rejected at entry. AWS metadata IP is the
+        canonical SSRF target."""
+        from crawler import config
+        monkeypatch.setattr(config, "ALLOW_PRIVATE_HOSTS", False)
+        assert _normalize_entry_url(raw) is None
+
 
 # ─── _render_zero_resources_diagnosis ───
 

@@ -11,6 +11,7 @@ import streamlit as st
 
 from crawler import config, storage, analysis, export
 from crawler.core.engine import run_crawl
+from crawler.core.url import is_private_host
 
 
 # Matches inputs that LOOK like 'scheme:rest' but aren't a real URL with
@@ -50,6 +51,11 @@ def _normalize_entry_url(raw: str | None) -> str | None:
     # Reject hosts containing whitespace — urlparse accepts them but
     # downstream HTTP fetch will fail with confusing DNS errors.
     if any(c.isspace() for c in parsed.netloc):
+        return None
+    # SSRF gate: reject private/loopback/link-local hosts unless the
+    # operator explicitly allows them (local dev). hostname strips port
+    # if any; brackets get stripped inside is_private_host.
+    if not config.ALLOW_PRIVATE_HOSTS and is_private_host(parsed.hostname):
         return None
     # Return the canonical reassembly so display matches what the engine
     # actually crawls (lowercase scheme, normalized form).

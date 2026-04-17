@@ -101,3 +101,89 @@ class TestEngineFrontierAlignment:
 
         # Both modules bind the shared normalize function under `_normalize_url`.
         assert engine_mod._normalize_url is frontier_mod._normalize_url
+
+
+# ---------------------------------------------------------------------------
+# is_private_host — SSRF gate
+# ---------------------------------------------------------------------------
+
+import pytest as _pytest
+from unittest.mock import patch
+
+from crawler.core.url import is_private_host
+
+
+class TestIsPrivateHost:
+    @_pytest.mark.parametrize("host", [
+        "localhost",
+        "Localhost",
+        "LOCALHOST",
+        "localhost.localdomain",
+        "ip6-localhost",
+    ])
+    def test_well_known_hostnames(self, host):
+        assert is_private_host(host) is True
+
+    @_pytest.mark.parametrize("ip", [
+        "127.0.0.1",       # loopback
+        "10.0.0.1",        # RFC1918 private
+        "10.255.255.255",
+        "172.16.0.1",      # RFC1918 private
+        "172.31.0.1",
+        "192.168.0.1",     # RFC1918 private
+        "192.168.255.255",
+        "169.254.169.254", # AWS metadata / link-local
+        "169.254.0.1",
+        "0.0.0.0",         # unspecified
+        "224.0.0.1",       # multicast
+        "240.0.0.1",       # reserved
+    ])
+    def test_private_ipv4_literals(self, ip):
+        assert is_private_host(ip) is True, f"{ip} should be private"
+
+    @_pytest.mark.parametrize("ip", [
+        "::1",          # IPv6 loopback
+        "fe80::1",      # IPv6 link-local
+        "fc00::1",      # IPv6 unique-local
+        "fd00::1",      # IPv6 unique-local
+    ])
+    def test_private_ipv6_literals(self, ip):
+        assert is_private_host(ip) is True, f"{ip} should be private"
+
+    def test_ipv6_brackets_stripped(self):
+        # urlparse leaves IPv6 hostnames bracketed in some contexts.
+        assert is_private_host("[::1]") is True
+
+    @_pytest.mark.parametrize("ip", [
+        "8.8.8.8",         # public
+        "1.1.1.1",         # public
+        "151.101.1.1",     # public CDN
+        "2606:4700:4700::1111",  # public IPv6 (Cloudflare)
+    ])
+    def test_public_ips_pass(self, ip):
+        assert is_private_host(ip) is False
+
+    def test_none_and_empty_treated_as_safe(self):
+        assert is_private_host(None) is False
+        assert is_private_host("") is False
+
+    def test_unresolvable_hostname_treated_as_safe(self):
+        # gaierror → return False, let the request fail naturally
+        # rather than blocking on every typo.
+        with patch(
+            "crawler.core.url.socket.getaddrinfo",
+            side_effect=__import__("socket").gaierror("no such host"),
+        ):
+            assert is_private_host("nonexistent.invalid") is False
+
+    def test_resolved_hostname_pointing_to_private_ip_blocked(self):
+        """A public-looking hostname that DNS-resolves to an internal IP
+        is the classic DNS-rebind / hosts-trick SSRF vector."""
+        from socket import AF_INET, SOCK_STREAM
+
+        fake_resolve = [(AF_INET, SOCK_STREAM, 0, "", ("10.0.0.5", 0))]
+        with patch(
+            "crawler.core.url.socket.getaddrinfo",
+            return_value=fake_resolve,
+        ):
+            assert is_private_host("internal.disguised.com") is True
