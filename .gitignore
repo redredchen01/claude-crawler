@@ -106,3 +106,35 @@ simple_demo.py
 # OS
 .DS_Store
 Thumbs.db
+
+# Secrets & Credentials
+config/secrets/
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+*.p12
+*-credentials.json
+*-service-account.json
+google-credentials.json
+gcp-key.json
+
+# API Keys
+api_keys.json
+.api_key
+
+# AWS
+aws_credentials
+.aws/
+
+# Database
+*.db
+*.sqlite
+.db
+
+# Sensitive
+*.pfx
+*.cert
+private/
+secrets/
