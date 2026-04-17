@@ -42,7 +42,8 @@ from crawler.core.writer import WriterThread
 from crawler.models import PageWriteRequest, ScanJobUpdateRequest
 from crawler.parser import parse_page
 from crawler.storage import (
-    create_scan_job, init_db, update_scan_job,
+    create_scan_job, get_all_page_urls, get_pending_pages,
+    get_scan_job_by_entry_url, init_db, update_scan_job,
 )
 
 logger = logging.getLogger(__name__)
@@ -120,21 +121,28 @@ def _emit_progress(ctx: _WorkerContext, current_url: str, status: str = "running
     })
 
 
-def _process_one_page(url: str, depth: int, ctx: _WorkerContext) -> None:
+def _process_one_page(url: str, depth: int, page_id: int,
+                      ctx: _WorkerContext) -> None:
     """Worker entry point. Idempotent on per-page failures — never raises."""
     try:
         with ctx.robots_lock:
             allowed = _check_robots(url, ctx.robots_cache, USER_AGENT)
         if not allowed:
             logger.info("Blocked by robots.txt: %s", url)
+            ctx.writer.write_page(PageWriteRequest(
+                scan_job_id=ctx.scan_job_id,
+                page_id=page_id,
+                parse_result=None,
+                page_status="failed",
+                page_type="other",
+                failure_reason="robots_blocked",
+            ))
             with ctx.counters_lock:
                 ctx.counters.pages_done += 1
             _emit_progress(ctx, url)
             return
 
         ctx.rate_limiter.acquire(url)
-
-        page_id = ctx.writer.insert_page(ctx.scan_job_id, url, depth)
 
         html, failure_reason = _fetch_html(ctx, url)
 
@@ -262,10 +270,34 @@ def run_crawl(
 
     init_db(db_path)
     domain = urlparse(entry_url).netloc
-    scan_job_id = create_scan_job(db_path, entry_url, domain, max_pages, max_depth)
-    update_scan_job(db_path, scan_job_id, status="running")
+    normalized_entry = _normalize_url(entry_url)
 
-    frontier = Frontier(entry_url, max_pages, max_depth)
+    # Resume detection: if a scan_job exists for this entry URL with pending
+    # pages still in the table, reuse it. If the previous run completed (or
+    # has no pending work), short-circuit and return its id without spawning
+    # the thread pool — re-clicking Start should be a no-op.
+    existing_job = get_scan_job_by_entry_url(db_path, entry_url)
+    resume_mode = False
+    if existing_job is not None:
+        pending_rows = get_pending_pages(db_path, existing_job.id)
+        if not pending_rows:
+            logger.info(
+                "Scan for %s has no pending pages (status=%s); reusing job %d as-is",
+                entry_url, existing_job.status, existing_job.id,
+            )
+            return existing_job.id
+        scan_job_id = existing_job.id
+        resume_mode = True
+        update_scan_job(db_path, scan_job_id, status="running")
+        logger.info("Resuming scan job %d with %d pending pages",
+                    scan_job_id, len(pending_rows))
+    else:
+        scan_job_id = create_scan_job(
+            db_path, entry_url, domain, max_pages, max_depth,
+        )
+        update_scan_job(db_path, scan_job_id, status="running")
+        pending_rows = []
+
     rate_limiter = DomainRateLimiter(req_per_sec)
     coalescer = ProgressCoalescer(progress_queue)
     coalescer.start()
@@ -273,6 +305,28 @@ def run_crawl(
     writer.start()
     render_thread = RenderThread()
     render_thread.start()
+
+    # Frontier construction must come *after* writer.start() because the
+    # writer-aware mode calls writer.insert_page synchronously via Future.
+    #
+    # Discovery cap is intentionally *higher* than the per-run max_pages
+    # processing cap. Per Unit 8, links beyond the processing budget should
+    # still get persisted as `pages.status='pending'` so the next run can
+    # resume from them. The 10x multiplier (with floor 10k) gives generous
+    # headroom while still bounding pathological frontiers.
+    discovery_cap = max(max_pages * 10, 10_000)
+    if resume_mode:
+        frontier = Frontier(
+            entry_url, discovery_cap, max_depth,
+            writer=writer, scan_job_id=scan_job_id, auto_seed=False,
+        )
+        frontier.mark_visited(get_all_page_urls(db_path, scan_job_id))
+        frontier.seed_existing(pending_rows)
+    else:
+        frontier = Frontier(
+            entry_url, discovery_cap, max_depth,
+            writer=writer, scan_job_id=scan_job_id,
+        )
 
     counters = _Counters()
     counters_lock = threading.Lock()
@@ -307,9 +361,18 @@ def run_crawl(
                     item = frontier.pop()
                     if item is None:
                         break
-                    url, depth = item
+                    # Writer-aware Frontier always yields 3-tuples in
+                    # production; the 2-tuple branch is only reached if
+                    # someone constructs Frontier without a writer (tests).
+                    if len(item) == 3:
+                        url, depth, page_id = item
+                    else:
+                        url, depth = item
+                        page_id = writer.insert_page(scan_job_id, url, depth)
                     pages_submitted += 1
-                    in_flight.add(executor.submit(_process_one_page, url, depth, ctx))
+                    in_flight.add(executor.submit(
+                        _process_one_page, url, depth, page_id, ctx,
+                    ))
 
                 if not in_flight:
                     # Frontier empty AND no work outstanding → done.

@@ -560,6 +560,241 @@ class TestEngineConcurrent:
         assert mock_render.call_count == 1
 
 
+class TestResume:
+    """Unit 8: idempotent re-run via insert-at-push-time."""
+
+    def _make_html(self, links: list[str] | None = None) -> str:
+        body = "content " * 200
+        link_html = "".join(
+            f'<a href="{link}">link</a>' for link in (links or [])
+        )
+        return f"<html><body><p>{body}</p>{link_html}</body></html>"
+
+    def test_resume_after_partial_scan_picks_up_pending(self, fast_engine_patches):
+        """Simulate a partial scan: insert pending pages, then re-run engine →
+        only the pending URLs get fetched, not the already-fetched ones."""
+        from crawler.storage import (
+            create_scan_job, init_db, insert_page, update_page,
+            get_scan_job_by_entry_url, get_pending_pages,
+        )
+        from crawler.core.fetcher import fetch_page  # noqa
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            init_db(db_path)
+
+            # Pre-create scan_job + 5 pages: 2 fetched, 3 pending.
+            entry = "https://example.com"
+            sj_id = create_scan_job(db_path, entry, "example.com", 100, 3)
+            update_page(db_path, insert_page(db_path, sj_id, entry, depth=0),
+                        status="fetched")
+            update_page(db_path, insert_page(db_path, sj_id, "https://example.com/done1", depth=1),
+                        status="fetched")
+            insert_page(db_path, sj_id, "https://example.com/pending1", depth=1)
+            insert_page(db_path, sj_id, "https://example.com/pending2", depth=1)
+            insert_page(db_path, sj_id, "https://example.com/pending3", depth=1)
+
+            # Track which URLs the engine fetches.
+            fetched_urls: list[str] = []
+            def track_fetch(url, *a, **kw):
+                fetched_urls.append(url)
+                return self._make_html()
+
+            with patch("crawler.core.engine.fetch_page", side_effect=track_fetch):
+                returned_id = run_crawl(
+                    entry, db_path, max_pages=100, req_per_sec=20.0,
+                )
+
+            # Resume preserves the original scan_job_id.
+            assert returned_id == sj_id
+
+            # Only the 3 pending URLs were fetched — not the 2 already-fetched.
+            assert sorted(fetched_urls) == [
+                "https://example.com/pending1",
+                "https://example.com/pending2",
+                "https://example.com/pending3",
+            ]
+
+            # No pending rows remain.
+            assert get_pending_pages(db_path, sj_id) == []
+
+            # Final job state reflects accumulated counts (only this run's
+            # pages_done), not the prior fetched count.
+            with sqlite3.connect(db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                fetched_count = conn.execute(
+                    "SELECT COUNT(*) FROM pages "
+                    "WHERE scan_job_id = ? AND status = 'fetched'",
+                    (sj_id,),
+                ).fetchone()[0]
+            assert fetched_count == 5  # 2 from prior + 3 from this run
+
+    def test_completed_scan_is_no_op(self, fast_engine_patches):
+        """Re-clicking Start on a completed scan: no new fetches, same id."""
+        from crawler.storage import (
+            create_scan_job, init_db, insert_page, update_page, update_scan_job,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            init_db(db_path)
+            entry = "https://example.com"
+            sj_id = create_scan_job(db_path, entry, "example.com", 100, 3)
+            update_page(db_path, insert_page(db_path, sj_id, entry, depth=0),
+                        status="fetched")
+            update_scan_job(db_path, sj_id, status="completed")
+
+            with patch("crawler.core.engine.fetch_page") as mock_fetch:
+                returned_id = run_crawl(entry, db_path,
+                                        max_pages=100, req_per_sec=20.0)
+
+            assert returned_id == sj_id
+            assert mock_fetch.call_count == 0
+
+    def test_fresh_scan_creates_pages_at_push_time(self, fast_engine_patches):
+        """Insert-at-push-time: every discovered URL has a pages row before
+        the worker pops it, so a process kill mid-crawl leaves a recoverable
+        frontier."""
+        seed_html = self._make_html(links=[
+            "https://example.com/a",
+            "https://example.com/b",
+            "https://example.com/c",
+        ])
+        leaf_html = self._make_html()
+
+        responses = {
+            "https://example.com/": seed_html,
+            "https://example.com/a": leaf_html,
+            "https://example.com/b": leaf_html,
+            "https://example.com/c": leaf_html,
+        }
+        with patch("crawler.core.engine.fetch_page",
+                   side_effect=lambda u, *a, **kw: responses.get(u)):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = os.path.join(tmpdir, "test.db")
+                sj_id = run_crawl("https://example.com", db_path,
+                                  max_pages=10, req_per_sec=20.0)
+
+                import sqlite3
+                with sqlite3.connect(db_path) as conn:
+                    conn.row_factory = sqlite3.Row
+                    rows = conn.execute(
+                        "SELECT url FROM pages WHERE scan_job_id = ? "
+                        "ORDER BY url", (sj_id,),
+                    ).fetchall()
+
+        # All 4 URLs (entry + 3 discovered) have rows.
+        urls = sorted(r["url"] for r in rows)
+        assert urls == [
+            "https://example.com/",
+            "https://example.com/a",
+            "https://example.com/b",
+            "https://example.com/c",
+        ]
+
+    def test_max_pages_limit_leaves_remainder_pending(self, fast_engine_patches):
+        """max_pages=2 in a 4-URL frontier → 2 fetched, others stay pending."""
+        seed_html = self._make_html(links=[
+            "https://example.com/a", "https://example.com/b", "https://example.com/c",
+        ])
+        responses = {"https://example.com/": seed_html}
+        for u in ["https://example.com/a", "https://example.com/b", "https://example.com/c"]:
+            responses[u] = self._make_html()
+
+        with patch("crawler.core.engine.fetch_page",
+                   side_effect=lambda u, *a, **kw: responses.get(u)):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = os.path.join(tmpdir, "test.db")
+                sj_id = run_crawl("https://example.com", db_path,
+                                  max_pages=2, req_per_sec=20.0,
+                                  workers=1)  # serialize so result is deterministic
+
+                import sqlite3
+                with sqlite3.connect(db_path) as conn:
+                    conn.row_factory = sqlite3.Row
+                    counts = {
+                        row["status"]: row["c"]
+                        for row in conn.execute(
+                            "SELECT status, COUNT(*) AS c FROM pages "
+                            "WHERE scan_job_id = ? GROUP BY status", (sj_id,),
+                        )
+                    }
+        # 2 fetched, 2 pending (entry + 1 link, then 2 more discovered but
+        # never popped before max_pages cap).
+        assert counts.get("fetched", 0) == 2
+        assert counts.get("pending", 0) >= 1
+
+
+class TestFrontierWriterMode:
+    """Frontier with writer integration — used by the engine in production."""
+
+    def test_push_inserts_via_writer_and_returns_3tuple(self):
+        from crawler.core.frontier import Frontier
+        from crawler.core.writer import WriterThread
+        from crawler.storage import create_scan_job, init_db
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            init_db(db_path)
+            sj_id = create_scan_job(db_path, "https://example.com",
+                                    "example.com", 100, 3)
+            writer = WriterThread(db_path)
+            writer.start()
+            try:
+                frontier = Frontier(
+                    "https://example.com", 100, 3,
+                    writer=writer, scan_job_id=sj_id,
+                )
+                # Auto-seeded entry URL
+                item = frontier.pop()
+                assert item is not None and len(item) == 3
+                url, depth, page_id = item
+                assert url == "https://example.com/"
+                assert depth == 0
+                assert isinstance(page_id, int) and page_id > 0
+
+                # Push more — each gets its own page_id from the writer.
+                frontier.push("https://example.com/a", 1)
+                frontier.push("https://example.com/b", 1)
+                a_url, a_depth, a_pid = frontier.pop()
+                b_url, b_depth, b_pid = frontier.pop()
+                assert {a_url, b_url} == {
+                    "https://example.com/a", "https://example.com/b",
+                }
+                assert a_pid != b_pid != page_id
+            finally:
+                writer.shutdown(timeout=2.0)
+
+    def test_seed_existing_skips_writer_insert(self):
+        from crawler.core.frontier import Frontier
+        from unittest.mock import MagicMock
+
+        writer = MagicMock()
+        writer.insert_page.side_effect = AssertionError(
+            "seed_existing must NOT call insert_page"
+        )
+        frontier = Frontier(
+            "https://example.com", 100, 3,
+            writer=writer, scan_job_id=1, auto_seed=False,
+        )
+        frontier.seed_existing([
+            ("https://example.com/x", 1, 100),
+            ("https://example.com/y", 1, 101),
+        ])
+        items = []
+        while True:
+            item = frontier.pop()
+            if item is None:
+                break
+            items.append(item)
+        assert len(items) == 2
+        page_ids = sorted(i[2] for i in items)
+        assert page_ids == [100, 101]
+        writer.insert_page.assert_not_called()
+
+
 class TestRobotsTxt:
     def test_empty_entries_allows_crawl(self):
         """robots.txt returning 403/404 (empty entries) should allow crawling."""

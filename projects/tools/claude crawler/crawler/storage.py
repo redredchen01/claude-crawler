@@ -181,6 +181,43 @@ def list_scan_jobs(db_path: str) -> list[ScanJob]:
         return [ScanJob(**dict(r)) for r in rows]
 
 
+def get_scan_job_by_entry_url(db_path: str, entry_url: str) -> ScanJob | None:
+    """Return the most recently created scan_job for ``entry_url``, if any."""
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM scan_jobs WHERE entry_url = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (entry_url,),
+        ).fetchone()
+        return ScanJob(**dict(row)) if row else None
+
+
+def get_pending_pages(db_path: str, scan_job_id: int) -> list[tuple[str, int, int]]:
+    """Return ``(url, depth, page_id)`` rows for pages still in 'pending' status.
+
+    Used by the resume path to seed the frontier with work the previous run
+    never finished.
+    """
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, url, depth FROM pages "
+            "WHERE scan_job_id = ? AND status = 'pending' "
+            "ORDER BY depth, id",
+            (scan_job_id,),
+        ).fetchall()
+        return [(r["url"], r["depth"], r["id"]) for r in rows]
+
+
+def get_all_page_urls(db_path: str, scan_job_id: int) -> list[str]:
+    """Return every URL the given scan_job has ever discovered, in any state."""
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT url FROM pages WHERE scan_job_id = ?",
+            (scan_job_id,),
+        ).fetchall()
+        return [r["url"] for r in rows]
+
+
 # --- Page CRUD ---
 
 def insert_page(db_path: str, scan_job_id: int, url: str,
