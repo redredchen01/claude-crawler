@@ -585,6 +585,163 @@ def _extract_metric(scope: BsTag, keywords: list[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Structured-data extraction (Plan 005)
+# ---------------------------------------------------------------------------
+# Four source extractors produce a unified field dict with omit-from-dict
+# semantics: a field missing from the returned dict means "this source
+# didn't have that field" (distinct from present-but-empty-string which
+# would mean "source said empty"). `_extract_structured` merges the four
+# source dicts by priority (JSON-LD > OG > Twitter > microdata) via a
+# pure `_merge_by_priority` helper that can be unit-tested without BS4.
+#
+# Each source returns the same unified keys: title, cover_url, views,
+# likes, hearts, tags, category, published_at, description. `description`
+# is a special case — it's never assigned to a Resource field (Scope
+# line 58, Q2), but propagates through the chain to raw_data.
+
+
+# Image URL paths whose basename or stem contains any of these
+# substrings are almost certainly site-level logos / default covers /
+# placeholder avatars, not per-item images. Used by OG / Twitter /
+# microdata / JSON-LD extractors to reject `og:image` / `image`
+# fallback values that would otherwise give every Resource in a scan
+# the same generic cover. Adversarial F7. Substring match (case-
+# insensitive) across the path — accepts some false positives (e.g. a
+# blog post URL containing "logo") as a tradeoff for covering all the
+# real placeholder naming conventions.
+_PLACEHOLDER_URL_SUBSTRINGS = (
+    "logo", "default", "placeholder", "avatar",
+    "noimage", "no-image", "no_image",
+    "siteicon", "site-icon", "site_icon",
+    "missing",
+)
+
+# SEO stuffing guards for tags from JSON-LD `keywords` and friends —
+# see adversarial F2. Overriding DOM's multi-signal scorer with 20+
+# generic SEO keywords is strictly worse than keeping DOM tags.
+_SEO_STUFFING_COUNT_THRESHOLD = 15
+_SEO_STUFFING_MIN_AVG_LEN = 2
+
+# Separators used by JSON-LD/OG/microdata when `keywords` / `article:tag`
+# arrives as a single delimited string rather than a list.
+_TAG_KEYWORD_SPLIT_RE = re.compile(r"[,，、;；]+")
+
+
+def _meta_or_none(soup: BeautifulSoup, property_name: str) -> str | None:
+    """Like `_extract_meta` but returns `None` when missing/empty so
+    source extractors can use dict omission to mean 'source didn't
+    provide'. Preserves the distinction from 'source provided empty'.
+    """
+    val = _extract_meta(soup, property_name)
+    return val if val else None
+
+
+def _valid_cover_url(url: str) -> bool:
+    """Accept as cover_url when it has a protocol AND its path does not
+    look like a site-level placeholder (logo, default, etc.)."""
+    if not url:
+        return False
+    if "://" not in url and not url.startswith("//"):
+        return False
+    path = urlparse(url).path.lower()
+    return not any(s in path for s in _PLACEHOLDER_URL_SUBSTRINGS)
+
+
+def _parse_tags_keywords(value) -> list[str]:
+    """Normalize the many shapes JSON-LD/OG put tags in:
+    list[str] | comma/CJK-delimited str → list[str] (trimmed, deduped,
+    order preserved). Empty input → empty list."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        candidates = [str(v).strip() for v in value if v is not None]
+    elif isinstance(value, str):
+        candidates = [s.strip() for s in _TAG_KEYWORD_SPLIT_RE.split(value)]
+    else:
+        return []
+    out: list[str] = []
+    for c in candidates:
+        if c and c not in out:
+            out.append(c)
+    return out
+
+
+def _tags_pass_stuffing_gate(tags: list[str]) -> bool:
+    """SEO-stuffing heuristic: JSON-LD `keywords` on SEO-heavy sites
+    often ships 20+ generic terms; DOM's multi-signal scorer produces
+    5-10 page-specific tags. Override with JSON-LD only when it looks
+    like a curated list, not a keyword dump."""
+    if not tags:
+        return False
+    if len(tags) > _SEO_STUFFING_COUNT_THRESHOLD:
+        return False
+    avg_len = sum(len(t) for t in tags) / len(tags)
+    if avg_len < _SEO_STUFFING_MIN_AVG_LEN:
+        return False
+    return True
+
+
+def _extract_opengraph(soup: BeautifulSoup) -> dict:
+    """OpenGraph meta → unified field dict. Unhit fields omitted."""
+    out: dict = {}
+
+    title = _meta_or_none(soup, "og:title")
+    if title is not None:
+        out["title"] = _strip_title_site_suffix(title, require_chain=True)
+
+    cover = _meta_or_none(soup, "og:image")
+    if cover and _valid_cover_url(cover):
+        out["cover_url"] = cover
+
+    desc = _meta_or_none(soup, "og:description")
+    if desc is not None:
+        out["description"] = desc
+
+    section = _meta_or_none(soup, "article:section")
+    if section is not None:
+        out["category"] = section
+
+    published = _meta_or_none(soup, "article:published_time")
+    if published is not None:
+        out["published_at"] = published
+
+    # article:tag can appear multiple times — order preserved, deduped
+    tag_nodes = soup.find_all("meta", attrs={"property": "article:tag"})
+    tags: list[str] = []
+    for node in tag_nodes:
+        t = (node.get("content") or "").strip()
+        if t and t not in tags:
+            tags.append(t)
+    if tags and _tags_pass_stuffing_gate(tags):
+        out["tags"] = tags
+
+    return out
+
+
+def _extract_twitter_cards(soup: BeautifulSoup) -> dict:
+    """Twitter Card meta → unified field dict. Unhit fields omitted."""
+    out: dict = {}
+
+    title = _meta_or_none(soup, "twitter:title")
+    if title is not None:
+        out["title"] = _strip_title_site_suffix(title, require_chain=True)
+
+    # Twitter's image comes under two property names historically
+    cover = (
+        _meta_or_none(soup, "twitter:image")
+        or _meta_or_none(soup, "twitter:image:src")
+    )
+    if cover and _valid_cover_url(cover):
+        out["cover_url"] = cover
+
+    desc = _meta_or_none(soup, "twitter:description")
+    if desc is not None:
+        out["description"] = desc
+
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Page-type detection
 # ---------------------------------------------------------------------------
 

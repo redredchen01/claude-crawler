@@ -1724,3 +1724,233 @@ class TestMetricSiblingCapBoundary:
         html = f'<div><span>views</span>{sibs}<span>9999</span></div>'
         s = BeautifulSoup(html, "lxml")
         assert _extract_metric(s, ["views"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# Plan 005 Unit 2 — OpenGraph + Twitter Cards source extractors
+# ---------------------------------------------------------------------------
+
+class TestOpenGraphExtractor:
+    """`_extract_opengraph(soup) -> dict` returns omit-from-dict for
+    unhit fields so the Unit 5 merger can distinguish 'source didn't
+    provide' from 'source said empty'."""
+
+    def _soup(self, html):
+        return BeautifulSoup(html, "lxml")
+
+    def test_full_og_returns_all_fields(self):
+        from crawler.parser import _extract_opengraph
+        soup = self._soup("""
+            <meta property="og:title" content="Real Title">
+            <meta property="og:image" content="https://cdn.example.com/p/1.jpg">
+            <meta property="og:description" content="A summary.">
+            <meta property="article:section" content="Tech">
+            <meta property="article:published_time" content="2026-04-17T10:00:00Z">
+            <meta property="article:tag" content="python">
+            <meta property="article:tag" content="web">
+        """)
+        out = _extract_opengraph(soup)
+        assert out["title"] == "Real Title"
+        assert out["cover_url"] == "https://cdn.example.com/p/1.jpg"
+        assert out["description"] == "A summary."
+        assert out["category"] == "Tech"
+        assert out["published_at"] == "2026-04-17T10:00:00Z"
+        assert out["tags"] == ["python", "web"]
+
+    def test_empty_og_returns_empty_dict(self):
+        from crawler.parser import _extract_opengraph
+        out = _extract_opengraph(self._soup("<p>body</p>"))
+        assert out == {}
+
+    def test_og_title_seo_chain_stripped(self):
+        """og:title carrying `Item｜Section｜Brand` gets normalized via
+        _strip_title_site_suffix. Without this, kissavs-class sites
+        ship the SEO chain into Resource.title."""
+        from crawler.parser import _extract_opengraph
+        soup = self._soup(
+            '<meta property="og:title" '
+            'content="GRACE-029｜角色剧情｜KISSAVS">'
+        )
+        out = _extract_opengraph(soup)
+        assert out["title"] == "GRACE-029"
+
+    def test_og_title_single_pipe_preserved(self):
+        """Single pipe is often legitimate punctuation (e.g. "X: Y | Z"
+        in article titles). Suffix strip only fires on 2+ pipes."""
+        from crawler.parser import _extract_opengraph
+        soup = self._soup('<meta property="og:title" content="Item | Site">')
+        out = _extract_opengraph(soup)
+        assert out["title"] == "Item | Site"
+
+    def test_product_code_hyphen_preserved(self):
+        from crawler.parser import _extract_opengraph
+        soup = self._soup('<meta property="og:title" content="GRACE-029 Title">')
+        out = _extract_opengraph(soup)
+        assert "GRACE-029" in out["title"]
+
+    def test_placeholder_image_rejected(self):
+        """og:image pointing at a site logo / default image is rejected
+        so downstream sees 'source didn't provide cover_url'."""
+        from crawler.parser import _extract_opengraph
+        for placeholder in [
+            "https://site.example/static/default.png",
+            "https://site.example/images/site-logo.svg",
+            "https://cdn.example/assets/avatar-default.jpg",
+            "https://x.com/no-image.png",
+            "https://x.com/placeholder.webp",
+        ]:
+            soup = self._soup(
+                f'<meta property="og:image" content="{placeholder}">'
+            )
+            out = _extract_opengraph(soup)
+            assert "cover_url" not in out, f"placeholder not filtered: {placeholder}"
+
+    def test_real_image_accepted(self):
+        from crawler.parser import _extract_opengraph
+        soup = self._soup(
+            '<meta property="og:image" '
+            'content="https://cdn.example/uploads/2026/item-042.jpg">'
+        )
+        out = _extract_opengraph(soup)
+        assert out["cover_url"] == "https://cdn.example/uploads/2026/item-042.jpg"
+
+    def test_empty_content_absent_from_dict(self):
+        """`<meta property="og:title" content="">` is 'source gave up' —
+        we omit from dict, letting next priority source try."""
+        from crawler.parser import _extract_opengraph
+        soup = self._soup('<meta property="og:title" content="">')
+        out = _extract_opengraph(soup)
+        assert "title" not in out
+
+    def test_article_tags_deduped_in_order(self):
+        from crawler.parser import _extract_opengraph
+        soup = self._soup("""
+            <meta property="article:tag" content="python">
+            <meta property="article:tag" content="web">
+            <meta property="article:tag" content="python">
+            <meta property="article:tag" content="perf">
+        """)
+        out = _extract_opengraph(soup)
+        assert out["tags"] == ["python", "web", "perf"]
+
+    def test_tags_rejected_when_stuffing(self):
+        """20 one-char tags = SEO soup; filter out so DOM scorer wins."""
+        from crawler.parser import _extract_opengraph
+        metas = "\n".join(
+            f'<meta property="article:tag" content="w{i}">' for i in range(25)
+        )
+        out = _extract_opengraph(self._soup(metas))
+        assert "tags" not in out
+
+
+class TestTwitterCardsExtractor:
+    def _soup(self, html):
+        return BeautifulSoup(html, "lxml")
+
+    def test_full_twitter(self):
+        from crawler.parser import _extract_twitter_cards
+        soup = self._soup("""
+            <meta name="twitter:title" content="Tweet Title">
+            <meta name="twitter:image" content="https://x.com/p/1.jpg">
+            <meta name="twitter:description" content="Tweet summary">
+        """)
+        out = _extract_twitter_cards(soup)
+        assert out == {
+            "title": "Tweet Title",
+            "cover_url": "https://x.com/p/1.jpg",
+            "description": "Tweet summary",
+        }
+
+    def test_twitter_image_src_fallback(self):
+        """Older Twitter Card spec used `twitter:image:src` instead of
+        `twitter:image`. Accept both with image-first priority."""
+        from crawler.parser import _extract_twitter_cards
+        soup = self._soup(
+            '<meta name="twitter:image:src" content="https://x.com/legacy.jpg">'
+        )
+        out = _extract_twitter_cards(soup)
+        assert out["cover_url"] == "https://x.com/legacy.jpg"
+
+    def test_twitter_image_preferred_over_src(self):
+        from crawler.parser import _extract_twitter_cards
+        soup = self._soup("""
+            <meta name="twitter:image" content="https://x.com/new.jpg">
+            <meta name="twitter:image:src" content="https://x.com/old.jpg">
+        """)
+        out = _extract_twitter_cards(soup)
+        assert out["cover_url"] == "https://x.com/new.jpg"
+
+    def test_empty_twitter(self):
+        from crawler.parser import _extract_twitter_cards
+        out = _extract_twitter_cards(self._soup("<p>body</p>"))
+        assert out == {}
+
+    def test_twitter_placeholder_image_rejected(self):
+        from crawler.parser import _extract_twitter_cards
+        soup = self._soup(
+            '<meta name="twitter:image" content="https://site/default.png">'
+        )
+        out = _extract_twitter_cards(soup)
+        assert "cover_url" not in out
+
+
+class TestTagKeywordsParsing:
+    """`_parse_tags_keywords` normalizes list / delimited-string inputs."""
+
+    def test_python_list(self):
+        from crawler.parser import _parse_tags_keywords
+        assert _parse_tags_keywords(["a", "b", "c"]) == ["a", "b", "c"]
+
+    def test_comma_delimited_string(self):
+        from crawler.parser import _parse_tags_keywords
+        assert _parse_tags_keywords("python, web, perf") == ["python", "web", "perf"]
+
+    def test_cjk_delimiters(self):
+        from crawler.parser import _parse_tags_keywords
+        assert _parse_tags_keywords("偶像，巨乳、痴女;纪录片") == [
+            "偶像", "巨乳", "痴女", "纪录片"
+        ]
+
+    def test_empty_string(self):
+        from crawler.parser import _parse_tags_keywords
+        assert _parse_tags_keywords("") == []
+
+    def test_none(self):
+        from crawler.parser import _parse_tags_keywords
+        assert _parse_tags_keywords(None) == []
+
+    def test_dedup_preserves_order(self):
+        from crawler.parser import _parse_tags_keywords
+        assert _parse_tags_keywords(["a", "b", "a", "c"]) == ["a", "b", "c"]
+
+    def test_unsupported_type_returns_empty(self):
+        from crawler.parser import _parse_tags_keywords
+        assert _parse_tags_keywords({"unexpected": "dict"}) == []
+
+
+class TestStuffingGate:
+    def test_normal_tag_list_passes(self):
+        from crawler.parser import _tags_pass_stuffing_gate
+        assert _tags_pass_stuffing_gate(["python", "web", "performance"]) is True
+
+    def test_too_many_tags_rejected(self):
+        from crawler.parser import _tags_pass_stuffing_gate
+        assert _tags_pass_stuffing_gate([f"t{i}" for i in range(20)]) is False
+
+    def test_too_short_average_rejected(self):
+        from crawler.parser import _tags_pass_stuffing_gate
+        # 5 one-char tags → avg 1 < 2
+        assert _tags_pass_stuffing_gate(["a", "b", "c", "d", "e"]) is False
+
+    def test_empty_list_rejected(self):
+        from crawler.parser import _tags_pass_stuffing_gate
+        assert _tags_pass_stuffing_gate([]) is False
+
+    def test_boundary_15_passes(self):
+        from crawler.parser import _tags_pass_stuffing_gate
+        # 15 tags each 4 chars → at the edge but valid
+        assert _tags_pass_stuffing_gate([f"tag{i:02d}" for i in range(15)]) is True
+
+    def test_boundary_16_rejected(self):
+        from crawler.parser import _tags_pass_stuffing_gate
+        assert _tags_pass_stuffing_gate([f"tag{i:02d}" for i in range(16)]) is False
