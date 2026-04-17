@@ -1,5 +1,7 @@
 """Tests for crawler.parser module."""
 
+import os
+
 import pytest
 
 from bs4 import BeautifulSoup
@@ -2572,3 +2574,140 @@ class TestDetailResourceStructuredFirst:
             parsed = json.loads(r.resources[0].raw_data)
             assert "provenance" in parsed
             assert "description" in parsed
+
+
+# ---------------------------------------------------------------------------
+# Plan 005 Unit 7 — Real-site fixtures (per-source regression baselines)
+# ---------------------------------------------------------------------------
+
+class TestStructuredExtractionFixtures:
+    """Each fixture exercises one source in isolation (or one known
+    priority/reject case) so regressions in a single source-extractor
+    surface as a single-fixture failure."""
+
+    FIXTURE_DIR = os.path.join(
+        os.path.dirname(__file__), "fixtures", "structured"
+    )
+
+    def _parse(self, fixture_name, url):
+        import os
+        path = os.path.join(self.FIXTURE_DIR, fixture_name)
+        with open(path, encoding="utf-8") as f:
+            html = f.read()
+        return parse_page(html, url)
+
+    def test_og_only_fixture(self):
+        from crawler.raw_data import parse_raw_data
+        r = self._parse("og_only.html", "https://example.com/articles/og-article")
+        assert r.page_type == "detail"
+        res = r.resources[0]
+        assert res.title == "The OG-Only Article"
+        assert res.cover_url == "https://cdn.example.com/uploads/og-cover.jpg"
+        assert res.category == "Tech"
+        assert res.tags == ["python", "web", "performance"]
+        assert res.published_at == "2026-04-10T09:00:00Z"
+        raw = parse_raw_data(res.raw_data)
+        assert raw["provenance"]["title"] == "opengraph"
+        assert raw["provenance"]["cover_url"] == "opengraph"
+        assert raw["provenance"]["category"] == "opengraph"
+        assert raw["provenance"]["tags"] == "opengraph"
+        assert raw["provenance"]["published_at"] == "opengraph"
+        assert raw["description"] == "A concise summary only via OpenGraph."
+
+    def test_jsonld_article_fixture(self):
+        from crawler.raw_data import parse_raw_data
+        r = self._parse(
+            "jsonld_article.html",
+            "https://example.com/analysis/jsonld-article",
+        )
+        assert r.page_type == "detail"
+        res = r.resources[0]
+        assert res.title == "JSON-LD Article Fixture"
+        assert res.cover_url == "https://cdn.example.com/uploads/article-cover.jpg"
+        assert res.category == "Analysis"
+        assert res.tags == ["economics", "policy", "europe"]
+        assert res.published_at == "2026-03-15"
+        raw = parse_raw_data(res.raw_data)
+        assert raw["provenance"]["title"] == "jsonld"
+        assert raw["provenance"]["cover_url"] == "jsonld"
+        assert raw["provenance"]["category"] == "jsonld"
+        assert raw["provenance"]["tags"] == "jsonld"
+        assert raw["provenance"]["published_at"] == "jsonld"
+
+    def test_jsonld_video_full_fixture(self):
+        from crawler.raw_data import parse_raw_data
+        r = self._parse(
+            "jsonld_video_full.html",
+            "https://example.com/video/v1",
+        )
+        assert r.page_type == "detail"
+        res = r.resources[0]
+        assert res.title == "Video Fixture Title"
+        assert res.views == 12345
+        assert res.likes == 678
+        assert res.hearts == 0
+        assert set(res.tags) == {"偶像", "巨乳", "独角戏"}
+        raw = parse_raw_data(res.raw_data)
+        assert raw["provenance"]["views"] == "jsonld"
+        assert raw["provenance"]["likes"] == "jsonld"
+        assert raw["provenance"]["hearts"] == "missing"
+
+    def test_twitter_only_fixture(self):
+        from crawler.raw_data import parse_raw_data
+        r = self._parse(
+            "twitter_only.html",
+            "https://example.com/posts/twitter-post",
+        )
+        assert r.page_type == "detail"
+        res = r.resources[0]
+        assert res.title == "Twitter-Only Post"
+        assert res.cover_url == "https://cdn.example.com/uploads/tweet-image.jpg"
+        raw = parse_raw_data(res.raw_data)
+        assert raw["provenance"]["title"] == "twitter"
+        assert raw["provenance"]["cover_url"] == "twitter"
+        assert raw["description"] == "A thread, summarized for Twitter."
+
+    def test_microdata_article_fixture(self):
+        from crawler.raw_data import parse_raw_data
+        r = self._parse(
+            "microdata_article.html",
+            "https://example.com/opinion/microdata-piece",
+        )
+        assert r.page_type == "detail"
+        res = r.resources[0]
+        assert res.title == "Microdata Article Fixture"
+        assert res.cover_url == "https://cdn.example.com/uploads/microdata.jpg"
+        assert res.category == "Opinion"
+        assert res.tags == ["architecture", "patterns", "simplicity"]
+        assert res.published_at == "2026-02-20"
+        raw = parse_raw_data(res.raw_data)
+        assert raw["provenance"]["title"] == "microdata"
+        assert raw["provenance"]["cover_url"] == "microdata"
+        assert raw["provenance"]["category"] == "microdata"
+        assert raw["provenance"]["tags"] == "microdata"
+
+    def test_seo_stuffed_keywords_fixture(self):
+        """24 generic SEO keywords in JSON-LD should be rejected;
+        DOM's 3 real tags should fill in."""
+        from crawler.raw_data import parse_raw_data
+        r = self._parse(
+            "seo_stuffed_keywords.html",
+            "https://example.com/posts/stuffed",
+        )
+        res = r.resources[0]
+        assert res.tags == ["real-tag-1", "real-tag-2", "real-tag-3"]
+        raw = parse_raw_data(res.raw_data)
+        assert raw["provenance"]["tags"] == "dom"
+
+    def test_og_placeholder_image_fixture(self):
+        """og:image pointing at site-logo.png should be rejected;
+        DOM <img> should fill cover_url."""
+        from crawler.raw_data import parse_raw_data
+        r = self._parse(
+            "og_placeholder_image.html",
+            "https://example.com/posts/placeholder",
+        )
+        res = r.resources[0]
+        assert "site-logo" not in res.cover_url
+        raw = parse_raw_data(res.raw_data)
+        assert raw["provenance"]["cover_url"] == "dom"

@@ -1464,9 +1464,15 @@ def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
     container = _pick_main_container(soup)
 
     # --- Cover image ---
+    # When structured extractors miss cover_url (not present, or
+    # rejected as placeholder), scan only the container's <img> tags.
+    # Pass soup=None to skip _pick_cover_image's og:image/twitter:image
+    # re-read — those were already evaluated by the structured path and
+    # rejecting them there but accepting them here would defeat the
+    # placeholder filter.
     cover_url = merged.get("cover_url", "")
     if not cover_url:
-        cover_url = _pick_cover_image(soup, container, url)
+        cover_url = _pick_cover_image(None, container, url)
         if cover_url:
             provenance["cover_url"] = PROVENANCE_DOM
 
