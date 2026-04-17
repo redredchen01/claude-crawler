@@ -5,6 +5,7 @@ tags: [changelog, reference, releases]
 created: 2026-03-26
 updated: 2026-04-07
 status: active
+heat: cool
 summary: "YD 2026 工作區版本歷史與發佈記錄"
 ---
 

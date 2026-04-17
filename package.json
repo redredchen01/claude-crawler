@@ -9,6 +9,7 @@
     "dashboard:dev": "GA4_PROPERTY_ID=524298631 node ga4-server.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.90.0",
     "@google-analytics/data": "^4.12.1"
   }
 }

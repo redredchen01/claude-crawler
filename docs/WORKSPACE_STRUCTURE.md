@@ -5,6 +5,7 @@ tags: [workspace, structure, reference]
 created: 2026-03-30
 updated: 2026-04-07
 status: active
+heat: active
 summary: "YD 2026 工作區完整目錄結構：生產項目、實驗項目、工具、文檔、腳本、知識庫"
 ---
 

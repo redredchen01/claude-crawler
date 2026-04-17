@@ -5,6 +5,7 @@ tags: [architecture, workspace, reference]
 created: 2026-04-07
 updated: 2026-04-07
 status: active
+heat: hot
 summary: "YD 2026 工作區架構概覽：生產項目、實驗項目、共享工具與知識庫的多層集成"
 ---
 

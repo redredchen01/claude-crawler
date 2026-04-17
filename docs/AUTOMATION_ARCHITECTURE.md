@@ -5,6 +5,7 @@ tags: [automation, architecture, reference, infrastructure]
 created: 2026-04-06
 updated: 2026-04-07
 status: active
+heat: hot
 summary: "四層自動化框架：PostToolUse、Stop、Daily、Weekly 事件驅動系統"
 ---
 

@@ -5,6 +5,7 @@ tags: [cicd, infrastructure, reference]
 created: 2026-04-07
 updated: 2026-04-07
 status: active
+heat: hot
 summary: "YD 2026 持續集成和部署流程：GitHub Actions、自動化測試與安全掃描"
 ---
 
