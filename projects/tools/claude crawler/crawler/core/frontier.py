@@ -3,7 +3,6 @@
 import collections
 import logging
 import threading
-from typing import Optional
 from urllib.parse import urlparse
 
 from crawler.config import SKIP_EXTENSIONS
@@ -33,7 +32,7 @@ class Frontier:
     """
 
     def __init__(self, seed_url: str, max_pages: int, max_depth: int,
-                 *, writer=None, scan_job_id: Optional[int] = None,
+                 *, writer=None, scan_job_id: int | None = None,
                  auto_seed: bool = True):
         self._max_pages = max_pages
         self._max_depth = max_depth
@@ -60,11 +59,6 @@ class Frontier:
                 # Flush the seed immediately so the engine sees a populated
                 # queue on the first pop().
                 self.flush_batch()
-
-    @staticmethod
-    def _normalize(url: str) -> str:
-        """Deprecated shim — delegates to crawler.core.url.normalize."""
-        return _normalize_url(url)
 
     def _is_allowed(self, url: str) -> bool:
         """Check domain match and extension filter. Pure — no shared state."""

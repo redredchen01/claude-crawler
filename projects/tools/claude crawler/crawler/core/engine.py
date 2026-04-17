@@ -18,6 +18,7 @@ a bounded time even when the network is hostile.
 """
 
 import concurrent.futures
+import contextlib
 import logging
 import queue
 import sqlite3
@@ -39,7 +40,7 @@ from crawler.core.progress import ProgressCoalescer
 from crawler.core.ratelimit import DomainRateLimiter
 from crawler.core.render import RenderThread, ShutdownError, preflight
 from crawler.core.url import normalize as _normalize_url
-from crawler.core.writer import WriterThread, WriterUnavailableError
+from crawler.core.writer import WriterThread
 from crawler.models import PageWriteRequest, ScanJobUpdateRequest
 from crawler.parser import parse_page
 from crawler.storage import (
@@ -439,12 +440,7 @@ def run_crawl(
         except Exception:
             logger.exception("RenderThread shutdown raised")
 
-        try:
-            executor.shutdown(wait=False, cancel_futures=True)
-        except TypeError:
-            # cancel_futures arg is Python 3.9+; older fallback should never
-            # hit because pyproject.toml requires python>=3.10, but harmless.
-            executor.shutdown(wait=False)
+        executor.shutdown(wait=False, cancel_futures=True)
 
         if in_flight:
             done, still_running = concurrent.futures.wait(in_flight, timeout=5.0)
@@ -456,20 +452,28 @@ def run_crawl(
                     len(still_running),
                 )
 
+        # Snapshot counters under lock so the terminal update sees a single
+        # consistent point-in-time value rather than racing with stragglers.
+        with counters_lock:
+            final_pages_done = counters.pages_done
+            final_resources_found = counters.resources_found
+
         # A6: terminal scan_job update via writer if alive; otherwise direct
         # connection bypass so the scan_jobs row doesn't stay 'running'
-        # forever after a writer crash.
+        # forever after a writer crash. WriterUnavailableError is a subclass
+        # of Exception, so the broad catch handles both expected (writer
+        # dead) and unexpected failures uniformly.
         terminal_written = False
         if writer.is_alive():
             try:
                 writer.update_scan_job(ScanJobUpdateRequest(
                     scan_job_id=scan_job_id,
                     status=final_status,
-                    pages_scanned=counters.pages_done,
-                    resources_found=counters.resources_found,
+                    pages_scanned=final_pages_done,
+                    resources_found=final_resources_found,
                 ))
                 terminal_written = True
-            except (WriterUnavailableError, Exception):
+            except Exception:
                 logger.exception("Final scan_job update via writer failed")
 
         try:
@@ -482,11 +486,11 @@ def run_crawl(
             # direct connection — safe because the writer is provably gone.
             _direct_finalize_scan_job(
                 db_path, scan_job_id, final_status,
-                counters.pages_done, counters.resources_found,
+                final_pages_done, final_resources_found,
             )
 
         coalescer.emit({
-            "pages_done": counters.pages_done,
+            "pages_done": final_pages_done,
             "pages_total": max_pages,
             "current_url": "",
             "status": final_status,
@@ -510,17 +514,23 @@ def _direct_finalize_scan_job(db_path: str, scan_job_id: int, status: str,
                               pages_scanned: int, resources_found: int) -> None:
     """Bypass-the-writer fallback to set scan_jobs terminal state when the
     writer thread is dead. Safe because the writer is the only contender
-    for write locks and it's no longer running."""
+    for write locks and it's no longer running.
+
+    Uses ``contextlib.closing`` to guarantee the new connection is closed —
+    sqlite3.Connection's own context manager only manages the transaction.
+    """
     try:
-        with sqlite3.connect(db_path, timeout=5.0) as conn:
+        with contextlib.closing(
+            sqlite3.connect(db_path, timeout=5.0)
+        ) as conn:
             conn.execute("PRAGMA busy_timeout=5000")
-            conn.execute(
-                "UPDATE scan_jobs SET status = ?, pages_scanned = ?, "
-                "resources_found = ?, completed_at = CURRENT_TIMESTAMP "
-                "WHERE id = ?",
-                (status, pages_scanned, resources_found, scan_job_id),
-            )
-            conn.commit()
+            with conn:  # transaction context — commits on success
+                conn.execute(
+                    "UPDATE scan_jobs SET status = ?, pages_scanned = ?, "
+                    "resources_found = ?, completed_at = CURRENT_TIMESTAMP "
+                    "WHERE id = ?",
+                    (status, pages_scanned, resources_found, scan_job_id),
+                )
         logger.warning(
             "Scan_job %d finalized via direct DB connection (writer was dead)",
             scan_job_id,

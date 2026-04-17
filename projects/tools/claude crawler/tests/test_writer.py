@@ -511,6 +511,44 @@ class TestInsertPagesBatch:
         ])
         assert first == second
 
+    def test_batch_chunks_large_url_lists(self, started_writer, db_path, scan_job_id):
+        """A high-fanout page can stage 2000+ links. The SELECT IN(...) chunk
+        size must keep us under SQLite's stock SQLITE_MAX_VARIABLE_NUMBER=999
+        limit. 2000 items must succeed without 'too many SQL variables'."""
+        items = [(f"https://example.com/p{i}", 1) for i in range(2000)]
+        ids = started_writer.insert_pages_batch(scan_job_id, items)
+        assert len(ids) == 2000
+        assert len(set(ids)) == 2000  # all distinct
+        with sqlite3.connect(db_path) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM pages WHERE scan_job_id = ?", (scan_job_id,),
+            ).fetchone()[0]
+        assert count == 2000
+
+    def test_batch_preserves_input_order_with_mixed_new_and_existing(
+        self, started_writer, db_path, scan_job_id,
+    ):
+        """Resume path: some URLs are already in pages, some are new. The
+        chunked SELECT must still resolve page_ids in the order they were
+        submitted."""
+        # First batch inserts a few.
+        first = started_writer.insert_pages_batch(scan_job_id, [
+            ("https://example.com/a", 1),
+            ("https://example.com/b", 1),
+        ])
+        a_id, b_id = first[0], first[1]
+
+        # Second batch: a, c (new), b — ordering interleaves existing + new.
+        second = started_writer.insert_pages_batch(scan_job_id, [
+            ("https://example.com/a", 1),
+            ("https://example.com/c", 1),
+            ("https://example.com/b", 1),
+        ])
+        assert second[0] == a_id
+        assert second[2] == b_id
+        # 'c' is new → has its own id distinct from a and b
+        assert second[1] not in (a_id, b_id)
+
     def test_batch_atomic_on_failure(self, started_writer, db_path, scan_job_id):
         # Trigger FK violation by using nonexistent scan_job_id. The whole
         # batch should roll back: zero pages inserted.

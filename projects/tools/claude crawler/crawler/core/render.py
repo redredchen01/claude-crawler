@@ -403,6 +403,16 @@ class RenderThread:
         if self._thread.is_alive():
             logger.error("RenderThread did not exit within %.1fs", wait)
 
+        # Once shutdown completes, the atexit safety net has nothing to
+        # protect — the normal teardown path already killed Chromium (or
+        # the watchdog will). Unregister so long-lived processes (Streamlit
+        # sessions, pytest runs creating many RenderThreads) don't
+        # accumulate handlers that pin RenderThread instances in memory.
+        try:
+            atexit.unregister(self._atexit_kill_chromium)
+        except Exception:
+            pass
+
     @property
     def chromium_pid(self) -> int | None:
         """Best-effort Chromium PID (only valid while browser is running)."""

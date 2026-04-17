@@ -37,6 +37,12 @@ _DEFAULT_SHUTDOWN_TIMEOUT = 5.0
 _DEFAULT_PRODUCER_TIMEOUT = 5.0  # bounded queue.put on producer paths
 _QUEUE_GET_TIMEOUT = 0.5
 
+# Cap parameters per insert_pages_batch SQL call to stay well below SQLite's
+# SQLITE_MAX_VARIABLE_NUMBER (default 999 on older builds, 32766 on newer).
+# A single high-fanout page with many in-domain links can overflow the IN(...)
+# clause; chunking keeps us safe across all stock libsqlite3 builds.
+_BATCH_CHUNK_SIZE = 500
+
 _TERMINAL_JOB_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
 
@@ -159,7 +165,17 @@ class WriterThread:
             ) from exc
 
     def shutdown(self, timeout: float = _DEFAULT_SHUTDOWN_TIMEOUT) -> None:
-        """Enqueue sentinel, join the thread, and re-raise any captured fatal error."""
+        """Drain the writer cleanly, with hard upper bounds on every step.
+
+        Enqueues the sentinel via a bounded :meth:`queue.Queue.put`
+        (``producer_timeout`` seconds) so a wedged or full queue can't make
+        shutdown hang. If the put fails, logs and continues — the join
+        still runs. After the join completes (or times out at ``timeout``),
+        any captured fatal error in :attr:`last_exception` is re-raised so
+        callers learn about a halted writer.
+
+        Idempotent: subsequent calls are no-ops.
+        """
         if self._shutdown_called:
             return
         self._shutdown_called = True
@@ -248,9 +264,18 @@ class WriterThread:
 
     def _insert_pages_batch(self, conn: sqlite3.Connection,
                             req: InsertPagesBatchRequest) -> list[int]:
-        """One BEGIN IMMEDIATE, executemany INSERT OR IGNORE, then SELECT to
-        recover page_ids in input order. Duplicates within the batch return
-        the existing id (or the id of the first occurrence)."""
+        """One BEGIN IMMEDIATE, chunked executemany INSERT OR IGNORE, then
+        chunked SELECT to recover page_ids in input order.
+
+        Chunking by ``_BATCH_CHUNK_SIZE`` ensures the SELECT IN (...) clause
+        stays well under SQLite's ``SQLITE_MAX_VARIABLE_NUMBER`` (999 on
+        older stock builds), even on a high-fanout page with thousands of
+        in-domain links. The whole batch is still atomic — one BEGIN
+        IMMEDIATE / COMMIT bracket — only the SQL is split.
+
+        Duplicates within the batch return the same id at every position
+        (matches INSERT OR IGNORE semantics).
+        """
         if not req.items:
             return []
         conn.execute("BEGIN IMMEDIATE")
@@ -263,16 +288,22 @@ class WriterThread:
                 "VALUES (?, ?, ?, 'pending')",
                 insert_rows,
             )
-            # Recover ids for the urls we just submitted. SELECT IN (...) needs
-            # the placeholder list expanded explicitly.
+
+            # Recover ids in chunks — assemble a single url→id mapping
+            # across all chunks, then resolve page_ids in input order.
             urls = [url for (url, _) in req.items]
-            placeholders = ",".join("?" * len(urls))
-            rows = conn.execute(
-                f"SELECT id, url FROM pages "
-                f"WHERE scan_job_id = ? AND url IN ({placeholders})",
-                [req.scan_job_id, *urls],
-            ).fetchall()
-            url_to_id = {row["url"]: row["id"] for row in rows}
+            url_to_id: dict[str, int] = {}
+            for start in range(0, len(urls), _BATCH_CHUNK_SIZE):
+                chunk = urls[start:start + _BATCH_CHUNK_SIZE]
+                placeholders = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"SELECT id, url FROM pages "
+                    f"WHERE scan_job_id = ? AND url IN ({placeholders})",
+                    [req.scan_job_id, *chunk],
+                ).fetchall()
+                for row in rows:
+                    url_to_id[row["url"]] = row["id"]
+
             page_ids: list[int] = []
             for url, _ in req.items:
                 pid = url_to_id.get(url)
