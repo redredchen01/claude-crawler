@@ -2,11 +2,18 @@
 
 import sqlite3
 import os
+import threading
 from contextlib import contextmanager
 from datetime import datetime
 
 from crawler.config import DB_PATH
 from crawler.models import ScanJob, Page, Resource, Tag
+
+# Serializes concurrent init_db calls within a single process. SQLite's
+# `PRAGMA journal_mode=WAL` and `executescript` are racy when multiple
+# threads bootstrap the same fresh DB simultaneously — this lock is cheap
+# and avoids fighting SQLite's internal write locking during setup.
+_INIT_LOCK = threading.Lock()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS scan_jobs (
@@ -30,6 +37,7 @@ CREATE TABLE IF NOT EXISTS pages (
     depth INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'pending',
     fetched_at TIMESTAMP,
+    failure_reason TEXT NOT NULL DEFAULT '',
     UNIQUE(scan_job_id, url)
 );
 
@@ -67,19 +75,56 @@ CREATE TABLE IF NOT EXISTS resource_tags (
 
 
 def init_db(db_path: str | None = None) -> str:
-    """Initialize database and return the path used."""
+    """Initialize database and return the path used.
+
+    Idempotent: safe to call on fresh or pre-existing DBs. Runs additive
+    column migrations for pre-v0.2 databases that predate
+    `pages.failure_reason`.
+    """
     path = db_path or DB_PATH
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with get_connection(path) as conn:
-        conn.executescript(SCHEMA)
+    with _INIT_LOCK:
+        with get_connection(path) as conn:
+            conn.executescript(SCHEMA)
+            _migrate_pages_add_failure_reason(conn)
     return path
+
+
+def _migrate_pages_add_failure_reason(conn: sqlite3.Connection) -> None:
+    """Add pages.failure_reason column if missing. Race-safe across threads/processes.
+
+    Uses `PRAGMA busy_timeout` so a concurrent caller waits for the write lock
+    instead of raising `database is locked`. Re-checks column existence under
+    the write lock so only one caller issues ALTER TABLE.
+    """
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(pages)")}
+    if "failure_reason" in cols:
+        return
+    # Give concurrent migrations up to 5s to serialize.
+    conn.execute("PRAGMA busy_timeout = 5000")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(pages)")}
+        if "failure_reason" not in cols:
+            conn.execute("ALTER TABLE pages ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        conn.rollback()
+        if "duplicate column" not in str(exc).lower():
+            raise
 
 
 @contextmanager
 def get_connection(db_path: str | None = None):
-    """Context manager for SQLite connections with WAL mode."""
+    """Context manager for SQLite connections with WAL mode and 5s busy_timeout.
+
+    The busy_timeout tolerates brief contention during concurrent init_db calls
+    and any non-writer-thread paths. The long-lived WriterThread sets its own
+    PRAGMAs on its owned connection (see crawler.core.writer).
+    """
     path = db_path or DB_PATH
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=5.0)
+    conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.row_factory = sqlite3.Row

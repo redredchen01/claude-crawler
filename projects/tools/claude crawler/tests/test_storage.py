@@ -1,13 +1,15 @@
 """Tests for storage module."""
 
 import os
+import sqlite3
 import tempfile
+import threading
 import pytest
 
 from crawler.storage import (
     init_db, create_scan_job, get_scan_job, update_scan_job, list_scan_jobs,
     insert_page, insert_resource, get_resources, save_resource_with_tags,
-    get_tags, get_resources_by_tag, update_tag_counts,
+    get_tags, get_resources_by_tag, update_tag_counts, update_page,
 )
 from crawler.models import Resource
 
@@ -131,3 +133,107 @@ class TestTagsAndRelations:
         job_id = create_scan_job(db_path, "https://example.com", "example.com")
         assert get_resources(db_path, job_id) == []
         assert get_tags(db_path, job_id) == []
+
+
+class TestFailureReasonMigration:
+    """Unit 2: additive migration of pages.failure_reason column."""
+
+    def test_fresh_db_has_failure_reason_column(self, db_path):
+        with sqlite3.connect(db_path) as conn:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(pages)")}
+        assert "failure_reason" in cols
+
+    def test_fresh_db_default_empty_string(self, db_path):
+        job_id = create_scan_job(db_path, "https://example.com", "example.com")
+        page_id = insert_page(db_path, job_id, "https://example.com/x")
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT failure_reason FROM pages WHERE id = ?", (page_id,),
+            ).fetchone()
+        assert row[0] == ""
+
+    def test_update_page_can_set_failure_reason(self, db_path):
+        job_id = create_scan_job(db_path, "https://example.com", "example.com")
+        page_id = insert_page(db_path, job_id, "https://example.com/boom")
+        update_page(db_path, page_id, status="failed", failure_reason="HTTP 503")
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT status, failure_reason FROM pages WHERE id = ?", (page_id,),
+            ).fetchone()
+        assert row[0] == "failed"
+        assert row[1] == "HTTP 503"
+
+    def test_migration_on_preexisting_schema(self):
+        """Pre-v0.2 DB (pages without failure_reason) gets the column added by init_db."""
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            # Create old-style pages table explicitly (no failure_reason column).
+            with sqlite3.connect(path) as conn:
+                conn.executescript("""
+                    CREATE TABLE scan_jobs (id INTEGER PRIMARY KEY, entry_url TEXT, domain TEXT);
+                    CREATE TABLE pages (
+                        id INTEGER PRIMARY KEY,
+                        scan_job_id INTEGER,
+                        url TEXT,
+                        page_type TEXT DEFAULT 'other',
+                        depth INTEGER DEFAULT 0,
+                        status TEXT DEFAULT 'pending',
+                        fetched_at TIMESTAMP
+                    );
+                """)
+                conn.execute(
+                    "INSERT INTO scan_jobs (id, entry_url, domain) VALUES (1, 'x', 'x')"
+                )
+                conn.execute(
+                    "INSERT INTO pages (scan_job_id, url) VALUES (1, 'x')"
+                )
+                conn.commit()
+
+            # Run init_db — triggers migration.
+            init_db(path)
+
+            with sqlite3.connect(path) as conn:
+                cols = {row[1] for row in conn.execute("PRAGMA table_info(pages)")}
+                assert "failure_reason" in cols
+                # Pre-existing row gets the DEFAULT.
+                row = conn.execute("SELECT failure_reason FROM pages").fetchone()
+                assert row[0] == ""
+        finally:
+            os.unlink(path)
+
+    def test_init_db_is_idempotent(self, db_path):
+        # Calling twice on the same DB must not error.
+        init_db(db_path)
+        init_db(db_path)
+        with sqlite3.connect(db_path) as conn:
+            cols = [row[1] for row in conn.execute("PRAGMA table_info(pages)")]
+        # Column exists exactly once.
+        assert cols.count("failure_reason") == 1
+
+    def test_concurrent_init_db_is_race_safe(self):
+        """Two threads calling init_db simultaneously must not fail or double-add."""
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            barrier = threading.Barrier(2)
+            errors: list[Exception] = []
+
+            def run():
+                barrier.wait()
+                try:
+                    init_db(path)
+                except Exception as exc:
+                    errors.append(exc)
+
+            t1 = threading.Thread(target=run)
+            t2 = threading.Thread(target=run)
+            t1.start(); t2.start()
+            t1.join(); t2.join()
+
+            assert errors == [], f"init_db race errors: {errors}"
+            with sqlite3.connect(path) as conn:
+                cols = [row[1] for row in conn.execute("PRAGMA table_info(pages)")]
+            assert cols.count("failure_reason") == 1
+        finally:
+            os.unlink(path)
