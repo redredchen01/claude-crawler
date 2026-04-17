@@ -4,6 +4,7 @@ import re
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
+from bs4.element import Tag as BsTag
 
 from crawler.models import ParseResult, Resource
 
@@ -11,6 +12,127 @@ from crawler.models import ParseResult, Resource
 # articles rarely tag past this; exceeding it strongly suggests a sidebar
 # /footer site-wide tag widget (the 51cg1.com bug pattern).
 _FALLBACK_TAG_CLOUD_CAP = 30
+
+# --- Multi-signal tag scoring ---------------------------------------------
+#
+# Tag detection used to rely on `rel="tag"` + `[class*="tag"]` fallback,
+# which missed sites whose containers didn't carry a "tag" class and
+# conflated category/theme links with real tags. The scoring below treats
+# each candidate <a> as a weighted sum of independent signals — href
+# shape, semantic attrs, container class, text length — so cross-site
+# generalization doesn't depend on any single selector.
+
+# href path patterns (word-boundary segments)
+_TAG_PATH_RE = re.compile(r"/(tag|tags|label|keyword|topic)/", re.I)
+_CATEGORY_PATH_RE = re.compile(
+    r"/(theme|category|categories|channel|cat|section)/", re.I
+)
+# Percent-encoded non-ASCII byte in href (e.g. Chinese tag slugs)
+_PERCENT_CJK_RE = re.compile(r"%[89A-F][0-9A-F]", re.I)
+# Class-name tokens that indicate a tag-ish element (whole-word match over
+# space-separated class list)
+_TAG_CLASS_RE = re.compile(r"\b(tag|tags|label|keyword|topic)\b", re.I)
+# Class-name tokens that indicate a category/theme/channel link
+_CATEGORY_CLASS_RE = re.compile(r"\b(cat|category|channel|section|theme)\b", re.I)
+
+_TAG_SCORE_THRESHOLD = 3
+_TAG_TEXT_MIN = 1
+_TAG_TEXT_MAX = 20
+
+
+def _class_tokens(el: BsTag) -> str:
+    """Return the element's class list joined with spaces (empty if none)."""
+    classes = el.get("class")
+    if not classes:
+        return ""
+    if isinstance(classes, str):
+        return classes
+    return " ".join(classes)
+
+
+def _score_tag_candidate(a: BsTag) -> tuple[int, bool]:
+    """Score an <a> as a tag candidate. Returns (score, is_category).
+
+    ``is_category`` short-circuits tag membership: callers use it both to
+    exclude the link from the tag list *and* to harvest a category signal
+    for ``Resource.category``.
+    """
+    text = _clean_text(a.get_text(" ", strip=True))
+    text_len = len(text)
+    if text_len < _TAG_TEXT_MIN or text_len > _TAG_TEXT_MAX:
+        # Disqualify: empty, whitespace-only, or paragraph-length anchors
+        # are never tags regardless of other signals.
+        return (0, False)
+
+    href = a.get("href", "") or ""
+    own_classes = _class_tokens(a)
+
+    # Category short-circuit — href path or own class marks this as a
+    # category/theme link (not a tag). Only the <a>'s own class counts
+    # here; ancestor "tag" containers can legitimately hold a category
+    # link next to tags (the example site puts class="cat" inside
+    # <h3 class="tags">).
+    is_category = bool(
+        _CATEGORY_PATH_RE.search(href)
+        or _CATEGORY_CLASS_RE.search(own_classes)
+    )
+    if is_category:
+        return (0, True)
+
+    score = 0
+
+    # S1: href contains a tag path segment (strong)
+    if _TAG_PATH_RE.search(href):
+        score += 3
+
+    # S2: semantic rel="tag" (strong)
+    rel = a.get("rel")
+    if rel:
+        rel_str = " ".join(rel) if isinstance(rel, list) else str(rel)
+        if "tag" in rel_str.lower().split():
+            score += 3
+
+    # S3: percent-encoded non-ASCII in href (CJK tag slugs)
+    if _PERCENT_CJK_RE.search(href):
+        score += 1
+
+    # S4: own or ancestor class matches a tag-ish token
+    ancestor_classes = own_classes
+    for parent in a.parents:
+        if not isinstance(parent, BsTag):
+            continue
+        parent_classes = _class_tokens(parent)
+        if parent_classes:
+            ancestor_classes = f"{ancestor_classes} {parent_classes}"
+    if _TAG_CLASS_RE.search(ancestor_classes):
+        score += 2
+
+    # S5: text in the plausible tag length range (already gated above)
+    score += 1
+
+    return (score, False)
+
+
+def _extract_tags_and_category(scope: BsTag) -> tuple[list[str], str]:
+    """Walk ``scope`` scoring each <a> and return (tags, detected_category).
+
+    ``tags`` preserves document order and is de-duplicated. ``detected_category``
+    is the text of the first is_category anchor encountered (empty if none).
+    """
+    tags: list[str] = []
+    detected_category = ""
+    for a in scope.find_all("a"):
+        score, is_category = _score_tag_candidate(a)
+        if is_category:
+            if not detected_category:
+                detected_category = _clean_text(a.get_text(" ", strip=True))
+            continue
+        if score < _TAG_SCORE_THRESHOLD:
+            continue
+        text = _clean_text(a.get_text(" ", strip=True))
+        if text and text != "+" and text not in tags:
+            tags.append(text)
+    return tags, detected_category
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +243,52 @@ def _detect_page_type(html: str, url: str, soup: BeautifulSoup) -> str:
 # Resource extraction — detail page
 # ---------------------------------------------------------------------------
 
+def _pick_main_container(soup: BeautifulSoup):
+    """Pick the element most likely to hold the article's real content.
+
+    The naïve `select_one("article")` returned the *first* article in
+    document order. That breaks two real cases:
+
+      1. Detail pages with a "Related articles" sidebar block before the
+         main content → the decoy article gets picked, and its tags +
+         cover image pollute the result.
+      2. List pages misclassified as detail (e.g. one card above the
+         fold) → the first card's metadata is attributed to the list URL.
+
+    Selection priority:
+
+      1. ``article[itemprop="mainContentOfPage"]`` — Schema.org's explicit
+         "this is the main content" signal. Strongest, used by CMS
+         themes that care.
+      2. ``main article`` — article nested inside <main> is the real
+         content; siblings of <main> are typically nav/sidebar/related.
+      3. Largest ``<article>`` by text length when 2+ articles exist
+         without a structural signal — filters out small "Related"
+         entries which are typically <50 chars vs the real body's
+         hundreds-to-thousands.
+      4. First ``<article>`` (back-compat with the single-article case).
+      5. ``<main>`` as a last resort.
+
+    Returns the chosen tag, or ``None`` if neither <article> nor <main>
+    is present.
+    """
+    itemprop_match = soup.select_one('article[itemprop="mainContentOfPage"]')
+    if itemprop_match is not None:
+        return itemprop_match
+
+    main_article = soup.select_one("main article")
+    if main_article is not None:
+        return main_article
+
+    articles = soup.find_all("article")
+    if len(articles) >= 2:
+        return max(articles, key=lambda a: len(a.get_text(strip=True)))
+    if articles:
+        return articles[0]
+
+    return soup.select_one("main")
+
+
 def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
     """Extract a single Resource from a detail page."""
     # Title
@@ -140,7 +308,8 @@ def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
     # tag scoping. Without scoping, sidebar/footer "tag cloud" widgets
     # leak into every article's tag set (the site-wide tags appear on
     # every page, producing identical tag lists across all articles).
-    container = soup.select_one("article") or soup.select_one("main")
+    # See _pick_main_container for the multi-article disambiguation rules.
+    container = _pick_main_container(soup)
 
     # Cover image
     cover_url = _extract_meta(soup, "og:image")
@@ -149,42 +318,33 @@ def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
         if img and img.get("src"):
             cover_url = urljoin(url, img["src"])
 
-    # Tags — restrict to article container when available; only fall back to
-    # whole-document search when no container exists, and apply a sanity
-    # cap (real articles rarely have 30+ tags; >30 strongly suggests a
-    # site-wide tag-cloud widget).
+    # Tags — restrict to the article container when available; otherwise
+    # fall back to whole-document scoring but apply the tag-cloud cap
+    # (real articles rarely have >30 tags; exceeding it strongly suggests
+    # a site-wide widget leaking in).
     tag_scope = container if container is not None else soup
-    tags: list[str] = []
-    # a[rel="tag"]
-    for a in tag_scope.select('a[rel="tag"]'):
-        t = _clean_text(a.get_text(strip=True))
-        if t and t not in tags:
-            tags.append(t)
-    # Elements with class containing "tag" — match both a[class*="tag"] and [class*="tag"] a
-    if not tags:
-        for el in tag_scope.select('a[class*="tag"], [class*="tag"] a'):
-            t = _clean_text(el.get_text(strip=True))
-            if t and t not in tags and t != "+":
-                tags.append(t)
-    # Tag-cloud sanity check: no article legitimately has >FALLBACK_TAG_CAP
-    # tags. If the scope yielded a tag-cloud-sized list (no container
-    # guard), treat as noise and drop entirely so it doesn't drown out
-    # per-article signals.
+    tags, detected_category = _extract_tags_and_category(tag_scope)
     if container is None and len(tags) > _FALLBACK_TAG_CLOUD_CAP:
         tags = []
+        detected_category = ""
 
     # Metrics
     views = _extract_number_near_keyword(soup, ["views", "view", "浏览", "浏览量"])
     likes = _extract_number_near_keyword(soup, ["likes", "like", "赞", "点赞"])
     hearts = _extract_number_near_keyword(soup, ["hearts", "heart", "爱心", "收藏"])
 
-    # Category — breadcrumb last item or URL path
+    # Category priority: breadcrumb > detected category link (from the
+    # tag block) > URL first segment. Breadcrumb wins because it's the
+    # site's own structured signal; the detected link beats URL segments
+    # because it carries the human-readable category name.
     category = ""
     breadcrumb = soup.select_one("nav.breadcrumb") or soup.select_one('[class*="breadcrumb"]')
     if breadcrumb:
         items = breadcrumb.find_all("a")
         if items:
             category = _clean_text(items[-1].get_text(strip=True))
+    if not category and detected_category:
+        category = detected_category
     if not category:
         path = urlparse(url).path.strip("/")
         segments = path.split("/")
@@ -266,12 +426,9 @@ def _extract_list_resources(soup: BeautifulSoup, url: str) -> list[Resource]:
         else:
             cover = ""
 
-        # Tags (optional in cards)
-        tags: list[str] = []
-        for tag_el in card.select('a[rel="tag"], a[class*="tag"], [class*="tag"] a'):
-            t = _clean_text(tag_el.get_text(strip=True))
-            if t and t not in tags and t != "+":
-                tags.append(t)
+        # Tags (optional in cards) — same scoring path as detail pages so
+        # the two extractors don't drift in behavior.
+        tags, _ = _extract_tags_and_category(card)
 
         # Metrics (optional)
         views = _extract_number_near_keyword(card, ["views", "view", "浏览"])

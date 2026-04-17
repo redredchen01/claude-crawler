@@ -4,7 +4,7 @@ import pytest
 
 from bs4 import BeautifulSoup
 
-from crawler.parser import parse_page, _extract_detail_resource
+from crawler.parser import parse_page, _extract_detail_resource, _pick_main_container
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +199,152 @@ class TestDetailPage:
         assert any("/contact" in link for link in result.links)
 
 
+class TestMultiSignalTagScoring:
+    """Cross-site generalization — scores each <a> by multiple signals
+    (href pattern, percent-encoded CJK, class, rel) so tag extraction is
+    not tied to any one selector.
+    """
+
+    # Mirrors the real site structure the brainstorm was built from:
+    # tag container class *does* contain "tag", but a sibling link with
+    # class="cat" + /theme/ path is a category, not a tag.
+    EXAMPLE_SITE_HTML = """\
+<!DOCTYPE html>
+<html>
+<head>
+    <meta property="og:title" content="Example Detail">
+    <title>Example Detail | Site</title>
+</head>
+<body>
+<article>
+    <h1>Example Detail</h1>
+    <p>body</p>
+    <h3 class="tags h6-md" style="color: #FFF">
+        <a href="/av/theme/sex-only/hot/" class="cat"><em>直接开啪</em></a>
+        <span class="separator">•</span>
+        <a href="/av/tag/%E5%81%B6%E5%83%8F/update/"><em>偶像</em></a>
+        <a href="/av/tag/%E5%B7%A8%E4%B9%B3/update/"><em>巨乳</em></a>
+        <a href="/av/tag/%E7%8B%AC%E8%A7%92%E6%88%8F/update/"><em>独角戏</em></a>
+        <a href="/av/tag/%E7%97%B4%E5%A5%B3/update/"><em>痴女</em></a>
+        <a href="/av/tag/%E7%BA%AA%E5%BD%95%E7%89%87/update/"><em>纪录片</em></a>
+    </h3>
+</article>
+</body>
+</html>
+"""
+
+    # A site whose tag container class does NOT include "tag" — must
+    # still be detected via href path + percent-encoded CJK signals.
+    POST_META_HTML = """\
+<!DOCTYPE html>
+<html>
+<head>
+    <meta property="og:title" content="Meta-class Detail">
+    <title>Meta Detail</title>
+</head>
+<body>
+<article>
+    <h1>Meta-class Detail</h1>
+    <p>body</p>
+    <div class="post-meta">
+        <span>Author: Jane</span>
+        <a href="/keyword/python/">Python</a>
+        <a href="/label/web/">Web</a>
+        <a href="/topic/performance/">Performance</a>
+    </div>
+</article>
+</body>
+</html>
+"""
+
+    def test_example_site_tags(self):
+        """5 真标签入 tags，category link 不污染。"""
+        result = parse_page(self.EXAMPLE_SITE_HTML, "https://example.com/av/123")
+        tags = result.resources[0].tags
+        assert tags == ["偶像", "巨乳", "独角戏", "痴女", "纪录片"], (
+            f"Expected 5 real tags without category; got {tags}"
+        )
+
+    def test_example_site_category_detected(self):
+        """class="cat" + /theme/ 归类为 category，填入 Resource.category。"""
+        result = parse_page(self.EXAMPLE_SITE_HTML, "https://example.com/av/123")
+        # No breadcrumb, so detected category link wins over URL segment.
+        assert result.resources[0].category == "直接开啪"
+
+    def test_example_site_separator_excluded(self):
+        """<span class="separator"> 不影响结果（非 <a>，自然被忽略）。"""
+        result = parse_page(self.EXAMPLE_SITE_HTML, "https://example.com/av/123")
+        assert "•" not in result.resources[0].tags
+
+    def test_container_without_tag_class(self):
+        """class 名不含 'tag' 的容器也能抓到 tag（靠 href path 信号）。"""
+        result = parse_page(self.POST_META_HTML, "https://example.com/post/42")
+        tags = result.resources[0].tags
+        assert tags == ["Python", "Web", "Performance"], (
+            f"Expected tag extraction via href signals; got {tags}"
+        )
+
+    def test_breadcrumb_overrides_detected_category(self):
+        """优先级: breadcrumb > detected category link > URL 首段。"""
+        html = """\
+<html><head><meta property="og:title" content="T"></head>
+<body>
+<nav class="breadcrumb"><a>Home</a> &gt; <a>Real Category</a></nav>
+<article>
+<h1>T</h1>
+<div class="tags">
+<a href="/category/noise/" class="cat">Noise Category</a>
+<a rel="tag" href="/tag/foo">foo</a>
+</div>
+</article></body></html>
+"""
+        result = parse_page(html, "https://example.com/path/article")
+        assert result.resources[0].category == "Real Category"
+
+    def test_url_segment_fallback_when_no_category_signal(self):
+        """既无 breadcrumb 也无 category link 时，回落到 URL 首段（现有行为）。"""
+        html = """\
+<html><head><meta property="og:title" content="T"></head>
+<body>
+<article>
+<h1>T</h1>
+<div class="tags"><a rel="tag" href="/tag/foo">foo</a></div>
+</article></body></html>
+"""
+        result = parse_page(html, "https://example.com/blog/article-1")
+        assert result.resources[0].category == "blog"
+
+    def test_scoring_rejects_nontag_internal_links(self):
+        """Article 内普通内容链接（无 /tag/、无 tag class、无 rel=tag）不会被误判为 tag。"""
+        html = """\
+<html><head><meta property="og:title" content="T"></head>
+<body>
+<article>
+<h1>T</h1>
+<p>See also <a href="/about">About page</a> for more info.</p>
+<p>Or contact <a href="/contact">us</a>.</p>
+</article></body></html>
+"""
+        result = parse_page(html, "https://example.com/post/1")
+        assert result.resources[0].tags == []
+
+    def test_scoring_rejects_overlong_anchor_text(self):
+        """超过 20 字的锚文本不是 tag（S5 长度门槛兜底）。"""
+        html = """\
+<html><head><meta property="og:title" content="T"></head>
+<body>
+<article>
+<h1>T</h1>
+<div class="tags">
+<a rel="tag" href="/tag/ok">ok</a>
+<a rel="tag" href="/tag/x">This is an entire sentence pretending to be a tag</a>
+</div>
+</article></body></html>
+"""
+        result = parse_page(html, "https://example.com/post/1")
+        assert result.resources[0].tags == ["ok"]
+
+
 class TestListPage:
     def test_page_type(self):
         result = parse_page(LIST_HTML, "https://example.com/blog")
@@ -299,3 +445,144 @@ class TestLinkExtraction:
     def test_no_mailto(self):
         result = parse_page(LINK_HTML, "https://example.com")
         assert not any("mailto" in link for link in result.links)
+
+
+# ---------------------------------------------------------------------------
+# Main-container picker — replaces the naïve `select_one("article")` that
+# used to grab the first <article> in document order, polluting detail
+# pages that have a "Related articles" sidebar block before the real
+# content (or list pages misclassified as detail).
+# ---------------------------------------------------------------------------
+
+class TestPickMainContainer:
+    def _pick(self, html: str):
+        return _pick_main_container(BeautifulSoup(html, "lxml"))
+
+    def test_returns_none_when_no_article_or_main(self):
+        assert self._pick("<html><body><div>x</div></body></html>") is None
+
+    def test_single_article_returned_directly(self):
+        c = self._pick(
+            "<html><body><article><h1>Real</h1><p>body</p></article></body></html>"
+        )
+        assert c is not None
+        assert c.name == "article"
+        assert "Real" in c.get_text()
+
+    def test_itemprop_main_content_wins_over_decoy_article(self):
+        """Schema.org's mainContentOfPage is the strongest structural
+        signal — it wins even if the decoy article appears first in
+        document order and has more text."""
+        html = """
+        <html><body>
+        <article>
+            <h1>Decoy First Article</h1>
+            <p>{padding}</p>
+        </article>
+        <article itemprop="mainContentOfPage">
+            <h1>Real Content</h1>
+            <p>short</p>
+        </article>
+        </body></html>
+        """.format(padding="lots of decoy content " * 100)
+        c = self._pick(html)
+        assert "Real Content" in c.get_text()
+        assert "Decoy" not in c.get_text()
+
+    def test_main_article_wins_over_outside_article(self):
+        """Article inside <main> is the real content; sibling articles
+        are typically "Related articles" / sidebar entries."""
+        html = """
+        <html><body>
+        <article class="related"><h2>Related Item</h2><p>x</p></article>
+        <main>
+            <article>
+                <h1>Real Article</h1>
+                <p>body</p>
+            </article>
+        </main>
+        </body></html>
+        """
+        c = self._pick(html)
+        assert "Real Article" in c.get_text()
+        assert "Related Item" not in c.get_text()
+
+    def test_largest_by_text_when_no_structural_signal(self):
+        """No itemprop / no <main> wrapping — pick the article with the
+        most text content. Filters out the small "Related" entries that
+        often appear above or below the real content."""
+        html = """
+        <html><body>
+        <article><h2>Related 1</h2><p>tiny</p></article>
+        <article><h2>Related 2</h2><p>also tiny</p></article>
+        <article>
+            <h1>Real Article</h1>
+            <p>{body}</p>
+        </article>
+        <article><h2>Related 3</h2><p>still tiny</p></article>
+        </body></html>
+        """.format(body="this is the real content with substantial body text " * 50)
+        c = self._pick(html)
+        assert "Real Article" in c.get_text()
+
+    def test_falls_back_to_main_when_no_article(self):
+        c = self._pick(
+            "<html><body><main><h1>From main</h1><p>x</p></main></body></html>"
+        )
+        assert c is not None
+        assert c.name == "main"
+
+    def test_article_preferred_over_main(self):
+        """When both <article> and <main> exist, <article> wins — it's
+        the more specific structural element."""
+        html = """
+        <html><body>
+        <main>
+            <article><h1>Real</h1><p>body</p></article>
+            <aside>sidebar</aside>
+        </main>
+        </body></html>
+        """
+        c = self._pick(html)
+        assert c.name == "article"
+
+
+class TestDetailResourceMultiArticleRegression:
+    """End-to-end: parse_page on a detail page with sidebar 'Related'
+    articles must return the *real* article's metadata, not a decoy."""
+
+    def test_related_sidebar_does_not_pollute_title(self):
+        # Only meta og:title / h1 outside the article block matter for
+        # title extraction in the current parser. The bug surface is
+        # tags + cover image, which are scoped to the container.
+        html = """
+        <html><head>
+            <meta property="og:title" content="Real Article Title">
+            <meta property="og:image" content="https://example.com/real-cover.jpg">
+        </head><body>
+        <article class="related-sidebar">
+            <h2>Related Item</h2>
+            <img src="/decoy-cover.jpg">
+            <a rel="tag">decoy-tag</a>
+        </article>
+        <main>
+            <article>
+                <h1>Real Article Title</h1>
+                <p>body</p>
+                <a rel="tag">real-tag-1</a>
+                <a rel="tag">real-tag-2</a>
+            </article>
+        </main>
+        </body></html>
+        """
+        result = parse_page(html, "https://example.com/post/123")
+        # parse_page should classify as detail and return one resource.
+        assert result.page_type == "detail"
+        assert len(result.resources) == 1
+        r = result.resources[0]
+        assert r.tags == ["real-tag-1", "real-tag-2"], (
+            f"Expected only real-article tags, got {r.tags}"
+        )
+        # og:image takes priority over container <img>, so cover_url
+        # is not a meaningful regression marker here. The tag scoping
+        # is the load-bearing assertion.
