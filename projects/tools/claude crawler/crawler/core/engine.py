@@ -4,11 +4,12 @@ import logging
 import queue
 import sqlite3
 import time
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
 from crawler.core.frontier import Frontier
 from crawler.core.fetcher import fetch_page, needs_js_rendering
+from crawler.core.url import normalize as _normalize_url
 from crawler.parser import parse_page
 from crawler.storage import (
     init_db, create_scan_job, update_scan_job, insert_page, update_page,
@@ -46,17 +47,6 @@ def _check_robots(url: str, robots_cache: dict[str, RobotFileParser | None], use
     if rp is None:
         return True
     return rp.can_fetch(user_agent, url)
-
-
-def _normalize_url(url: str) -> str:
-    """Normalize URL for deduplication: strip fragment, lowercase domain, lowercase path."""
-    parsed = urlparse(url)
-    netloc = parsed.netloc.lower()
-    path = parsed.path or "/"
-    # Remove trailing slash for consistency
-    if path != "/" and path.endswith("/"):
-        path = path.rstrip("/")
-    return urlunparse((parsed.scheme, netloc, path, parsed.params, parsed.query, ""))
 
 
 def _send_progress(progress_queue: queue.Queue | None, data: dict) -> None:

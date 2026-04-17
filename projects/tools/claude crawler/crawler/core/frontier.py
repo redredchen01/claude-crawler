@@ -1,9 +1,10 @@
 """BFS URL queue for crawling."""
 
 import collections
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
 from crawler.config import SKIP_EXTENSIONS
+from crawler.core.url import normalize as _normalize_url
 
 
 class Frontier:
@@ -18,17 +19,14 @@ class Frontier:
         parsed = urlparse(seed_url)
         self._domain = parsed.netloc.lower()
 
-        normalized = self._normalize(seed_url)
+        normalized = _normalize_url(seed_url)
         self._visited.add(normalized)
         self._queue.append((normalized, 0))
 
     @staticmethod
     def _normalize(url: str) -> str:
-        """Strip fragment and trailing slash for dedup."""
-        parsed = urlparse(url)
-        path = parsed.path.rstrip("/") or "/"
-        return urlunparse((parsed.scheme, parsed.netloc.lower(), path,
-                           parsed.params, parsed.query, ""))
+        """Deprecated shim — delegates to crawler.core.url.normalize."""
+        return _normalize_url(url)
 
     def _is_allowed(self, url: str) -> bool:
         """Check domain match and extension filter."""
@@ -47,7 +45,7 @@ class Frontier:
             return
         if depth > self._max_depth:
             return
-        normalized = self._normalize(url)
+        normalized = _normalize_url(url)
         if normalized in self._visited:
             return
         if not self._is_allowed(normalized):
