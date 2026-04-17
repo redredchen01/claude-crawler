@@ -1954,3 +1954,124 @@ class TestStuffingGate:
     def test_boundary_16_rejected(self):
         from crawler.parser import _tags_pass_stuffing_gate
         assert _tags_pass_stuffing_gate([f"tag{i:02d}" for i in range(16)]) is False
+
+
+class TestMicrodataExtractor:
+    """`_extract_microdata(soup) -> dict` reads schema.org microdata
+    via [itemscope][itemtype] + itemprop attributes. Unhit fields omitted."""
+
+    def _soup(self, html):
+        return BeautifulSoup(html, "lxml")
+
+    def test_happy_path_article(self):
+        from crawler.parser import _extract_microdata
+        soup = self._soup("""
+            <article itemscope itemtype="https://schema.org/Article">
+                <h1 itemprop="name">Microdata Title</h1>
+                <meta itemprop="description" content="A summary.">
+                <img itemprop="image" src="https://cdn.example/p.jpg">
+                <meta itemprop="datePublished" content="2026-04-17">
+                <meta itemprop="articleSection" content="Tech">
+                <meta itemprop="keywords" content="python,web,perf">
+            </article>
+        """)
+        out = _extract_microdata(soup)
+        assert out == {
+            "title": "Microdata Title",
+            "cover_url": "https://cdn.example/p.jpg",
+            "description": "A summary.",
+            "published_at": "2026-04-17",
+            "category": "Tech",
+            "tags": ["python", "web", "perf"],
+        }
+
+    def test_no_itemscope_returns_empty(self):
+        from crawler.parser import _extract_microdata
+        out = _extract_microdata(self._soup("<p>no microdata here</p>"))
+        assert out == {}
+
+    def test_image_src_from_img_tag(self):
+        from crawler.parser import _extract_microdata
+        soup = self._soup(
+            '<article itemscope itemtype="https://schema.org/Article">'
+            '<img itemprop="image" src="https://cdn/item.jpg"></article>'
+        )
+        out = _extract_microdata(soup)
+        assert out["cover_url"] == "https://cdn/item.jpg"
+
+    def test_published_date_from_meta_content(self):
+        from crawler.parser import _extract_microdata
+        soup = self._soup(
+            '<article itemscope itemtype="https://schema.org/Article">'
+            '<meta itemprop="datePublished" content="2026-04-17T10:00:00Z"></article>'
+        )
+        out = _extract_microdata(soup)
+        assert out["published_at"] == "2026-04-17T10:00:00Z"
+
+    def test_time_datetime_attribute(self):
+        from crawler.parser import _extract_microdata
+        soup = self._soup(
+            '<article itemscope itemtype="https://schema.org/Article">'
+            '<time itemprop="datePublished" datetime="2026-04-17">Apr 17</time>'
+            '</article>'
+        )
+        out = _extract_microdata(soup)
+        assert out["published_at"] == "2026-04-17"
+
+    def test_multiple_top_scopes_picks_largest(self):
+        """Page has BreadcrumbList (small) + Article (large). Article wins."""
+        from crawler.parser import _extract_microdata
+        soup = self._soup("""
+            <nav itemscope itemtype="https://schema.org/BreadcrumbList">
+                <span itemprop="name">Home</span>
+            </nav>
+            <article itemscope itemtype="https://schema.org/Article">
+                <h1 itemprop="name">Real Content Title</h1>
+                <p>A long body of text that makes this block the largest by text weight.</p>
+            </article>
+        """)
+        out = _extract_microdata(soup)
+        assert out["title"] == "Real Content Title"
+
+    def test_nested_itemscope_does_not_pollute(self):
+        """A nested entity's itemprop must not leak into the parent."""
+        from crawler.parser import _extract_microdata
+        soup = self._soup("""
+            <article itemscope itemtype="https://schema.org/Article">
+                <h1 itemprop="name">Outer Title</h1>
+                <span itemscope itemtype="https://schema.org/Person">
+                    <span itemprop="name">Jane Author</span>
+                </span>
+            </article>
+        """)
+        out = _extract_microdata(soup)
+        assert out["title"] == "Outer Title"
+
+    def test_placeholder_image_rejected(self):
+        from crawler.parser import _extract_microdata
+        soup = self._soup(
+            '<article itemscope itemtype="https://schema.org/Article">'
+            '<img itemprop="image" src="https://site/static/default.png">'
+            '</article>'
+        )
+        out = _extract_microdata(soup)
+        assert "cover_url" not in out
+
+    def test_stuffed_keywords_rejected(self):
+        from crawler.parser import _extract_microdata
+        stuffed = ",".join(f"w{i}" for i in range(25))
+        soup = self._soup(
+            f'<article itemscope itemtype="https://schema.org/Article">'
+            f'<meta itemprop="keywords" content="{stuffed}"></article>'
+        )
+        out = _extract_microdata(soup)
+        assert "tags" not in out
+
+    def test_damaged_itemscope_no_itemtype_still_works(self):
+        """`itemscope` without `itemtype` fails the selector; graceful
+        empty return. (Our selector requires both.)"""
+        from crawler.parser import _extract_microdata
+        out = _extract_microdata(self._soup(
+            '<div itemscope><span itemprop="name">X</span></div>'
+        ))
+        assert out == {}

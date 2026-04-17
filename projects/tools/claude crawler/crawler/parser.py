@@ -741,6 +741,99 @@ def _extract_twitter_cards(soup: BeautifulSoup) -> dict:
     return out
 
 
+def _microdata_itemprop_value(el: BsTag) -> str:
+    """Extract the value from an itemprop-bearing element per the HTML
+    microdata spec. Rules: <meta> uses content, <img|audio|video|source>
+    uses src, <a|area|link> uses href, <time> uses datetime, others fall
+    back to visible text."""
+    name = el.name
+    if name == "meta":
+        return (el.get("content") or "").strip()
+    if name in ("img", "audio", "video", "source", "embed", "iframe"):
+        return (el.get("src") or "").strip()
+    if name in ("a", "area", "link"):
+        return (el.get("href") or "").strip()
+    if name == "time":
+        dt = el.get("datetime")
+        if dt:
+            return dt.strip()
+    return _clean_text(el.get_text(" ", strip=True))
+
+
+def _extract_microdata(soup: BeautifulSoup) -> dict:
+    """schema.org microdata → unified field dict. Picks the largest
+    top-level [itemscope][itemtype] block by text content (parallels
+    `_pick_main_container`'s disambiguation rule for sibling blocks).
+    Unhit fields omitted."""
+    candidates = soup.select("[itemscope][itemtype]")
+    if not candidates:
+        return {}
+    # Only top-level scopes (not nested) — sort by text length, keep
+    # the largest so a small BreadcrumbList doesn't beat the main
+    # Article.
+    top_level = [c for c in candidates if not c.find_parent(attrs={"itemscope": True})]
+    if not top_level:
+        top_level = candidates
+    scope = max(top_level, key=lambda el: len(el.get_text(strip=True)))
+
+    # itemprop → unified field mapping
+    # schema.org convention: name→title, image→cover_url, description,
+    # articleSection/genre→category, datePublished/uploadDate→published_at,
+    # keywords→tags.
+    prop_map = {
+        "name": "title",
+        "headline": "title",
+        "image": "cover_url",
+        "thumbnailUrl": "cover_url",
+        "description": "description",
+        "articleSection": "category",
+        "genre": "category",
+        "datePublished": "published_at",
+        "uploadDate": "published_at",
+    }
+
+    out: dict = {}
+    keyword_value: str | list | None = None
+
+    # First matching itemprop wins (consistent with schema.org spec)
+    for el in scope.find_all(attrs={"itemprop": True}):
+        # Skip properties nested inside a deeper itemscope (they belong
+        # to the nested entity, not this one)
+        parent_scope = el.find_parent(attrs={"itemscope": True})
+        if parent_scope is not scope:
+            continue
+        prop = el.get("itemprop")
+        if isinstance(prop, list):
+            # schema.org allows space-separated multi-prop on one element
+            props = prop
+        else:
+            props = (prop or "").split()
+
+        value = _microdata_itemprop_value(el)
+        if not value:
+            continue
+
+        for p in props:
+            if p == "keywords" and keyword_value is None:
+                keyword_value = value
+                continue
+            target = prop_map.get(p)
+            if target is None:
+                continue
+            if target == "cover_url" and not _valid_cover_url(value):
+                continue
+            if target not in out:
+                out[target] = value
+
+    # keywords → tags list via shared normalization + stuffing gate
+    if keyword_value is not None:
+        tags = _parse_tags_keywords(keyword_value)
+        if tags and _tags_pass_stuffing_gate(tags):
+            out["tags"] = tags
+
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Page-type detection
 # ---------------------------------------------------------------------------
