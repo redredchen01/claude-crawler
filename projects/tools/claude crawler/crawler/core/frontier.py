@@ -87,10 +87,14 @@ class Frontier:
         the number of URLs flushed (0 when the staging buffer is empty).
 
         On writer failure the staged URLs are returned to ``_pending_batch``
-        for retry AND removed from ``_visited`` so they remain eligible for
-        re-discovery within the same run (B2). The caller (the engine) is
-        also expected to detect persistent writer failure via
-        :meth:`WriterThread.is_alive` and abort the scan.
+        for retry on a future flush. Importantly, they STAY in ``_visited``
+        — removing them would let a concurrent re-discovery from another
+        worker re-stage the same URL, which after a successful retry would
+        produce two queue entries with the same page_id and cause the same
+        page to be processed twice (counter inflation). The pending_batch
+        path is the only retry channel; re-discovery is intentionally
+        blocked. If the writer is permanently unhealthy the engine's
+        :meth:`WriterThread.is_alive` health check fires and aborts.
         """
         with self._lock:
             if not self._pending_batch:
@@ -104,14 +108,11 @@ class Frontier:
                 self._scan_job_id, batch,
             )
         except BaseException:
-            # Roll the staged items back into the buffer for retry, AND
-            # remove them from _visited so they remain eligible for
-            # re-discovery in the same run if the writer recovers
-            # (e.g., transient queue saturation).
+            # Roll the staged items back into the buffer for retry. Keep
+            # them in _visited so concurrent re-discovery doesn't double-
+            # stage them.
             with self._lock:
                 self._pending_batch = batch + self._pending_batch
-                for url, _ in batch:
-                    self._visited.discard(url)
             raise
         with self._lock:
             for (url, depth), page_id in zip(batch, page_ids):
@@ -131,9 +132,10 @@ class Frontier:
     def mark_visited(self, urls) -> None:
         """Mark URLs as already-seen *without* enqueuing.
 
-        Resume path uses this to pre-populate ``_visited`` with every URL
-        already in the ``pages`` table, so re-discovered links don't get
-        re-pushed.
+        Used exclusively by the engine's resume path to pre-populate
+        ``_visited`` with every URL already in the ``pages`` table, so
+        re-discovered links don't get re-pushed. Production crawl-from-seed
+        code uses :meth:`push` (which dedups against _visited).
         """
         with self._lock:
             for url in urls:
@@ -141,6 +143,11 @@ class Frontier:
 
     def seed_existing(self, rows) -> None:
         """Pre-populate the queue with already-persisted (url, depth, page_id) rows.
+
+        Used exclusively by the engine's resume path to put pending pages
+        from a prior killed run back into the worker queue without going
+        through the writer (the rows already exist in the ``pages`` table).
+        Production crawl-from-seed code uses :meth:`push` + :meth:`flush_batch`.
 
         Unlike :meth:`push`, this *unconditionally* enqueues — the resume
         path may have already called :meth:`mark_visited` on the same URLs

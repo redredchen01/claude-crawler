@@ -29,11 +29,12 @@ import threading
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from crawler.config import (
-    BROWSER_SHUTDOWN_TIMEOUT, RENDER_RETRY_COUNT, RENDER_TIMEOUT,
-    RENDER_WAIT_NETWORKIDLE_MS,
+    BROWSER_SHUTDOWN_TIMEOUT, RENDER_QUEUE_SIZE, RENDER_RETRY_COUNT,
+    RENDER_SUBMIT_TIMEOUT, RENDER_TIMEOUT, RENDER_WAIT_NETWORKIDLE_MS,
 )
 from crawler.models import RenderRequest
 
@@ -45,11 +46,9 @@ _DEFAULT_RESTART_BACKOFFS = (1.0, 5.0)
 _DEFAULT_MAX_CONSECUTIVE_FAILURES = 3
 _DEVTOOLS_PORT_FILE = "DevToolsActivePort"
 _CHROMIUM_BOOT_TIMEOUT = 10.0
-# Bounded queue: workers block on submit() when render is the bottleneck
-# (force_playwright on slow sites). Without this, submitted-Future churn
-# accumulates unbounded behind a slow renderer.
-_DEFAULT_QUEUE_SIZE = 16
-_DEFAULT_SUBMIT_TIMEOUT = 60.0
+# Bounded queue: workers block on submit() when render is the bottleneck.
+# Defaults live in crawler.config (RENDER_QUEUE_SIZE, RENDER_SUBMIT_TIMEOUT)
+# so operators can tune them without editing this module.
 
 
 class ShutdownError(RuntimeError):
@@ -220,14 +219,25 @@ def _real_render(handle: _ChromiumHandle, url: str, timeout_ms: int) -> str:
     if handle.context is None:
         handle.context = handle.browser.new_context()
     else:
+        # If clear_cookies/clear_permissions raises, the context is likely
+        # corrupted (Playwright internal state desync, IPC glitch). Reset
+        # so the next branch lazy-rebuilds it; otherwise we'd waste
+        # RENDER_RETRY_COUNT+1 attempts on a broken context that won't
+        # recover until the crash circuit-breaker trips.
         try:
             handle.context.clear_cookies()
-        except Exception:
-            logger.debug("context.clear_cookies() raised", exc_info=True)
-        try:
             handle.context.clear_permissions()
         except Exception:
-            logger.debug("context.clear_permissions() raised", exc_info=True)
+            logger.warning(
+                "context.clear_*() raised; resetting context for fresh build",
+                exc_info=True,
+            )
+            try:
+                handle.context.close()
+            except Exception:
+                pass
+            handle.context = None
+            handle.context = handle.browser.new_context()
 
     page = handle.context.new_page()
     try:
@@ -332,6 +342,13 @@ _BROWSER_DEAD_MARKERS = (
 # Typed exceptions: load lazily and tolerate Playwright not being importable
 # or restructuring its internals across versions. Substring fallback below
 # handles the case where neither typed class matches.
+#
+# NOTE: TargetClosedError currently lives in `playwright._impl._errors` —
+# the underscore prefix marks it as Playwright-internal API. Re-validate
+# against new Playwright releases periodically; once a public alternative
+# (e.g. `from playwright.sync_api import TargetClosedError`) lands, prefer
+# it. Once Playwright >= some-future-version is the project floor, the
+# substring fallback layer can be removed.
 try:  # pragma: no cover — import-time wiring
     from playwright.sync_api import Error as _PlaywrightError
 except ImportError:
@@ -380,8 +397,8 @@ class RenderThread:
         shutdown_timeout: float = BROWSER_SHUTDOWN_TIMEOUT,
         max_consecutive_failures: int = _DEFAULT_MAX_CONSECUTIVE_FAILURES,
         restart_backoffs: tuple[float, ...] = _DEFAULT_RESTART_BACKOFFS,
-        queue_size: int = _DEFAULT_QUEUE_SIZE,
-        submit_timeout: float = _DEFAULT_SUBMIT_TIMEOUT,
+        queue_size: int = RENDER_QUEUE_SIZE,
+        submit_timeout: float = RENDER_SUBMIT_TIMEOUT,
         launch_fn: LaunchFn | None = None,
         render_fn: RenderFn | None = None,
         teardown_fn: TeardownFn | None = None,

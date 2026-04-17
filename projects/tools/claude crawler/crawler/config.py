@@ -26,6 +26,17 @@ BROWSER_SHUTDOWN_TIMEOUT = 5.0  # seconds before SIGKILL fallback
 # so the previous unconditional 5s wait was pure latency tax). Operators
 # who genuinely need it can set to e.g. 1500ms.
 RENDER_WAIT_NETWORKIDLE_MS = 0
+# Bounded queue: workers experience natural backpressure when render is the
+# throughput bottleneck. submit() blocks up to RENDER_SUBMIT_TIMEOUT.
+RENDER_QUEUE_SIZE = 16
+RENDER_SUBMIT_TIMEOUT = 60.0
+
+# --- Engine writer round-trip ---
+# Worker waits up to this long for the writer's commit acknowledgement
+# before treating the write as failed (counters skip, page stays 'pending'
+# for resume). Generous bound; writer-down is detected sooner via
+# WriterUnavailableError from the bounded queue.put.
+WRITER_REPLY_TIMEOUT = 10.0
 
 # --- Progress reporting ---
 PROGRESS_FLUSH_MS = 250  # coalescer flush window

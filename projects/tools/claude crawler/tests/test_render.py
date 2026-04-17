@@ -9,7 +9,6 @@ import os
 import sys
 import threading
 import time
-from concurrent.futures import TimeoutError as FuturesTimeoutError
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 

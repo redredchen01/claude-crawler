@@ -191,7 +191,6 @@ class TestWritePage:
 
     def test_write_page_with_reply_resolves_on_commit(self, started_writer, db_path, scan_job_id):
         """B1: PageWriteRequest with reply Future is resolved with True after commit."""
-        from concurrent.futures import Future
         page_id = started_writer.insert_page(scan_job_id, "https://example.com/r1", 0)
         reply: Future = Future()
         started_writer.write_page(PageWriteRequest(
@@ -209,9 +208,6 @@ class TestWritePage:
     ):
         """B1: PageWriteRequest with reply Future receives exception when the
         per-message handler rolls back. Counter coherence depends on this."""
-        from concurrent.futures import Future
-        from unittest.mock import patch
-
         page_id = started_writer.insert_page(scan_job_id, "https://example.com/r2", 0)
         reply: Future = Future()
         # Force save_resource_with_tags to raise so _write_page rolls back.

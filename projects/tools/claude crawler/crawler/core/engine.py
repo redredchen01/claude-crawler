@@ -32,7 +32,8 @@ from urllib.robotparser import RobotFileParser
 
 from crawler.config import (
     MAX_DEPTH, MAX_PAGES, RENDER_TIMEOUT, REQ_PER_SEC_PER_DOMAIN,
-    USER_AGENT, WORKER_COUNT, ZERO_RESOURCE_RETRY_PAGE_TYPES,
+    USER_AGENT, WORKER_COUNT, WRITER_REPLY_TIMEOUT,
+    ZERO_RESOURCE_RETRY_PAGE_TYPES,
 )
 from crawler.core.fetcher import fetch_page, needs_js_rendering
 from crawler.core.frontier import Frontier
@@ -50,12 +51,9 @@ from crawler.storage import (
 
 logger = logging.getLogger(__name__)
 
-# Generous bound for the writer's write_page → commit round-trip. Workers
-# wait at most this long before giving up (and not incrementing counters).
-# Should comfortably exceed the writer's per-message processing time even
-# under high load; a true writer death is caught by WriterUnavailableError
-# from the bounded queue.put much sooner than this.
-WRITE_REPLY_TIMEOUT = 10.0
+# Module-local alias so callers continue using the short name; the
+# tunable lives in crawler.config (WRITER_REPLY_TIMEOUT).
+WRITE_REPLY_TIMEOUT = WRITER_REPLY_TIMEOUT
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +133,32 @@ def _emit_progress(ctx: _WorkerContext, current_url: str, status: str = "running
     })
 
 
+def _write_and_count(ctx: _WorkerContext, request: PageWriteRequest,
+                     resources_added: int = 0) -> None:
+    """Submit a write_page with a reply Future; only increment counters if
+    the writer confirms commit. Used by both success and failure paths so
+    counter coherence (B1) holds regardless of write outcome.
+
+    On any failure (rollback, WriterUnavailableError, reply timeout), the
+    page row stays in its current DB state ('pending' if write_page never
+    ran the UPDATE) and counters are NOT incremented. Resume picks up
+    'pending' rows on the next run.
+    """
+    request.reply = Future()
+    try:
+        ctx.writer.write_page(request)
+        request.reply.result(timeout=WRITE_REPLY_TIMEOUT)
+    except BaseException as exc:
+        logger.warning(
+            "write_page failed for page_id=%s: %s — counters not incremented",
+            request.page_id, exc,
+        )
+        return
+    with ctx.counters_lock:
+        ctx.counters.pages_done += 1
+        ctx.counters.resources_found += resources_added
+
+
 def _process_one_page(url: str, depth: int, page_id: int,
                       ctx: _WorkerContext) -> None:
     """Worker entry point. Idempotent on per-page failures — never raises."""
@@ -143,7 +167,7 @@ def _process_one_page(url: str, depth: int, page_id: int,
             allowed = _check_robots(url, ctx.robots_cache, USER_AGENT)
         if not allowed:
             logger.info("Blocked by robots.txt: %s", url)
-            ctx.writer.write_page(PageWriteRequest(
+            _write_and_count(ctx, PageWriteRequest(
                 scan_job_id=ctx.scan_job_id,
                 page_id=page_id,
                 parse_result=None,
@@ -151,8 +175,6 @@ def _process_one_page(url: str, depth: int, page_id: int,
                 page_type="other",
                 failure_reason="robots_blocked",
             ))
-            with ctx.counters_lock:
-                ctx.counters.pages_done += 1
             _emit_progress(ctx, url)
             return
 
@@ -161,7 +183,7 @@ def _process_one_page(url: str, depth: int, page_id: int,
         html, failure_reason = _fetch_html(ctx, url)
 
         if html is None:
-            ctx.writer.write_page(PageWriteRequest(
+            _write_and_count(ctx, PageWriteRequest(
                 scan_job_id=ctx.scan_job_id,
                 page_id=page_id,
                 parse_result=None,
@@ -169,8 +191,6 @@ def _process_one_page(url: str, depth: int, page_id: int,
                 page_type="other",
                 failure_reason=failure_reason or "fetch_failed",
             ))
-            with ctx.counters_lock:
-                ctx.counters.pages_done += 1
             _emit_progress(ctx, url)
             return
 
@@ -191,30 +211,15 @@ def _process_one_page(url: str, depth: int, page_id: int,
         for resource in result.resources:
             resource.url = _normalize_url(resource.url)
 
-        # B1: await the writer's commit acknowledgement before incrementing
-        # counters. If the write rolls back (FK violation, persistent disk
-        # error, writer-dead WriterUnavailableError), the page row stays
-        # 'pending' for resume — and our in-memory counters reflect reality
-        # rather than overstating success.
-        write_reply: Future = Future()
-        try:
-            ctx.writer.write_page(PageWriteRequest(
-                scan_job_id=ctx.scan_job_id,
-                page_id=page_id,
-                parse_result=result,
-                page_status="fetched",
-                page_type=result.page_type,
-                reply=write_reply,
-            ))
-            write_reply.result(timeout=WRITE_REPLY_TIMEOUT)
-        except BaseException as exc:
-            logger.warning(
-                "write_page failed for %s: %s — counters not incremented", url, exc,
-            )
-        else:
-            with ctx.counters_lock:
-                ctx.counters.pages_done += 1
-                ctx.counters.resources_found += len(result.resources)
+        # B1: counter coherence via reply Future — only incremented on
+        # confirmed commit. _write_and_count handles the await + skip-on-fail.
+        _write_and_count(ctx, PageWriteRequest(
+            scan_job_id=ctx.scan_job_id,
+            page_id=page_id,
+            parse_result=result,
+            page_status="fetched",
+            page_type=result.page_type,
+        ), resources_added=len(result.resources))
 
         # Stage discovered links under Frontier's lock (microsecond critical
         # section), then flush the whole batch via one writer round-trip
@@ -270,6 +275,12 @@ def _try_render(ctx: _WorkerContext, url: str) -> str | None:
     silently turning into a failed page.
     """
     if ctx.render_thread.is_disabled():
+        # Concurrent workers may both pass this check before either set()s
+        # the flag — harmless in practice because ProgressCoalescer
+        # collapses adjacent "running" events with the same warning. The
+        # invariant is "user sees the warning at least once", not "exactly
+        # once". An atomic compare-and-set would require an extra Lock
+        # for cosmetic dedup; not worth it.
         if not ctx.render_disabled_warned.is_set():
             ctx.render_disabled_warned.set()
             ctx.coalescer.emit({

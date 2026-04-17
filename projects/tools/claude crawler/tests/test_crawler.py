@@ -38,9 +38,13 @@ def _make_frontier(seed_url: str, max_pages: int = 100, max_depth: int = 3,
                    *, auto_seed: bool = True):
     """Construct a Frontier with a fake writer for unit testing.
 
-    Wraps push() to auto-flush so unit tests can keep treating push as if
-    it immediately enqueues. Production callers (the engine) batch+flush
-    explicitly; unit tests don't need to mirror that ceremony.
+    Back-compat shim: wraps push() to auto-flush and pop() to return
+    2-tuples, preserving the pre-batch Frontier API used by ~17 inherited
+    unit tests (TestFrontierBFS, TestFrontierDomainFilter, etc.). New
+    tests should construct ``Frontier`` directly and assert on 3-tuple pop
+    results — see TestFrontierWriterMode for the canonical pattern. This
+    shim exists to avoid a 17-test rewrite during B5 and is a candidate
+    for removal once those tests migrate.
     """
     f = Frontier(
         seed_url, max_pages=max_pages, max_depth=max_depth,
@@ -923,15 +927,18 @@ class TestFrontierWriterMode:
         # No new writer calls.
         assert writer.insert_pages_batch.call_count == seed_calls
 
-    def test_flush_batch_failure_clears_visited_for_re_discovery(self):
-        """B2: when flush_batch fails, the staged URLs are removed from
-        _visited so they remain eligible for re-discovery in the same run
-        if the writer recovers (transient saturation)."""
+    def test_flush_batch_failure_keeps_visited_to_prevent_double_process(self):
+        """B2 corrected (post-review): when flush_batch fails, staged URLs
+        stay in _visited so concurrent re-discovery cannot double-stage
+        them. They go back into _pending_batch for retry via the next
+        flush — re-discovery is intentionally blocked because a successful
+        retry + a re-pushed duplicate would put the same page_id in the
+        queue twice and cause the page to be processed twice (counter
+        inflation)."""
         from crawler.core.frontier import Frontier
         from unittest.mock import MagicMock
 
         writer = MagicMock()
-        # Seed flush succeeds; the second batch flush raises.
         writer.insert_pages_batch.side_effect = [[1], RuntimeError("transient")]
 
         frontier = Frontier(
@@ -940,31 +947,24 @@ class TestFrontierWriterMode:
         )
         frontier.push("https://example.com/a", 1)
         frontier.push("https://example.com/b", 1)
-        # Confirm staged URLs entered _visited before the flush.
-        with frontier._lock:
-            assert "https://example.com/a" in frontier._visited
-            assert "https://example.com/b" in frontier._visited
 
         with pytest.raises(RuntimeError, match="transient"):
             frontier.flush_batch()
 
-        # B2 contract: visited entries removed so re-discovery succeeds.
+        # Visited entries persist — re-discovery cannot re-stage them.
         with frontier._lock:
-            assert "https://example.com/a" not in frontier._visited
-            assert "https://example.com/b" not in frontier._visited
-            # And they're back in pending_batch for retry.
+            assert "https://example.com/a" in frontier._visited
+            assert "https://example.com/b" in frontier._visited
+            # They're back in pending_batch for the next flush attempt.
             assert ("https://example.com/a", 1) in frontier._pending_batch
             assert ("https://example.com/b", 1) in frontier._pending_batch
 
-        # Re-pushing the same URL after the failure works (it's not blocked
-        # by the visited set anymore).
+        # Re-pushing the same URL after the failure is a no-op (visited).
         frontier.push("https://example.com/a", 1)
-        # Pending_batch now has the original 2 (rollback) + 1 freshly
-        # re-pushed `a` (because the rollback also removed `a` from visited
-        # so the second push re-stages it).
         with frontier._lock:
             stages = [u for u, _ in frontier._pending_batch]
-        assert stages.count("https://example.com/a") == 2
+        # Still exactly one entry for `a` (no duplicate from re-push).
+        assert stages.count("https://example.com/a") == 1
 
     def test_flush_batch_failure_keeps_pending_for_retry(self):
         from crawler.core.frontier import Frontier
@@ -1089,9 +1089,10 @@ class TestEngineShutdownBound:
         )
 
 
-class TestPhaseBRegressions:
-    """B6/R17: behavioral regression tests for the P1 findings the prior
-    review surfaced. Each test exercises a real failure mode end-to-end."""
+class TestHighFanoutAndWriterDeathRegressions:
+    """Behavioral regression tests for the P1 findings prior reviews surfaced.
+    Plan trace: B6/R17a (high-fanout) + B6/R17b (writer-death abort).
+    Each test exercises a real failure mode end-to-end."""
 
     def test_high_fanout_page_does_not_lock_workers(self, fast_engine_patches):
         """R17a: a 5K-link seed page must complete discovery in well under

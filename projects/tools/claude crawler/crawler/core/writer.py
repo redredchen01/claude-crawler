@@ -263,8 +263,11 @@ class WriterThread:
             try:
                 self._write_page(conn, request)
             except BaseException as exc:
-                # Resolve reply Future with the failure so the worker can
-                # avoid incrementing counters for a write that didn't land.
+                # BaseException intentional: even on SystemExit/Keyboard-
+                # Interrupt arriving in the writer thread, we want the
+                # worker's reply Future to resolve so it doesn't hang on
+                # future.result(). The `not done()` guard is defensive —
+                # a future caller could already have cancelled it.
                 if request.reply is not None and not request.reply.done():
                     request.reply.set_exception(exc)
                 raise
