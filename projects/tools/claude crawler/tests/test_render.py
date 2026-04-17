@@ -377,6 +377,130 @@ class TestStartShutdownGuards:
         rt.shutdown(timeout=2.0)
 
 
+class TestDaemonAndAtexit:
+    """A2: thread is daemon, atexit handler kills Chromium proc."""
+
+    def test_render_thread_is_daemon(self, thread_factory):
+        rt = thread_factory(
+            launch_fn=lambda: SimpleNamespace(),
+            render_fn=lambda h, u, t: "",
+            teardown_fn=lambda h, t: None,
+        )
+        assert rt._thread is not None
+        assert rt._thread.daemon is True
+
+    def test_atexit_handler_kills_alive_proc(self):
+        # Build a RenderThread instance without starting it.
+        rt = RenderThread(
+            launch_fn=lambda: SimpleNamespace(),
+            render_fn=lambda h, u, t: "",
+            teardown_fn=lambda h, t: None,
+        )
+        proc = MagicMock()
+        proc.poll.return_value = None  # still alive
+        proc.pid = 99999
+        rt._handle = SimpleNamespace(proc=proc, user_data_dir=None)
+
+        with patch("os.kill") as mock_kill:
+            rt._atexit_kill_chromium()
+            mock_kill.assert_called_once_with(99999, render_mod.signal.SIGKILL)
+
+    def test_atexit_handler_skips_already_dead_proc(self):
+        rt = RenderThread(
+            launch_fn=lambda: SimpleNamespace(),
+            render_fn=lambda h, u, t: "",
+            teardown_fn=lambda h, t: None,
+        )
+        proc = MagicMock()
+        proc.poll.return_value = 0  # already exited
+        proc.pid = 99999
+        rt._handle = SimpleNamespace(proc=proc, user_data_dir=None)
+
+        with patch("os.kill") as mock_kill:
+            rt._atexit_kill_chromium()
+            mock_kill.assert_not_called()
+
+    def test_atexit_handler_swallows_oskill_lookup_error(self):
+        # PID went away between poll() and os.kill — tolerate gracefully.
+        rt = RenderThread(
+            launch_fn=lambda: SimpleNamespace(),
+            render_fn=lambda h, u, t: "",
+            teardown_fn=lambda h, t: None,
+        )
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.pid = 99999
+        rt._handle = SimpleNamespace(proc=proc, user_data_dir=None)
+
+        with patch("os.kill", side_effect=ProcessLookupError):
+            # Should not raise.
+            rt._atexit_kill_chromium()
+
+    def test_atexit_handler_with_no_handle_is_noop(self):
+        rt = RenderThread(
+            launch_fn=lambda: SimpleNamespace(),
+            render_fn=lambda h, u, t: "",
+            teardown_fn=lambda h, t: None,
+        )
+        # _handle stays None.
+        rt._atexit_kill_chromium()  # must not raise
+
+
+class TestForceKillWatchdog:
+    """A4: shutdown spawns a watchdog that SIGKILLs Chromium PID at deadline."""
+
+    def test_force_kill_pid_after_signals_alive_pid(self):
+        from crawler.core.render import _force_kill_pid_after
+        with patch("os.kill") as mock_kill:
+            # First call: probe (signal 0) succeeds → second call: SIGKILL.
+            mock_kill.side_effect = [None, None]
+            _force_kill_pid_after(99999, delay=0.05)
+            assert mock_kill.call_count == 2
+            assert mock_kill.call_args_list[1][0] == (99999, render_mod.signal.SIGKILL)
+
+    def test_force_kill_pid_after_skips_dead_pid(self):
+        from crawler.core.render import _force_kill_pid_after
+        with patch("os.kill", side_effect=ProcessLookupError) as mock_kill:
+            _force_kill_pid_after(99999, delay=0.05)
+            # Probe raised → no SIGKILL attempted.
+            assert mock_kill.call_count == 1
+
+    def test_force_kill_pid_after_handles_race_between_probe_and_kill(self):
+        from crawler.core.render import _force_kill_pid_after
+        # Probe succeeds, SIGKILL races with natural death → ProcessLookupError.
+        with patch("os.kill", side_effect=[None, ProcessLookupError]):
+            # Should not raise.
+            _force_kill_pid_after(99999, delay=0.05)
+
+    def test_shutdown_spawns_watchdog_thread(self, thread_factory):
+        # Build a thread with a fake handle that exposes a .proc.pid.
+        proc_stub = SimpleNamespace(pid=12345, poll=lambda: None)
+        handle = SimpleNamespace(proc=proc_stub, alive=True)
+
+        def launch():
+            return handle
+        rendered = threading.Event()
+        def render(h, u, t):
+            rendered.set()
+            return "<html/>"
+
+        rt = thread_factory(
+            launch_fn=launch, render_fn=render,
+            teardown_fn=lambda h, t: None,
+        )
+        rt.submit("https://x/").result(timeout=2.0)
+        assert rendered.is_set()
+
+        # Patch _force_kill_pid_after at the module level so we can spy.
+        with patch("crawler.core.render._force_kill_pid_after") as mock_kill:
+            rt.shutdown(timeout=2.0)
+            # Watchdog thread was spawned; its target is _force_kill_pid_after.
+            # It runs in its own daemon thread, but the module symbol patched
+            # is what the watchdog target points to. Wait briefly for it to fire.
+            time.sleep(0.1)
+            mock_kill.assert_called_once_with(12345, 2.0)
+
+
 class TestKillProcHelper:
     def test_kill_proc_skips_already_exited(self):
         from crawler.core.render import _kill_proc

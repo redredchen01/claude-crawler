@@ -22,7 +22,7 @@ from unittest.mock import patch
 
 import pytest
 
-from crawler.core.writer import WriterThread
+from crawler.core.writer import WriterThread, WriterUnavailableError
 from crawler.models import (
     InsertPageRequest, PageWriteRequest, ParseResult, Resource,
     ScanJobUpdateRequest,
@@ -77,6 +77,11 @@ def _wait_until_drained(writer: WriterThread, timeout: float = 2.0) -> None:
 
 
 class TestStartShutdown:
+    def test_writer_thread_is_daemon(self, started_writer):
+        # A2: daemon=True so the interpreter can exit even mid-loop.
+        assert started_writer._thread is not None
+        assert started_writer._thread.daemon is True
+
     def test_double_start_raises(self, db_path):
         writer = WriterThread(db_path)
         writer.start()
@@ -445,3 +450,80 @@ class TestConcurrent:
             ).fetchone()[0]
         assert fetched == 800
         assert resource_count == 800
+
+
+class TestHealthSurface:
+    """A1: bounded put + is_alive() + WriterUnavailableError."""
+
+    def test_is_alive_before_start(self, db_path):
+        writer = WriterThread(db_path)
+        assert writer.is_alive() is False
+
+    def test_is_alive_after_start(self, started_writer):
+        assert started_writer.is_alive() is True
+
+    def test_is_alive_after_shutdown(self, db_path):
+        writer = WriterThread(db_path)
+        writer.start()
+        writer.shutdown(timeout=2.0)
+        assert writer.is_alive() is False
+
+    def test_write_page_on_full_queue_raises_within_timeout(self, db_path, scan_job_id):
+        # Don't start the writer — queue stays full, producer blocks at maxsize.
+        writer = WriterThread(db_path, queue_size=2, producer_timeout=0.3)
+
+        # Fill the queue so the next put will block.
+        writer.write_page(PageWriteRequest(
+            scan_job_id=scan_job_id, page_id=1, parse_result=None,
+            page_status="failed", page_type="other",
+        ))
+        writer.write_page(PageWriteRequest(
+            scan_job_id=scan_job_id, page_id=2, parse_result=None,
+            page_status="failed", page_type="other",
+        ))
+
+        start = time.monotonic()
+        with pytest.raises(WriterUnavailableError, match="queue full"):
+            writer.write_page(PageWriteRequest(
+                scan_job_id=scan_job_id, page_id=3, parse_result=None,
+                page_status="failed", page_type="other",
+            ))
+        elapsed = time.monotonic() - start
+        # Should fail close to producer_timeout (0.3s), not hang.
+        assert 0.2 < elapsed < 1.0, f"unexpected elapsed: {elapsed}"
+
+    def test_insert_page_after_writer_death_raises(self, db_path, scan_job_id):
+        writer = WriterThread(db_path)
+        writer.start()
+        # Force the thread to exit by joining after sentinel — leaves writer dead
+        # but reachable via the original instance.
+        writer.shutdown(timeout=2.0)
+        assert writer.is_alive() is False
+
+        with pytest.raises(WriterUnavailableError, match="not running"):
+            writer.insert_page(scan_job_id, "https://example.com/x", 0)
+
+    def test_shutdown_when_queue_full_does_not_hang(self, db_path, scan_job_id):
+        # Writer never starts → its consumer never drains → queue fills.
+        writer = WriterThread(db_path, queue_size=2, producer_timeout=0.2)
+        # Bypass the public _enqueue (which would raise) and put directly so we
+        # can simulate "queue is full and writer is in some bad state".
+        writer._queue.put_nowait("dummy1")
+        writer._queue.put_nowait("dummy2")
+
+        start = time.monotonic()
+        # shutdown() must not hang on the sentinel put even though queue is full.
+        writer.shutdown(timeout=1.0)
+        elapsed = time.monotonic() - start
+        assert elapsed < 1.5, f"shutdown hung: {elapsed}s"
+
+    def test_insert_page_future_timeout_raises_writer_unavailable(self, db_path, scan_job_id):
+        # Pre-fill queue with InsertPageRequests that will never be drained
+        # (writer never starts), so the synchronous insert_page below blocks
+        # waiting for its Future to resolve.
+        writer = WriterThread(db_path, queue_size=10, producer_timeout=0.2)
+        # Don't start — Future will never resolve.
+        with pytest.raises(WriterUnavailableError):
+            # Tight Future timeout AND tight producer timeout — first the put
+            # succeeds (queue has room), then the Future never resolves.
+            writer.insert_page(scan_job_id, "https://example.com/y", 0, timeout=0.3)

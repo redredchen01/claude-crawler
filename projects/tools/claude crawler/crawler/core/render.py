@@ -17,10 +17,12 @@ Lifecycle:
       then ``terminate()``/``kill()`` on the Chromium PID we own.
 """
 
+import atexit
 import logging
 import os
 import queue
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -227,6 +229,34 @@ def _real_teardown(handle: _ChromiumHandle, timeout: float) -> None:
             shutil.rmtree(handle.user_data_dir, ignore_errors=True)
 
 
+def _force_kill_pid_after(pid: int, delay: float) -> None:
+    """Sleep ``delay`` seconds, then SIGKILL ``pid`` if still alive.
+
+    Used as a daemon watchdog by RenderThread.shutdown so the shutdown bound
+    is enforced regardless of where Playwright/Chromium might be hung. Safe
+    to call against an already-dead PID — the lookup error is swallowed.
+    """
+    time.sleep(delay)
+    try:
+        os.kill(pid, 0)  # probe — raises ProcessLookupError if already dead
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        logger.error("Watchdog cannot signal PID %d (permission denied)", pid)
+        return
+    try:
+        os.kill(pid, signal.SIGKILL)
+        logger.warning(
+            "Watchdog SIGKILLed Chromium PID %d after %.1fs deadline",
+            pid, delay,
+        )
+    except ProcessLookupError:
+        # Race: died between probe and kill. Fine.
+        pass
+    except Exception:
+        logger.exception("Watchdog SIGKILL of PID %d raised", pid)
+
+
 def _kill_proc(proc: subprocess.Popen, timeout: float) -> None:
     if proc.poll() is not None:
         return
@@ -304,14 +334,25 @@ class RenderThread:
         self._consecutive_failures = 0
         self._disabled = False
 
+        # Last-resort safety net: if the Python interpreter exits without the
+        # normal shutdown path running (Streamlit reload, daemon-thread orphan,
+        # uncaught exception in parent), atexit fires and SIGKILLs the
+        # Chromium PID we own. The thread itself is daemon=True so the
+        # interpreter can exit at all.
+        atexit.register(self._atexit_kill_chromium)
+
     # --- public API ---
 
     def start(self) -> None:
         if self._started:
             raise RuntimeError("RenderThread already started")
         self._started = True
+        # daemon=True so the Python interpreter can exit even when the render
+        # thread is mid-loop or blocked on Chromium I/O. The atexit handler is
+        # the safety net for the Chromium subprocess specifically (it outlives
+        # the interpreter unless explicitly killed).
         self._thread = threading.Thread(
-            target=self._run, name="crawler-render", daemon=False,
+            target=self._run, name="crawler-render", daemon=True,
         )
         self._thread.start()
 
@@ -322,14 +363,42 @@ class RenderThread:
         return future
 
     def shutdown(self, timeout: float | None = None) -> None:
+        """Signal shutdown; spawn a watchdog that hard-kills Chromium at deadline.
+
+        The watchdog is the load-bearing piece: even if the normal teardown
+        path (browser.close → playwright.stop → terminate Popen) hangs because
+        Chromium is wedged or Playwright's driver is unresponsive, the
+        watchdog daemon SIGKILLs the Chromium PID we own at ``timeout``.
+        """
         if self._shutdown_called:
             return
         self._shutdown_called = True
         self._shutdown_event.set()
         if self._thread is None:
             return
-        self._queue.put(_SHUTDOWN_SENTINEL)
+
         wait = timeout if timeout is not None else self._shutdown_timeout + 5.0
+
+        # Spawn watchdog BEFORE join so the deadline applies even if the join
+        # itself returns quickly. Capture the current PID; if normal teardown
+        # killed it cleanly, the SIGKILL becomes a no-op (ProcessLookupError).
+        chromium_pid = self.chromium_pid
+        if chromium_pid is not None:
+            watchdog = threading.Thread(
+                target=_force_kill_pid_after,
+                args=(chromium_pid, wait),
+                name=f"crawler-render-watchdog-{chromium_pid}",
+                daemon=True,
+            )
+            watchdog.start()
+
+        try:
+            self._queue.put(_SHUTDOWN_SENTINEL, timeout=wait)
+        except queue.Full:
+            logger.error(
+                "RenderThread queue full during shutdown — sentinel not enqueued"
+            )
+
         self._thread.join(timeout=wait)
         if self._thread.is_alive():
             logger.error("RenderThread did not exit within %.1fs", wait)
@@ -340,6 +409,35 @@ class RenderThread:
         if self._handle is None or getattr(self._handle, "proc", None) is None:
             return None
         return self._handle.proc.pid
+
+    def _atexit_kill_chromium(self) -> None:
+        """Last-resort SIGKILL of Chromium PID at interpreter exit.
+
+        Fires only when the normal shutdown path didn't run (Streamlit reload,
+        daemon-thread orphan, etc.). Idempotent and noisy on errors so leaks
+        are observable in logs. Must not raise — atexit handlers that raise
+        get swallowed and obscure other handlers.
+        """
+        try:
+            handle = self._handle
+            if handle is None:
+                return
+            proc = getattr(handle, "proc", None)
+            if proc is None:
+                return
+            if proc.poll() is not None:
+                return  # already exited
+            try:
+                os.kill(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # already dead between poll and kill
+            # Also clean up the user_data_dir tmpdir we created.
+            user_data_dir = getattr(handle, "user_data_dir", None)
+            if user_data_dir:
+                shutil.rmtree(user_data_dir, ignore_errors=True)
+        except Exception:
+            # atexit handlers must not raise.
+            pass
 
     # --- internal ---
 

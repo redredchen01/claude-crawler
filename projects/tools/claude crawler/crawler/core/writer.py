@@ -19,7 +19,7 @@ import logging
 import queue
 import sqlite3
 import threading
-from concurrent.futures import Future
+from concurrent.futures import Future, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
 
 from crawler.models import (
@@ -33,17 +33,26 @@ _SHUTDOWN_SENTINEL = None
 _DEFAULT_QUEUE_SIZE = 100
 _DEFAULT_INSERT_TIMEOUT = 5.0
 _DEFAULT_SHUTDOWN_TIMEOUT = 5.0
+_DEFAULT_PRODUCER_TIMEOUT = 5.0  # bounded queue.put on producer paths
 _QUEUE_GET_TIMEOUT = 0.5
 
 _TERMINAL_JOB_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
 
+class WriterUnavailableError(RuntimeError):
+    """Raised when the writer thread is dead or unable to accept work within the
+    producer timeout. Callers should treat this as terminal — the writer is not
+    recoverable within the current scan."""
+
+
 class WriterThread:
     """Single writer thread owning one SQLite connection for the lifetime of a crawl."""
 
-    def __init__(self, db_path: str, queue_size: int = _DEFAULT_QUEUE_SIZE):
+    def __init__(self, db_path: str, queue_size: int = _DEFAULT_QUEUE_SIZE,
+                 producer_timeout: float = _DEFAULT_PRODUCER_TIMEOUT):
         self._db_path = db_path
         self._queue: queue.Queue = queue.Queue(maxsize=queue_size)
+        self._producer_timeout = producer_timeout
         self._thread: threading.Thread | None = None
         self._started = False
         self._shutdown_called = False
@@ -59,30 +68,71 @@ class WriterThread:
         if self._started:
             raise RuntimeError("WriterThread already started")
         self._started = True
+        # daemon=True so the Python interpreter can exit cleanly even when the
+        # writer is mid-loop. In-flight writes are lost on hard kill, but each
+        # BEGIN IMMEDIATE/COMMIT is atomic so partial transactions don't leave
+        # torn DB state. Pages whose writes didn't commit stay status='pending'
+        # and are picked up by resume on the next run.
         self._thread = threading.Thread(
-            target=self._run, name="crawler-writer", daemon=False,
+            target=self._run, name="crawler-writer", daemon=True,
         )
         self._thread.start()
+
+    def is_alive(self) -> bool:
+        """True if the writer thread is started and still processing.
+
+        Producers should poll this when they need a fast-path "writer is dead"
+        signal; the bounded `put` calls also raise :class:`WriterUnavailableError`
+        on timeout, so this is an optimization, not a requirement for safety.
+        """
+        return self._thread is not None and self._thread.is_alive()
 
     def insert_page(self, scan_job_id: int, url: str, depth: int,
                     timeout: float = _DEFAULT_INSERT_TIMEOUT) -> int:
         """Synchronously insert (or look up) a 'pending' page row; return its id.
 
         Idempotent on (scan_job_id, url): duplicate URLs return the existing
-        page_id without inserting a new row.
+        page_id without inserting a new row. Raises :class:`WriterUnavailableError`
+        if the writer queue is full or the writer thread has died.
         """
         future: Future = Future()
         request = InsertPageRequest(
             scan_job_id=scan_job_id, url=url, depth=depth, future=future,
         )
-        self._queue.put(request)
-        return future.result(timeout=timeout)
+        self._enqueue(request)
+        try:
+            return future.result(timeout=timeout)
+        except FuturesTimeoutError as exc:
+            # Future timeout while waiting for writer — likely the writer died
+            # mid-message or the queue is backed up beyond expectations.
+            raise WriterUnavailableError(
+                f"insert_page Future timed out after {timeout}s "
+                f"(writer alive={self.is_alive()})"
+            ) from exc
 
     def write_page(self, request: PageWriteRequest) -> None:
-        self._queue.put(request)
+        """Fire-and-forget per-page write. Raises WriterUnavailableError if the
+        writer queue is full or the writer thread has died."""
+        self._enqueue(request)
 
     def update_scan_job(self, request: ScanJobUpdateRequest) -> None:
-        self._queue.put(request)
+        """Terminal scan_job state update. Raises WriterUnavailableError if the
+        writer queue is full or the writer thread has died."""
+        self._enqueue(request)
+
+    def _enqueue(self, item) -> None:
+        """Bounded put with WriterUnavailableError on timeout / dead writer."""
+        if self._thread is not None and not self._thread.is_alive():
+            raise WriterUnavailableError(
+                "WriterThread is not running (thread exited)"
+            )
+        try:
+            self._queue.put(item, timeout=self._producer_timeout)
+        except queue.Full as exc:
+            raise WriterUnavailableError(
+                f"WriterThread queue full after {self._producer_timeout}s "
+                f"(alive={self.is_alive()})"
+            ) from exc
 
     def shutdown(self, timeout: float = _DEFAULT_SHUTDOWN_TIMEOUT) -> None:
         """Enqueue sentinel, join the thread, and re-raise any captured fatal error."""
@@ -91,7 +141,16 @@ class WriterThread:
         self._shutdown_called = True
         if self._thread is None:
             return
-        self._queue.put(_SHUTDOWN_SENTINEL)
+        # Bounded put — if the queue is jammed AND the thread is wedged we
+        # don't want shutdown itself to hang forever. The join below catches
+        # the case where the thread is alive but not draining.
+        try:
+            self._queue.put(_SHUTDOWN_SENTINEL, timeout=self._producer_timeout)
+        except queue.Full:
+            logger.error(
+                "WriterThread queue full during shutdown — sentinel not "
+                "enqueued; thread may be wedged"
+            )
         self._thread.join(timeout=timeout)
         if self._thread.is_alive():
             logger.error("WriterThread did not exit within %.1fs", timeout)
