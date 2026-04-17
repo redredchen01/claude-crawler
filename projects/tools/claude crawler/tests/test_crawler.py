@@ -373,7 +373,7 @@ class TestEngine:
             return f'<html><body><p>{body}</p><a href="{link}">Next</a></body></html>'
         return f"<html><body><p>{body}</p></body></html>"
 
-    @patch("crawler.core.engine.fetch_page")
+    @patch("crawler.core.engine.fetch_page_with_cache_tracking")
     def test_basic_crawl(self, mock_fetch, fast_engine_patches):
         html_seed = self._make_html("seed page", "https://example.com/page2")
         html_page2 = self._make_html("page two")
@@ -383,7 +383,7 @@ class TestEngine:
             "https://example.com/": html_seed,
             "https://example.com/page2": html_page2,
         }
-        mock_fetch.side_effect = lambda url, *a, **kw: responses.get(url)
+        mock_fetch.side_effect = lambda url, *a, **kw: (responses.get(url), False)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
@@ -394,9 +394,9 @@ class TestEngine:
             assert job_id is not None
             assert mock_fetch.call_count == 2
 
-    @patch("crawler.core.engine.fetch_page")
+    @patch("crawler.core.engine.fetch_page_with_cache_tracking")
     def test_progress_queue(self, mock_fetch, fast_engine_patches):
-        mock_fetch.return_value = self._make_html("content only")
+        mock_fetch.return_value = (self._make_html("content only"), False)
 
         pq = queue.Queue()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -411,10 +411,10 @@ class TestEngine:
         assert len(messages) >= 1
         assert messages[-1]["status"] == "completed"
 
-    @patch("crawler.core.engine.fetch_page")
+    @patch("crawler.core.engine.fetch_page_with_cache_tracking")
     def test_respects_max_pages(self, mock_fetch, fast_engine_patches):
         """Engine stops after max_pages."""
-        mock_fetch.return_value = self._make_html("page", "https://example.com/next")
+        mock_fetch.return_value = (self._make_html("page", "https://example.com/next"), False)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
@@ -422,9 +422,9 @@ class TestEngine:
                       max_pages=2, req_per_sec=20.0)
             assert mock_fetch.call_count <= 2
 
-    @patch("crawler.core.engine.fetch_page")
+    @patch("crawler.core.engine.fetch_page_with_cache_tracking")
     def test_handles_fetch_failure(self, mock_fetch, fast_engine_patches):
-        mock_fetch.return_value = None
+        mock_fetch.return_value = (None, False)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
@@ -433,9 +433,9 @@ class TestEngine:
             assert job_id is not None
 
     @patch("crawler.core.engine._check_robots", return_value=True)
-    @patch("crawler.core.engine.fetch_page")
+    @patch("crawler.core.engine.fetch_page_with_cache_tracking")
     def test_scan_job_completed(self, mock_fetch, mock_robots, fast_engine_patches):
-        mock_fetch.return_value = self._make_html("done")
+        mock_fetch.return_value = (self._make_html("done"), False)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
@@ -448,7 +448,7 @@ class TestEngine:
             assert job.pages_scanned >= 1
 
     @patch("crawler.core.engine._check_robots", return_value=True)
-    @patch("crawler.core.engine.fetch_page")
+    @patch("crawler.core.engine.fetch_page_with_cache_tracking")
     def test_resources_persisted_after_crawl(self, mock_fetch, mock_robots, fast_engine_patches):
         """Crawled detail pages should have resources saved to DB."""
         html = (
@@ -459,7 +459,7 @@ class TestEngine:
             '<span>views 1234</span>'
             '</article></body></html>'
         )
-        mock_fetch.return_value = html
+        mock_fetch.return_value = (html, False)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
@@ -487,7 +487,7 @@ class TestEngineConcurrent:
         )
         return f"<html><body><p>{body}</p>{link_html}</body></html>"
 
-    @patch("crawler.core.engine.fetch_page")
+    @patch("crawler.core.engine.fetch_page_with_cache_tracking")
     def test_fifty_pages_via_concurrent_workers(self, mock_fetch, fast_engine_patches):
         """50 mocked URLs → all written via writer; terminal completed event."""
         # Build a graph of 50 interlinked pages: page0 links to page1..page49.
@@ -495,7 +495,7 @@ class TestEngineConcurrent:
         responses = {"https://example.com/": self._make_html("seed", urls)}
         for url in urls:
             responses[url] = self._make_html(url)
-        mock_fetch.side_effect = lambda u, *a, **kw: responses.get(u)
+        mock_fetch.side_effect = lambda u, *a, **kw: (responses.get(u), False)
 
         progress_q = queue.Queue()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -520,10 +520,10 @@ class TestEngineConcurrent:
         assert events[-1]["status"] == "completed"
         assert events[-1]["pages_done"] == 51
 
-    @patch("crawler.core.engine.fetch_page")
+    @patch("crawler.core.engine.fetch_page_with_cache_tracking")
     def test_failed_page_persists_failure_reason(self, mock_fetch, fast_engine_patches):
         # First call returns None (failure), engine should write failure_reason
-        mock_fetch.return_value = None
+        mock_fetch.return_value = (None, False)
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             run_crawl("https://example.com", db_path, max_pages=1, req_per_sec=20.0)
@@ -545,7 +545,7 @@ class TestEngineConcurrent:
                     run_crawl("https://example.com", db_path,
                               max_pages=1, req_per_sec=20.0)
 
-    @patch("crawler.core.engine.fetch_page")
+    @patch("crawler.core.engine.fetch_page_with_cache_tracking")
     def test_r6a_zero_resource_retry_via_render(self, mock_fetch, fast_engine_patches):
         """B6/R16: list page with zero resources from HTTP → render retry yields
         resources. Asserts unconditionally — no `if resources:` escape hatch.
@@ -591,7 +591,7 @@ class TestEngineConcurrent:
             '<a rel="tag">retry-tag</a>'
             '</article></body></html>'
         )
-        mock_fetch.return_value = http_html
+        mock_fetch.return_value = (http_html, False)
 
         # Spy on RenderThread.submit so we can assert the R6a branch fired.
         rendered_future: Future = Future()
@@ -625,7 +625,7 @@ class TestEngineConcurrent:
             f"{[r.tags for r in resources]}"
         )
 
-    @patch("crawler.core.engine.fetch_page")
+    @patch("crawler.core.engine.fetch_page_with_cache_tracking")
     def test_force_playwright_bypasses_http(self, mock_fetch, fast_engine_patches):
         """force_playwright=True → fetch_page is not called for the URL."""
         rendered_html = (
@@ -694,9 +694,9 @@ class TestResume:
             fetched_urls: list[str] = []
             def track_fetch(url, *a, **kw):
                 fetched_urls.append(url)
-                return self._make_html()
+                return (self._make_html(), False)
 
-            with patch("crawler.core.engine.fetch_page", side_effect=track_fetch):
+            with patch("crawler.core.engine.fetch_page_with_cache_tracking", side_effect=track_fetch):
                 returned_id = run_crawl(
                     entry, db_path, max_pages=100, req_per_sec=20.0,
                 )
@@ -740,7 +740,7 @@ class TestResume:
                         status="fetched")
             update_scan_job(db_path, sj_id, status="completed")
 
-            with patch("crawler.core.engine.fetch_page") as mock_fetch:
+            with patch("crawler.core.engine.fetch_page_with_cache_tracking") as mock_fetch:
                 returned_id = run_crawl(entry, db_path,
                                         max_pages=100, req_per_sec=20.0)
 
@@ -764,7 +764,7 @@ class TestResume:
             "https://example.com/b": leaf_html,
             "https://example.com/c": leaf_html,
         }
-        with patch("crawler.core.engine.fetch_page",
+        with patch("crawler.core.engine.fetch_page_with_cache_tracking",
                    side_effect=lambda u, *a, **kw: responses.get(u)):
             with tempfile.TemporaryDirectory() as tmpdir:
                 db_path = os.path.join(tmpdir, "test.db")
@@ -797,7 +797,7 @@ class TestResume:
         for u in ["https://example.com/a", "https://example.com/b", "https://example.com/c"]:
             responses[u] = self._make_html()
 
-        with patch("crawler.core.engine.fetch_page",
+        with patch("crawler.core.engine.fetch_page_with_cache_tracking",
                    side_effect=lambda u, *a, **kw: responses.get(u)):
             with tempfile.TemporaryDirectory() as tmpdir:
                 db_path = os.path.join(tmpdir, "test.db")
@@ -1024,7 +1024,7 @@ class TestEngineShutdownBound:
     """A3: critical Plan Unit 7 acceptance — shutdown bounded by 10s
     even when render is hung."""
 
-    @patch("crawler.core.engine.fetch_page")
+    @patch("crawler.core.engine.fetch_page_with_cache_tracking")
     def test_shutdown_path_bounded_when_render_hangs(
         self, mock_fetch, fast_engine_patches,
     ):
@@ -1040,7 +1040,7 @@ class TestEngineShutdownBound:
 
         # Short body forces needs_js_rendering, so worker routes through render.
         short_body = "<html><body>x</body></html>"
-        mock_fetch.return_value = short_body
+        mock_fetch.return_value = (short_body, False)
 
         def make_hung_future(*_a, **_kw):
             return _Future()  # never resolves
@@ -1068,7 +1068,7 @@ class TestEngineShutdownBound:
         # drain timeout = 61s+.
         assert elapsed < 12.0, f"shutdown overhead exceeded: {elapsed:.1f}s"
 
-    @patch("crawler.core.engine.fetch_page")
+    @patch("crawler.core.engine.fetch_page_with_cache_tracking")
     def test_executor_uses_explicit_construction_not_with_block(
         self, mock_fetch, fast_engine_patches,
     ):
@@ -1115,7 +1115,7 @@ class TestHighFanoutAndWriterDeathRegressions:
         for u in urls:
             responses[u] = leaf_html
 
-        with patch("crawler.core.engine.fetch_page",
+        with patch("crawler.core.engine.fetch_page_with_cache_tracking",
                    side_effect=lambda u, *a, **kw: responses.get(u, leaf_html)):
             with tempfile.TemporaryDirectory() as tmpdir:
                 db_path = os.path.join(tmpdir, "test.db")
@@ -1180,7 +1180,7 @@ class TestHighFanoutAndWriterDeathRegressions:
             return False
 
         body = "<html><body>" + ("content " * 200) + "</body></html>"
-        with patch("crawler.core.engine.fetch_page", return_value=body):
+        with patch("crawler.core.engine.fetch_page_with_cache_tracking", return_value=body):
             with patch.object(writer_mod.WriterThread, "is_alive",
                               always_dead_is_alive):
                 with tempfile.TemporaryDirectory() as tmpdir:

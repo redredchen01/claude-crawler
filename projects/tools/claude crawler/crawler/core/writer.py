@@ -396,17 +396,18 @@ class WriterThread:
             if req.status in _TERMINAL_JOB_STATUSES:
                 conn.execute(
                     "UPDATE scan_jobs SET status = ?, pages_scanned = ?, "
-                    "resources_found = ?, completed_at = CURRENT_TIMESTAMP "
+                    "resources_found = ?, cache_hits = ?, cache_misses = ?, "
+                    "completed_at = CURRENT_TIMESTAMP "
                     "WHERE id = ?",
                     (req.status, req.pages_scanned, req.resources_found,
-                     req.scan_job_id),
+                     req.cache_hits, req.cache_misses, req.scan_job_id),
                 )
             else:
                 conn.execute(
                     "UPDATE scan_jobs SET status = ?, pages_scanned = ?, "
-                    "resources_found = ? WHERE id = ?",
+                    "resources_found = ?, cache_hits = ?, cache_misses = ? WHERE id = ?",
                     (req.status, req.pages_scanned, req.resources_found,
-                     req.scan_job_id),
+                     req.cache_hits, req.cache_misses, req.scan_job_id),
                 )
             conn.execute("COMMIT")
         except BaseException:

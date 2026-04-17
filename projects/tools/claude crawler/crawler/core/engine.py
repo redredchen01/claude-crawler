@@ -602,7 +602,8 @@ def _drain_future(fut: Future) -> None:
 
 
 def _direct_finalize_scan_job(db_path: str, scan_job_id: int, status: str,
-                              pages_scanned: int, resources_found: int) -> None:
+                              pages_scanned: int, resources_found: int,
+                              cache_hits: int = 0, cache_misses: int = 0) -> None:
     """Bypass-the-writer fallback to set scan_jobs terminal state when the
     writer thread is dead. Safe because the writer is the only contender
     for write locks and it's no longer running.
@@ -618,9 +619,11 @@ def _direct_finalize_scan_job(db_path: str, scan_job_id: int, status: str,
             with conn:  # transaction context — commits on success
                 conn.execute(
                     "UPDATE scan_jobs SET status = ?, pages_scanned = ?, "
-                    "resources_found = ?, completed_at = CURRENT_TIMESTAMP "
+                    "resources_found = ?, cache_hits = ?, cache_misses = ?, "
+                    "completed_at = CURRENT_TIMESTAMP "
                     "WHERE id = ?",
-                    (status, pages_scanned, resources_found, scan_job_id),
+                    (status, pages_scanned, resources_found, cache_hits,
+                     cache_misses, scan_job_id),
                 )
         logger.warning(
             "Scan_job %d finalized via direct DB connection (writer was dead)",

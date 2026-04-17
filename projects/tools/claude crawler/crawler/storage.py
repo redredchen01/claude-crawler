@@ -99,6 +99,7 @@ def init_db(db_path: str | None = None) -> str:
             _migrate_pages_add_failure_reason(conn)
             _migrate_pages_add_cached(conn)
             _migrate_http_cache(conn)
+            _migrate_scan_jobs_add_cache_counters(conn)
     return path
 
 
@@ -162,6 +163,25 @@ def _migrate_http_cache(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError as exc:
         conn.rollback()
         if "already exists" not in str(exc).lower():
+            raise
+
+
+def _migrate_scan_jobs_add_cache_counters(conn: sqlite3.Connection) -> None:
+    """Add scan_jobs.cache_hits and cache_misses columns if missing. Race-safe."""
+    try:
+        conn.execute("PRAGMA busy_timeout = 5000")
+        cursor = conn.execute(
+            "PRAGMA table_info(scan_jobs)"
+        )
+        cols = {row[1] for row in cursor.fetchall()}
+        if "cache_hits" not in cols:
+            conn.execute("ALTER TABLE scan_jobs ADD COLUMN cache_hits INTEGER NOT NULL DEFAULT 0")
+        if "cache_misses" not in cols:
+            conn.execute("ALTER TABLE scan_jobs ADD COLUMN cache_misses INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        conn.rollback()
+        if "duplicate column" not in str(exc).lower():
             raise
 
 

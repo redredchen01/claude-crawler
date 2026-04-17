@@ -296,6 +296,47 @@ def fetch_page(url: str, use_playwright: bool = False) -> str | None:
     return None
 
 
+def fetch_page_with_cache_tracking(url: str, cache_service) -> tuple[str | None, bool]:
+    """Fetch HTML with HTTP caching and return cache status.
+
+    Returns:
+        (html, was_cached) tuple. was_cached is True if response came from 304 Not Modified.
+    """
+    cached = cache_service.get_cache(url)
+    cached_etag = cached["etag"] if cached else None
+    cached_last_modified = cached["last_modified"] if cached else None
+    cached_body = cached["response_body"] if cached else None
+
+    for attempt in range(RETRY_COUNT):
+        try:
+            html, is_cached, etag, last_modified = _attempt_fetch(
+                url, cached_etag, cached_last_modified, cached_body)
+            if html is not None and not is_cached:
+                # New/updated response: save to cache for future requests.
+                if etag or last_modified:
+                    cache_service.save_cache(url, etag, last_modified, None,
+                                           html.encode("utf-8"))
+            return html, is_cached
+        except _NO_RETRY_EXCEPTIONS as exc:
+            logger.warning("Non-retryable fetch failure for %s: %s", url, exc)
+            return None, False
+        except Exception as exc:
+            backoff = (
+                RETRY_BACKOFF[attempt]
+                if attempt < len(RETRY_BACKOFF)
+                else RETRY_BACKOFF[-1]
+            )
+            logger.warning(
+                "Fetch attempt %d/%d failed for %s: %s (backoff %ds)",
+                attempt + 1, RETRY_COUNT, url, exc, backoff,
+            )
+            if attempt < RETRY_COUNT - 1:
+                time.sleep(backoff)
+
+    logger.error("All %d fetch attempts failed for %s", RETRY_COUNT, url)
+    return None, False
+
+
 def fetch_page_with_cache(url: str, cache_service) -> str | None:
     """Fetch HTML with HTTP caching support via ETag and Last-Modified headers.
 
