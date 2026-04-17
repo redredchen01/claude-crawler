@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+<head>
+<meta charset="UTF-8">
+<title>Fixture — JSON-LD VideoObject</title>
+<meta property="og:title" content="Video Fixture Title">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "VideoObject",
+  "name": "Video Fixture Title",
+  "image": "https://cdn.example.com/uploads/video-thumb.jpg",
+  "description": "A full VideoObject with InteractionCounter for views + likes.",
+  "uploadDate": "2026-04-17",
+  "genre": "Roleplay",
+  "keywords": "偶像,巨乳,独角戏",
+  "interactionStatistic": [
+    {
+      "@type": "InteractionCounter",
+      "interactionType": {"@type": "WatchAction"},
+      "userInteractionCount": 12345
+    },
+    {
+      "@type": "InteractionCounter",
+      "interactionType": {"@type": "LikeAction"},
+      "userInteractionCount": 678
+    }
+  ]
+}
+</script>
+</head>
+<body>
+<section class="video-info">
+<h1>Video Fixture Title</h1>
+<p>Body content for the video fixture.</p>
+</section>
+</body>
+</html>

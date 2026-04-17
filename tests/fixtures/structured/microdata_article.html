@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Fixture — Microdata Article</title>
+</head>
+<body>
+<article itemscope itemtype="https://schema.org/Article">
+<h1 itemprop="name">Microdata Article Fixture</h1>
+<meta itemprop="description" content="A microdata-only article with every mapped property.">
+<img itemprop="image" src="https://cdn.example.com/uploads/microdata.jpg" alt="cover">
+<time itemprop="datePublished" datetime="2026-02-20">Feb 20</time>
+<meta itemprop="articleSection" content="Opinion">
+<meta itemprop="keywords" content="architecture, patterns, simplicity">
+<p>Body paragraph with enough text to make this the largest itemscope block.</p>
+<span itemscope itemtype="https://schema.org/Person">
+  <meta itemprop="name" content="Nested Author">
+</span>
+</article>
+</body>
+</html>
