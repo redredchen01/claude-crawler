@@ -765,6 +765,84 @@ class TestDetailMetricsScopedToContainer:
         assert result.resources[0].views == 42
 
 
+class TestListCardDurationTitleRescue:
+    """Regression: on kissavs.com, every card had a thumbnail <a> whose
+    only visible text was the duration badge (``<span class="label">
+    2:06:24</span>``) and a SEPARATE title <a> inside
+    ``<h3 class="title">`` in the detail block. The link-card fallback
+    picked the thumbnail <a> as the card, so ``a_tag.get_text()``
+    became the duration and shipped as the resource title.
+
+    The fix walks up from the thumbnail to sibling links pointing at
+    the same URL and reuses their non-duration text as the title.
+    """
+
+    HTML = """\
+<!DOCTYPE html>
+<html><head><title>Video grid</title></head>
+<body>
+<div class="grid">
+    <article class="video-card">
+        <div class="img-box"><a href="/video/foo-001/">
+            <img src="/p/foo-001.jpg" alt="Foo 001"/>
+            <span class="label">2:06:24</span>
+        </a></div>
+        <div class="detail"><h3 class="title"><a href="/video/foo-001/">Foo 001 — The Real Title</a></h3></div>
+    </article>
+    <article class="video-card">
+        <div class="img-box"><a href="/video/bar-042/">
+            <img src="/p/bar-042.jpg" alt="Bar 042"/>
+            <span class="label">1:15:03</span>
+        </a></div>
+        <div class="detail"><h3 class="title"><a href="/video/bar-042/">Bar 042 — Another Title</a></h3></div>
+    </article>
+    <article class="video-card">
+        <div class="img-box"><a href="/video/baz-007/">
+            <img src="/p/baz-007.jpg" alt="Baz 007"/>
+            <span class="label">58:19</span>
+        </a></div>
+        <div class="detail"><h3 class="title"><a href="/video/baz-007/">Baz 007 — Short Form</a></h3></div>
+    </article>
+    <article class="video-card">
+        <div class="img-box"><a href="/video/qux-123/">
+            <img src="/p/qux.jpg" alt="Qux"/>
+            <span class="label">45:30</span>
+        </a></div>
+        <div class="detail"><h3 class="title"><a href="/video/qux-123/">Qux 123 — Filler</a></h3></div>
+    </article>
+    <article class="video-card">
+        <div class="img-box"><a href="/video/wiz-987/">
+            <img src="/p/wiz.jpg" alt="Wiz"/>
+            <span class="label">1:05:47</span>
+        </a></div>
+        <div class="detail"><h3 class="title"><a href="/video/wiz-987/">Wiz 987 — Filler</a></h3></div>
+    </article>
+</div>
+</body></html>
+"""
+
+    def test_title_not_duration_hms(self):
+        """HH:MM:SS badge must not be picked up as title."""
+        r = parse_page(self.HTML, "https://example.com/")
+        titles = [res.title for res in r.resources]
+        assert "2:06:24" not in titles
+        assert "Foo 001 — The Real Title" in titles
+
+    def test_title_not_duration_ms(self):
+        """MM:SS badge must not be picked up either."""
+        r = parse_page(self.HTML, "https://example.com/")
+        titles = [res.title for res in r.resources]
+        assert "58:19" not in titles
+        assert "Baz 007 — Short Form" in titles
+
+    def test_no_duration_titles_remain(self):
+        """Sanity check across all cards."""
+        import re
+        dur = re.compile(r"^\d{1,2}(?::\d{2}){1,2}$")
+        r = parse_page(self.HTML, "https://example.com/")
+        assert not [res.title for res in r.resources if dur.fullmatch(res.title)]
+
+
 class TestKissavsStyleStructuredSite:
     """End-to-end coverage of a site shaped like kissavs.com:
 

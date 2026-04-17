@@ -229,6 +229,41 @@ def _clean_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+# Duration strings like "2:06:24" / "12:05" / "0:58" that card thumbnails
+# overlay on top of the poster image. Used to detect when a list-card's
+# derived title is actually just a duration badge and needs rescuing
+# from a sibling link in the detail block.
+_DURATION_RE = re.compile(r"^\d{1,2}(?::\d{2}){1,2}$")
+
+
+def _rescue_title_from_siblings(thumb_a: BsTag, target_url: str, base_url: str) -> str:
+    """Find a non-duration title link pointing at ``target_url``.
+
+    Walks up from ``thumb_a`` looking for a different <a href=...> that
+    resolves to the same URL as the thumbnail but carries substantive
+    text (not another duration badge). Returns "" if no such sibling is
+    reachable within 5 parent levels.
+    """
+    current = thumb_a
+    for _ in range(5):
+        parent = current.parent
+        if parent is None or parent.name == "body":
+            break
+        for other in parent.find_all("a", href=True):
+            if other is thumb_a:
+                continue
+            other_href = other.get("href", "") or ""
+            if not other_href:
+                continue
+            if urljoin(base_url, other_href) != target_url:
+                continue
+            text = _clean_text(other.get_text(" ", strip=True))
+            if text and not _DURATION_RE.fullmatch(text):
+                return text
+        current = parent
+    return ""
+
+
 # Pipe-only chain for og:title — `|｜` are the SEO-chain separators used
 # by virtually every CMS ("Item｜Section｜Brand"). Hyphens are kept out of
 # this set because they're legitimately embedded in product codes
@@ -997,6 +1032,18 @@ def _extract_list_resources(soup: BeautifulSoup, url: str) -> list[Resource]:
                 title = _clean_text(figcaption.get_text(strip=True))
             else:
                 title = _clean_text(a_tag.get_text(strip=True))
+
+        # When the thumbnail <a> only carries a duration overlay (e.g.
+        # `<span class="label">2:06:24</span>` inside an image link), the
+        # derived title is a timecode, not a real title. Rescue it by
+        # looking for a sibling <a> in the card's ancestors that points
+        # at the same video but carries non-duration text (typically the
+        # `<h3 class="title"><a>...</a></h3>` in the detail block).
+        if _DURATION_RE.fullmatch(title):
+            target = urljoin(url, a_tag["href"])
+            rescued = _rescue_title_from_siblings(a_tag, target, url)
+            if rescued:
+                title = rescued
 
         # URL
         res_url = urljoin(url, a_tag["href"])
