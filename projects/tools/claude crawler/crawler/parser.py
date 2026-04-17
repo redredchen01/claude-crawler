@@ -1,5 +1,6 @@
 """HTML page parser — extracts resources, links, and page metadata."""
 
+import json
 import re
 from urllib.parse import urljoin, urlparse
 
@@ -38,6 +39,37 @@ _CATEGORY_CLASS_RE = re.compile(r"\b(cat|category|channel|section|theme)\b", re.
 _TAG_SCORE_THRESHOLD = 3
 _TAG_TEXT_MIN = 1
 _TAG_TEXT_MAX = 20
+
+# --- Metric extraction ----------------------------------------------------
+#
+# Numbers next to "views"/"likes"/"hearts" come back wrong on real sites
+# because the old impl scanned the whole document, ignored unit suffixes,
+# and happily picked copyright years. The new impl: container-scoped,
+# multiplier-aware (K/M/B + CJK 万/千/亿), and year-guarded.
+
+# Captures plain ints (1234), grouped (1,234 / 1 234), or decimals (12.3).
+# The number group is followed (optionally) by a multiplier suffix.
+_METRIC_NUM_RE = re.compile(
+    r"(\d{1,3}(?:[,\s]\d{3})+|\d+(?:\.\d+)?)\s*([kKmMbB万千亿]?)"
+)
+
+# Multiplier suffix → integer multiplier. Unknown suffix = 1.
+_METRIC_MULTIPLIERS = {
+    "k": 1_000, "K": 1_000,
+    "m": 1_000_000, "M": 1_000_000,
+    "b": 1_000_000_000, "B": 1_000_000_000,
+    "千": 1_000,
+    "万": 10_000,
+    "亿": 100_000_000,
+}
+
+# When a metric candidate's parent text contains any of these markers, a
+# bare 4-digit number in 1900..2099 range is treated as a year, not a
+# metric — protects against `<footer>views: 0 © 2010</footer>` returning
+# 2010, and against scraping "founded in 2008" near a "view source" link.
+_METRIC_YEAR_CONTEXT_RE = re.compile(
+    r"©|copyright|since|founded|版权|创建于|建立于|成立于", re.I,
+)
 
 
 def _class_tokens(el: BsTag) -> str:
@@ -146,6 +178,148 @@ def _clean_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+# Pipe-only chain for og:title — `|｜` are the SEO-chain separators used
+# by virtually every CMS ("Item｜Section｜Brand"). Hyphens are kept out of
+# this set because they're legitimately embedded in product codes
+# (`GRACE-029`) and article slugs.
+_TITLE_PIPE_CHAIN_RE = re.compile(r"\s*[|｜]\s*")
+# Broader set for the <title> fallback, where the suffix may use a dash
+# ("Item - Site"). Used with maxsplit=1 so a dashed product code in the
+# middle of the title doesn't get split.
+_TITLE_FALLBACK_SEP_RE = re.compile(r"\s*[|｜\-–—]\s*")
+
+
+def _strip_title_site_suffix(raw: str, *, require_chain: bool) -> str:
+    """Return the leading segment of a "Title | Site" style string.
+
+    ``require_chain=True`` (og:title path): strip only when the title has
+    2+ pipe separators — the SEO-chain signature ``Item｜Section｜Brand``.
+    Single-pipe and dash-only titles are left intact to protect legit
+    punctuation (product codes like ``GRACE-029``).
+
+    ``require_chain=False`` (``<title>`` fallback): split on the first
+    separator (pipe or dash) and keep the leading segment.
+    """
+    if not raw:
+        return ""
+    if require_chain:
+        parts = _TITLE_PIPE_CHAIN_RE.split(raw)
+        if len(parts) < 3:
+            return _clean_text(raw)
+        return _clean_text(parts[0])
+    return _clean_text(
+        _TITLE_FALLBACK_SEP_RE.split(raw, maxsplit=1)[0]
+    )
+
+
+def _parse_jsonld_blocks(soup: BeautifulSoup) -> list:
+    """Return every JSON-LD payload on the page as Python objects.
+
+    Skips blocks that fail to parse so one malformed script doesn't
+    blind the whole extraction path. Flattens ``@graph`` arrays so
+    callers can iterate entities uniformly regardless of whether the
+    site wraps them.
+    """
+    blocks: list = []
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        raw = script.string or script.get_text() or ""
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(data, list):
+            blocks.extend(data)
+        else:
+            blocks.append(data)
+    flattened: list = []
+    for item in blocks:
+        if isinstance(item, dict) and "@graph" in item and isinstance(item["@graph"], list):
+            flattened.extend(item["@graph"])
+        else:
+            flattened.append(item)
+    return flattened
+
+
+# Structured-data types that indicate a detail page (single primary entity).
+# These are the schema.org @type values that SEO-optimized content sites
+# emit on item pages.
+_JSONLD_DETAIL_TYPES = frozenset({
+    "VideoObject", "Movie", "TVEpisode", "MusicRecording",
+    "Article", "NewsArticle", "BlogPosting", "Product", "Recipe",
+    "CreativeWork",
+})
+
+
+def _jsonld_has_detail_entity(blocks: list) -> bool:
+    """True when any JSON-LD block declares a single-item @type."""
+    for item in blocks:
+        if not isinstance(item, dict):
+            continue
+        t = item.get("@type")
+        if isinstance(t, str) and t in _JSONLD_DETAIL_TYPES:
+            return True
+        if isinstance(t, list) and any(x in _JSONLD_DETAIL_TYPES for x in t if isinstance(x, str)):
+            return True
+    return False
+
+
+# Map InteractionCounter.interactionType.@type to our Resource metric field.
+# schema.org uses WatchAction for plays/views, LikeAction for likes,
+# FavoriteAction or BookmarkAction for bookmark/heart counts.
+_INTERACTION_TYPE_MAP = {
+    "WatchAction": "views",
+    "ViewAction": "views",
+    "ReadAction": "views",
+    "LikeAction": "likes",
+    "AgreeAction": "likes",
+    "FavoriteAction": "hearts",
+    "BookmarkAction": "hearts",
+}
+
+
+def _extract_jsonld_metrics(blocks: list) -> dict:
+    """Harvest view/like/heart counts from JSON-LD InteractionCounter entries.
+
+    Returns a dict with any of ``views``, ``likes``, ``hearts`` keys that
+    were found; missing keys mean "JSON-LD didn't carry this metric" and
+    callers should fall back to DOM heuristics.
+    """
+    metrics: dict = {}
+    for item in blocks:
+        if not isinstance(item, dict):
+            continue
+        stats = item.get("interactionStatistic")
+        if stats is None:
+            continue
+        if isinstance(stats, dict):
+            stats = [stats]
+        if not isinstance(stats, list):
+            continue
+        for counter in stats:
+            if not isinstance(counter, dict):
+                continue
+            itype = counter.get("interactionType")
+            # schema.org allows either a string or an {@type: ...} nested obj
+            type_name = ""
+            if isinstance(itype, dict):
+                type_name = itype.get("@type", "") or ""
+            elif isinstance(itype, str):
+                # Some sites write the URL form "http://schema.org/WatchAction"
+                type_name = itype.rsplit("/", 1)[-1]
+            metric_key = _INTERACTION_TYPE_MAP.get(type_name)
+            if not metric_key or metric_key in metrics:
+                continue
+            count = counter.get("userInteractionCount")
+            try:
+                metrics[metric_key] = int(count)
+            except (TypeError, ValueError):
+                continue
+    return metrics
+
+
 def _extract_meta(soup: BeautifulSoup, property_name: str) -> str:
     """Get meta content by property or name attribute."""
     tag = soup.find("meta", attrs={"property": property_name})
@@ -166,30 +340,80 @@ def _extract_text(soup: BeautifulSoup, selectors: list[str]) -> str:
     return ""
 
 
-def _extract_number_near_keyword(soup: BeautifulSoup, keywords: list[str]) -> int:
-    """Find a number near keyword text in the HTML."""
-    num_re = re.compile(r"\d[\d,]*")
+def _parse_metric_number(text: str, *, year_guard: bool) -> int | None:
+    """Find the first number-with-optional-multiplier match in ``text``.
+
+    Returns the resolved integer, or ``None`` if no usable number was
+    found. ``year_guard`` skips bare 4-digit values in 1900..2099 (which
+    are far more likely to be years than metrics).
+    """
+    for m in _METRIC_NUM_RE.finditer(text):
+        raw, suffix = m.group(1), m.group(2)
+        cleaned = raw.replace(",", "").replace(" ", "")
+        try:
+            value = float(cleaned)
+        except ValueError:
+            continue
+        multiplier = _METRIC_MULTIPLIERS.get(suffix, 1)
+        # Year guard: bare 4-digit int with no multiplier and no decimal,
+        # in plausible-year range, and parent context flagged as footer-
+        # like. Treat as year noise — try the next match.
+        if (
+            year_guard and not suffix and "." not in cleaned
+            and len(cleaned) == 4 and 1900 <= int(cleaned) <= 2099
+        ):
+            continue
+        return int(value * multiplier)
+    return None
+
+
+def _extract_metric(scope: BsTag, keywords: list[str]) -> int:
+    """Find a metric value near any of ``keywords`` inside ``scope``.
+
+    Recognises K / M / B and CJK 千 / 万 / 亿 suffixes. Skips 4-digit year
+    candidates when the parent context looks like a copyright/footer
+    (``©``, ``copyright``, ``founded``, ``版权``, etc.). Caller chooses
+    the scope (article container in detail pages, card in list pages) —
+    this function never walks past it.
+
+    Returns ``0`` when nothing matched, preserving the prior "no metric =
+    zero" contract.
+    """
     for kw in keywords:
-        # Search elements whose text contains the keyword
-        for el in soup.find_all(string=re.compile(re.escape(kw), re.I)):
+        for el in scope.find_all(string=re.compile(re.escape(kw), re.I)):
             parent = el.parent
             if parent is None:
                 continue
-            # Check the parent element text for a number
-            text = parent.get_text(" ", strip=True)
-            m = num_re.search(text)
-            if m:
-                return int(m.group().replace(",", ""))
-            # Check adjacent siblings
+            # Skip matches inside <script>/<style> — those NavigableStrings
+            # are code/CSS, not user-visible text, and their get_text() is
+            # huge so any stray digit will mis-fire (kissavs shipped
+            # `hearts=1` from a JS string containing "heart").
+            if parent.name in ("script", "style") or any(
+                a.name in ("script", "style") for a in parent.parents
+            ):
+                continue
+            parent_text = parent.get_text(" ", strip=True)
+            year_guard = bool(_METRIC_YEAR_CONTEXT_RE.search(parent_text))
+            value = _parse_metric_number(parent_text, year_guard=year_guard)
+            if value is not None:
+                return value
             for sib in parent.next_siblings:
-                if hasattr(sib, "get_text"):
-                    sib_text = sib.get_text(strip=True)
-                else:
-                    sib_text = str(sib).strip()
-                m = num_re.search(sib_text)
-                if m:
-                    return int(m.group().replace(",", ""))
+                sib_text = (
+                    sib.get_text(" ", strip=True)
+                    if hasattr(sib, "get_text")
+                    else str(sib).strip()
+                )
+                if not sib_text:
+                    continue
+                value = _parse_metric_number(sib_text, year_guard=year_guard)
+                if value is not None:
+                    return value
     return 0
+
+
+# Old name kept as alias so any external import path or stale test still
+# compiles. Internal call sites use _extract_metric directly.
+_extract_number_near_keyword = _extract_metric
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +429,20 @@ def _detect_page_type(html: str, url: str, soup: BeautifulSoup) -> str:
     # Detail pages — single main content with rich metadata (check before list)
     path = urlparse(url).path.strip("/")
     is_root = not path  # homepage / index
-    main_block = soup.select_one("article") or soup.select_one("main") or soup.select_one(".post")
+
+    # JSON-LD VideoObject/Article/etc. is the strongest signal — sites that
+    # bother emitting it are declaring "this page is ONE item". Trust that
+    # over DOM container heuristics, which fail on sites without <article>.
+    jsonld_blocks = _parse_jsonld_blocks(soup)
+    if not is_root and _jsonld_has_detail_entity(jsonld_blocks):
+        return "detail"
+
+    main_block = (
+        soup.select_one("article")
+        or soup.select_one("main")
+        or soup.select_one(".post")
+        or soup.select_one('section[class*="video"], section[class*="article"], section[class*="post"], section[class*="detail"], section[class*="content"]')
+    )
     if main_block and not is_root:
         og_title = _extract_meta(soup, "og:title")
         h1 = soup.find("h1")
@@ -286,13 +523,34 @@ def _pick_main_container(soup: BeautifulSoup):
     if articles:
         return articles[0]
 
-    return soup.select_one("main")
+    main = soup.select_one("main")
+    if main is not None:
+        return main
+
+    # Last-resort fallback for sites that use <section> as their content
+    # container (kissavs uses <section class="video-info">). Pick the
+    # largest matching section by text length so a small meta <section>
+    # doesn't beat the real body.
+    candidates = soup.select(
+        'section[class*="video"], section[class*="article"], '
+        'section[class*="post"], section[class*="detail"], '
+        'section[class*="content"]'
+    )
+    if candidates:
+        return max(candidates, key=lambda s: len(s.get_text(strip=True)))
+    return None
 
 
 def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
     """Extract a single Resource from a detail page."""
-    # Title
+    # Title — og:title first, then h1, then <title> (with suffix-strip).
+    # og:title gets the same suffix-strip when it carries an SEO chain
+    # like "Item Name｜Site Name｜Brand" (2+ separators strongly implies
+    # a site/brand tail); single-separator og:titles are left intact to
+    # avoid chopping legitimate titles that happen to contain one pipe.
     title = _extract_meta(soup, "og:title")
+    if title:
+        title = _strip_title_site_suffix(title, require_chain=True)
     if not title:
         h1 = soup.find("h1")
         if h1:
@@ -301,8 +559,7 @@ def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
         title_tag = soup.find("title")
         if title_tag:
             raw = title_tag.get_text(strip=True)
-            # Strip " | Site Name" or " - Site Name" suffix
-            title = re.split(r"\s*[|\-–—]\s*", raw, maxsplit=1)[0].strip()
+            title = _strip_title_site_suffix(raw, require_chain=False)
 
     # Locate the article container once — used for both cover image and
     # tag scoping. Without scoping, sidebar/footer "tag cloud" widgets
@@ -328,10 +585,24 @@ def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
         tags = []
         detected_category = ""
 
-    # Metrics
-    views = _extract_number_near_keyword(soup, ["views", "view", "浏览", "浏览量"])
-    likes = _extract_number_near_keyword(soup, ["likes", "like", "赞", "点赞"])
-    hearts = _extract_number_near_keyword(soup, ["hearts", "heart", "爱心", "收藏"])
+    # Metrics — prefer structured data (schema.org InteractionCounter) over
+    # keyword-proximity heuristics. Sites that care about SEO emit JSON-LD
+    # counts in canonical form; the DOM heuristic is flaky on icon-only
+    # markup (e.g. <svg #icon-eye> + <span>14143</span>) because it has
+    # nothing to anchor the "views" keyword on.
+    jsonld_metrics = _extract_jsonld_metrics(_parse_jsonld_blocks(soup))
+    # Scope the DOM heuristic to the article container (or <body>) so
+    # sidebar widgets and footer "© 2025" noise don't get attributed.
+    metric_scope = container or soup.body or soup
+    views = jsonld_metrics.get("views") or _extract_metric(
+        metric_scope, ["views", "view", "浏览", "浏览量"]
+    )
+    likes = jsonld_metrics.get("likes") or _extract_metric(
+        metric_scope, ["likes", "like", "赞", "点赞"]
+    )
+    hearts = jsonld_metrics.get("hearts") or _extract_metric(
+        metric_scope, ["hearts", "heart", "爱心", "收藏"]
+    )
 
     # Category priority: breadcrumb > detected category link (from the
     # tag block) > URL first segment. Breadcrumb wins because it's the
@@ -341,6 +612,22 @@ def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
     breadcrumb = soup.select_one("nav.breadcrumb") or soup.select_one('[class*="breadcrumb"]')
     if breadcrumb:
         items = breadcrumb.find_all("a")
+        # Some sites include the current item as the final breadcrumb
+        # entry (Home > Tech > Roleplay > [Item Title]); picking the last
+        # item would then mis-assign the item title as the category. If
+        # the last item's href points at the current URL, drop it and
+        # use the one before it as the category.
+        current_path = urlparse(url).path
+        if items and current_path and len(items) >= 2:
+            last_href = items[-1].get("href", "") or ""
+            # Only skip when the last item has an actual href that
+            # resolves to the current URL — a bare-text last item (no
+            # href) is a typography choice, not a self-link, and should
+            # still be treated as the category (existing behavior).
+            if last_href:
+                last_path = urlparse(urljoin(url, last_href)).path
+                if last_path == current_path:
+                    items = items[:-1]
         if items:
             category = _clean_text(items[-1].get_text(strip=True))
     if not category and detected_category:
@@ -431,9 +718,9 @@ def _extract_list_resources(soup: BeautifulSoup, url: str) -> list[Resource]:
         tags, _ = _extract_tags_and_category(card)
 
         # Metrics (optional)
-        views = _extract_number_near_keyword(card, ["views", "view", "浏览"])
-        likes = _extract_number_near_keyword(card, ["likes", "like", "赞"])
-        hearts = _extract_number_near_keyword(card, ["hearts", "heart", "收藏"])
+        views = _extract_metric(card, ["views", "view", "浏览"])
+        likes = _extract_metric(card, ["likes", "like", "赞"])
+        hearts = _extract_metric(card, ["hearts", "heart", "收藏"])
 
         resources.append(Resource(
             title=title,

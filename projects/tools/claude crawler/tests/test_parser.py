@@ -586,3 +586,165 @@ class TestDetailResourceMultiArticleRegression:
         # og:image takes priority over container <img>, so cover_url
         # is not a meaningful regression marker here. The tag scoping
         # is the load-bearing assertion.
+
+
+# ---------------------------------------------------------------------------
+# Unit 1 — Metric extraction precision (K/M/B + 万/千/亿 + year guard)
+# ---------------------------------------------------------------------------
+
+from crawler.parser import _extract_metric, _parse_metric_number
+
+
+class TestParseMetricNumber:
+    def test_plain_int(self):
+        assert _parse_metric_number("views 1234", year_guard=False) == 1234
+
+    def test_thousand_separator_comma(self):
+        assert _parse_metric_number("1,234,567", year_guard=False) == 1234567
+
+    def test_thousand_separator_space(self):
+        assert _parse_metric_number("1 234 567", year_guard=False) == 1234567
+
+    def test_decimal_with_K_suffix(self):
+        assert _parse_metric_number("12.3K", year_guard=False) == 12300
+
+    def test_M_suffix(self):
+        assert _parse_metric_number("1.5M views", year_guard=False) == 1_500_000
+
+    def test_B_suffix(self):
+        assert _parse_metric_number("2B hits", year_guard=False) == 2_000_000_000
+
+    def test_lowercase_suffix(self):
+        assert _parse_metric_number("3k", year_guard=False) == 3000
+
+    def test_cjk_wan(self):
+        assert _parse_metric_number("浏览 1.2万", year_guard=False) == 12_000
+
+    def test_cjk_qian(self):
+        assert _parse_metric_number("3千", year_guard=False) == 3000
+
+    def test_cjk_yi(self):
+        assert _parse_metric_number("1.5亿", year_guard=False) == 150_000_000
+
+    def test_year_guard_skips_bare_4digit_year(self):
+        # In a copyright context, 2010 is a year, not a metric.
+        assert _parse_metric_number("© 2010", year_guard=True) is None
+
+    def test_year_guard_does_not_skip_when_off(self):
+        assert _parse_metric_number("© 2010", year_guard=False) == 2010
+
+    def test_year_guard_does_not_skip_with_suffix(self):
+        # 2010K is unambiguously a metric, never a year.
+        assert _parse_metric_number("2010K", year_guard=True) == 2_010_000
+
+    def test_year_guard_does_not_skip_decimal(self):
+        # 2010.5 isn't a year; let it through.
+        assert _parse_metric_number("2010.5", year_guard=True) == 2010
+
+    def test_year_guard_takes_next_match_when_year_skipped(self):
+        # First number is a year; second is the real metric.
+        assert _parse_metric_number(
+            "© 2010 — likes 42", year_guard=True,
+        ) == 42
+
+    def test_no_match_returns_none(self):
+        assert _parse_metric_number("no numbers here", year_guard=False) is None
+
+
+class TestExtractMetric:
+    def _scope(self, html: str) -> "BsTag":
+        return BeautifulSoup(html, "lxml")
+
+    def test_basic_views(self):
+        s = self._scope("<div><span>views 1,234</span></div>")
+        assert _extract_metric(s, ["views"]) == 1234
+
+    def test_K_suffix_in_real_html(self):
+        s = self._scope("<div><span>12.3K views</span></div>")
+        assert _extract_metric(s, ["views"]) == 12300
+
+    def test_cjk_wan_in_real_html(self):
+        s = self._scope("<div><span>浏览 1.2万</span></div>")
+        assert _extract_metric(s, ["浏览"]) == 12000
+
+    def test_returns_zero_when_keyword_missing(self):
+        s = self._scope("<div><span>no metric here 1234</span></div>")
+        assert _extract_metric(s, ["views"]) == 0
+
+    def test_year_guard_in_footer_context(self):
+        # Footer with copyright AND a "view" keyword — bare 2010 is rejected.
+        s = self._scope(
+            '<footer>page views 0 © 2010 by example</footer>'
+        )
+        # The "0" is the real (zero) metric; year guard prevents 2010 from
+        # being returned as a fallback when 0 already matched.
+        assert _extract_metric(s, ["views"]) == 0
+
+    def test_year_guard_skips_bare_year_picks_next_real_metric(self):
+        """When the keyword's parent text starts with a copyright year
+        followed by a real metric, we should skip the year and return
+        the real metric."""
+        s = self._scope(
+            '<footer>views since © 2010: 4096</footer>'
+        )
+        assert _extract_metric(s, ["views"]) == 4096
+
+    def test_scoping_prevents_sidebar_leak(self):
+        """Container has no metric; sidebar (outside scope) does — must
+        return 0 instead of leaking the sidebar value."""
+        html = """
+        <html><body>
+        <article>
+            <h1>Real article</h1>
+            <p>body</p>
+        </article>
+        <aside>views 9999</aside>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "lxml")
+        article = soup.find("article")
+        assert _extract_metric(article, ["views"]) == 0
+
+    def test_sibling_traversal_still_works(self):
+        s = self._scope(
+            "<div><span>views</span><span>42</span></div>"
+        )
+        assert _extract_metric(s, ["views"]) == 42
+
+    def test_skips_script_and_style(self):
+        # Pre-existing protection (kissavs `hearts=1` regression).
+        s = self._scope(
+            '<div><script>"hearts": 1</script><style>.heart{}</style></div>'
+        )
+        assert _extract_metric(s, ["hearts"]) == 0
+
+    def test_cjk_yi_via_helper(self):
+        s = self._scope("<div><span>views 5亿</span></div>")
+        assert _extract_metric(s, ["views"]) == 500_000_000
+
+
+class TestDetailMetricsScopedToContainer:
+    """End-to-end: parse_page on a detail page must not pull metrics from
+    a sibling sidebar even when the sidebar contains the same keyword."""
+
+    def test_sidebar_views_do_not_leak_into_detail(self):
+        html = """
+        <html>
+        <head>
+            <meta property="og:title" content="Real Article">
+            <meta property="og:image" content="https://example.com/c.jpg">
+        </head>
+        <body>
+        <article>
+            <h1>Real Article</h1>
+            <p>views 42</p>
+        </article>
+        <aside class="sidebar">
+            <p>Trending: views 99999</p>
+        </aside>
+        </body></html>
+        """
+        result = parse_page(html, "https://example.com/post/1")
+        assert result.page_type == "detail"
+        # Container view count, not sidebar.
+        assert result.resources[0].views == 42
