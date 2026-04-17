@@ -2,6 +2,7 @@
 
 import queue
 import tempfile
+import threading
 import os
 
 import pytest
@@ -10,6 +11,7 @@ from unittest.mock import patch, MagicMock
 from crawler.core.frontier import Frontier
 from crawler.core.fetcher import needs_js_rendering
 from crawler.core.engine import run_crawl
+from crawler.core.writer import WriterThread
 from crawler.parser import parse_page
 
 
@@ -755,9 +757,15 @@ class TestFrontierWriterMode:
                 assert depth == 0
                 assert isinstance(page_id, int) and page_id > 0
 
-                # Push more — each gets its own page_id from the writer.
+                # Push more — A5 makes push() stage, then flush_batch
+                # persists via one writer round-trip and enqueues with
+                # page_ids.
                 frontier.push("https://example.com/a", 1)
                 frontier.push("https://example.com/b", 1)
+                # Before flush, the queue is still empty.
+                assert frontier.pop() is None
+                flushed = frontier.flush_batch()
+                assert flushed == 2
                 a_url, a_depth, a_pid = frontier.pop()
                 b_url, b_depth, b_pid = frontier.pop()
                 assert {a_url, b_url} == {
@@ -766,6 +774,91 @@ class TestFrontierWriterMode:
                 assert a_pid != b_pid != page_id
             finally:
                 writer.shutdown(timeout=2.0)
+
+    def test_flush_batch_uses_one_writer_round_trip_for_many_links(self):
+        """A5: 100 link pushes + 1 flush_batch → exactly 2 writer calls
+        (one for the seed at construction, one for the batch). The whole
+        point of A5 is that high-fanout pages don't trigger N writer
+        round-trips."""
+        from crawler.core.frontier import Frontier
+        from unittest.mock import MagicMock
+        from itertools import count
+
+        writer = MagicMock()
+        # Generate fresh page_ids for each batch call.
+        id_counter = count(start=1)
+        def fake_batch(scan_job_id, items):
+            return [next(id_counter) for _ in items]
+        writer.insert_pages_batch.side_effect = fake_batch
+
+        frontier = Frontier(
+            "https://example.com", 200, 3,
+            writer=writer, scan_job_id=42,
+        )
+        # The constructor flushed the seed; record that call count.
+        seed_calls = writer.insert_pages_batch.call_count
+        assert seed_calls == 1
+
+        for i in range(100):
+            frontier.push(f"https://example.com/p{i}", 1)
+        # Pushes do NOT call the writer.
+        assert writer.insert_pages_batch.call_count == seed_calls
+
+        flushed = frontier.flush_batch()
+        assert flushed == 100
+        # One additional writer call regardless of how many pushes.
+        assert writer.insert_pages_batch.call_count == seed_calls + 1
+
+        # All 100 ended up in the queue with page_ids.
+        items = []
+        while True:
+            item = frontier.pop()
+            if item is None:
+                break
+            items.append(item)
+        # 1 (seed) + 100 (batch) = 101.
+        assert len(items) == 101
+
+    def test_flush_batch_empty_is_noop(self):
+        from crawler.core.frontier import Frontier
+        from unittest.mock import MagicMock
+        writer = MagicMock()
+        writer.insert_pages_batch.return_value = [1]  # for seed flush
+        frontier = Frontier(
+            "https://example.com", 100, 3,
+            writer=writer, scan_job_id=1,
+        )
+        seed_calls = writer.insert_pages_batch.call_count
+        # Nothing staged.
+        assert frontier.flush_batch() == 0
+        # No new writer calls.
+        assert writer.insert_pages_batch.call_count == seed_calls
+
+    def test_flush_batch_failure_keeps_pending_for_retry(self):
+        from crawler.core.frontier import Frontier
+        from unittest.mock import MagicMock
+
+        writer = MagicMock()
+        # Seed flush succeeds; subsequent flushes fail twice then succeed.
+        results = [[1], RuntimeError("writer down"), [2, 3]]
+        def side(scan_job_id, items):
+            r = results.pop(0)
+            if isinstance(r, BaseException):
+                raise r
+            return r
+        writer.insert_pages_batch.side_effect = side
+
+        frontier = Frontier(
+            "https://example.com", 100, 3,
+            writer=writer, scan_job_id=1,
+        )
+        frontier.push("https://example.com/a", 1)
+        frontier.push("https://example.com/b", 1)
+        with pytest.raises(RuntimeError):
+            frontier.flush_batch()
+        # Failed batch is rolled back into pending; retry succeeds.
+        flushed = frontier.flush_batch()
+        assert flushed == 2
 
     def test_seed_existing_skips_writer_insert(self):
         from crawler.core.frontier import Frontier
@@ -793,6 +886,120 @@ class TestFrontierWriterMode:
         page_ids = sorted(i[2] for i in items)
         assert page_ids == [100, 101]
         writer.insert_page.assert_not_called()
+
+
+class TestEngineShutdownBound:
+    """A3: critical Plan Unit 7 acceptance — shutdown bounded by 10s
+    even when render is hung."""
+
+    @patch("crawler.core.engine.fetch_page")
+    def test_shutdown_path_bounded_when_render_hangs(
+        self, mock_fetch, fast_engine_patches,
+    ):
+        """Workers blocked on hung render → engine returns within RENDER_TIMEOUT
+        + bounded shutdown overhead. With RENDER_TIMEOUT mocked to 2s, total
+        wall-clock for a 1-page scan must be < 12s.
+
+        Verifies the inverted shutdown actually bounds teardown rather than
+        adding executor-first 60s straggler drain on top of worker waits.
+        """
+        import time as _time
+        from concurrent.futures import Future as _Future
+
+        # Short body forces needs_js_rendering, so worker routes through render.
+        short_body = "<html><body>x</body></html>"
+        mock_fetch.return_value = short_body
+
+        def make_hung_future(*_a, **_kw):
+            return _Future()  # never resolves
+
+        # Lower RENDER_TIMEOUT to 2s so the worker's Future.result returns
+        # quickly. The interesting measurement is engine teardown overhead
+        # AFTER the worker gives up, which is what A3 fixed.
+        with patch("crawler.core.engine.RENDER_TIMEOUT", 2):
+            with patch("crawler.core.render.RenderThread.submit",
+                       side_effect=make_hung_future):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    db_path = os.path.join(tmpdir, "test.db")
+                    start = _time.monotonic()
+                    run_crawl(
+                        "https://example.com", db_path,
+                        max_pages=1, workers=8, req_per_sec=20.0,
+                        force_playwright=True,
+                    )
+                    elapsed = _time.monotonic() - start
+
+        # Worker waits ~1s (RENDER_TIMEOUT - 1 in _try_render's clamp), then
+        # engine teardown: render shutdown 5s + executor cancel ~0 + drain 0
+        # + writer ops 0 + coalescer 0 = ~6s. Bound at 12s for CI headroom.
+        # Crucially: pre-A3 this would have been worker_wait + 60s straggler
+        # drain timeout = 61s+.
+        assert elapsed < 12.0, f"shutdown overhead exceeded: {elapsed:.1f}s"
+
+    @patch("crawler.core.engine.fetch_page")
+    def test_executor_uses_explicit_construction_not_with_block(
+        self, mock_fetch, fast_engine_patches,
+    ):
+        """A3: ensure the engine is wired in the new structure (no `with`
+        ThreadPoolExecutor that would re-introduce executor-first shutdown)."""
+        import inspect
+        from crawler.core import engine as engine_module
+        source = inspect.getsource(engine_module.run_crawl)
+        # The fix is to NOT use `with ThreadPoolExecutor` as a context manager
+        # in the body of run_crawl.
+        assert "with ThreadPoolExecutor" not in source, (
+            "engine.run_crawl regressed to `with ThreadPoolExecutor` — "
+            "this re-introduces the executor-first shutdown bug. Use explicit "
+            "construction + try/finally."
+        )
+        assert "executor.shutdown(wait=False, cancel_futures=True)" in source, (
+            "engine.run_crawl missing the cancel_futures shutdown call"
+        )
+
+
+class TestEngineWriterHealth:
+    """A6: writer-death detection in the wait loop + direct-conn finalize."""
+
+    def test_engine_wires_writer_health_check_in_wait_loop(self):
+        """A6: verify the wait-loop checks writer.is_alive() and breaks on
+        unhealthy writer. Source-level assertion since reproducing the race
+        deterministically is fragile."""
+        import inspect
+        from crawler.core import engine as engine_module
+        source = inspect.getsource(engine_module.run_crawl)
+        # The check uses both is_alive() AND last_exception so a writer
+        # that crashed but hasn't yet exited still triggers abort.
+        assert "writer.is_alive()" in source, (
+            "engine.run_crawl missing writer health check"
+        )
+        assert "writer.last_exception" in source, (
+            "engine.run_crawl missing writer exception check"
+        )
+        assert "_direct_finalize_scan_job" in source, (
+            "engine.run_crawl missing direct-finalize fallback"
+        )
+
+    def test_direct_finalize_helper_writes_status_correctly(self, tmp_path):
+        from crawler.core.engine import _direct_finalize_scan_job
+        from crawler.storage import (
+            create_scan_job, get_scan_job, init_db, update_scan_job,
+        )
+
+        db_path = str(tmp_path / "test.db")
+        init_db(db_path)
+        sj_id = create_scan_job(db_path, "https://x.com", "x.com", 100, 3)
+        update_scan_job(db_path, sj_id, status="running")
+
+        _direct_finalize_scan_job(
+            db_path, sj_id, status="failed",
+            pages_scanned=42, resources_found=99,
+        )
+
+        job = get_scan_job(db_path, sj_id)
+        assert job.status == "failed"
+        assert job.pages_scanned == 42
+        assert job.resources_found == 99
+        assert job.completed_at is not None
 
 
 class TestRobotsTxt:

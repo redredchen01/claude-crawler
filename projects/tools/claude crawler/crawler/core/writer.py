@@ -23,7 +23,8 @@ from concurrent.futures import Future, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
 
 from crawler.models import (
-    InsertPageRequest, PageWriteRequest, ScanJobUpdateRequest,
+    InsertPageRequest, InsertPagesBatchRequest, PageWriteRequest,
+    ScanJobUpdateRequest,
 )
 from crawler.storage import save_resource_with_tags
 
@@ -114,6 +115,29 @@ class WriterThread:
         """Fire-and-forget per-page write. Raises WriterUnavailableError if the
         writer queue is full or the writer thread has died."""
         self._enqueue(request)
+
+    def insert_pages_batch(self, scan_job_id: int, items: list[tuple[str, int]],
+                           timeout: float = _DEFAULT_INSERT_TIMEOUT) -> list[int]:
+        """Insert a batch of (url, depth) pairs in one transaction.
+
+        Returns page_ids in the same order as ``items``. Idempotent on
+        ``(scan_job_id, url)``: duplicates return the existing page_id.
+        Empty input returns an empty list without enqueuing.
+        """
+        if not items:
+            return []
+        future: Future = Future()
+        request = InsertPagesBatchRequest(
+            scan_job_id=scan_job_id, items=list(items), future=future,
+        )
+        self._enqueue(request)
+        try:
+            return future.result(timeout=timeout)
+        except FuturesTimeoutError as exc:
+            raise WriterUnavailableError(
+                f"insert_pages_batch Future timed out after {timeout}s "
+                f"(writer alive={self.is_alive()})"
+            ) from exc
 
     def update_scan_job(self, request: ScanJobUpdateRequest) -> None:
         """Terminal scan_job state update. Raises WriterUnavailableError if the
@@ -210,6 +234,9 @@ class WriterThread:
         if isinstance(request, InsertPageRequest):
             page_id = self._insert_page(conn, request)
             request.future.set_result(page_id)
+        elif isinstance(request, InsertPagesBatchRequest):
+            page_ids = self._insert_pages_batch(conn, request)
+            request.future.set_result(page_ids)
         elif isinstance(request, PageWriteRequest):
             self._write_page(conn, request)
         elif isinstance(request, ScanJobUpdateRequest):
@@ -218,6 +245,48 @@ class WriterThread:
             raise TypeError(
                 f"Unknown writer request type: {type(request).__name__}"
             )
+
+    def _insert_pages_batch(self, conn: sqlite3.Connection,
+                            req: InsertPagesBatchRequest) -> list[int]:
+        """One BEGIN IMMEDIATE, executemany INSERT OR IGNORE, then SELECT to
+        recover page_ids in input order. Duplicates within the batch return
+        the existing id (or the id of the first occurrence)."""
+        if not req.items:
+            return []
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            insert_rows = [
+                (req.scan_job_id, url, depth) for (url, depth) in req.items
+            ]
+            conn.executemany(
+                "INSERT OR IGNORE INTO pages (scan_job_id, url, depth, status) "
+                "VALUES (?, ?, ?, 'pending')",
+                insert_rows,
+            )
+            # Recover ids for the urls we just submitted. SELECT IN (...) needs
+            # the placeholder list expanded explicitly.
+            urls = [url for (url, _) in req.items]
+            placeholders = ",".join("?" * len(urls))
+            rows = conn.execute(
+                f"SELECT id, url FROM pages "
+                f"WHERE scan_job_id = ? AND url IN ({placeholders})",
+                [req.scan_job_id, *urls],
+            ).fetchall()
+            url_to_id = {row["url"]: row["id"] for row in rows}
+            page_ids: list[int] = []
+            for url, _ in req.items:
+                pid = url_to_id.get(url)
+                if pid is None:
+                    raise RuntimeError(
+                        f"insert_pages_batch: row missing for {url!r} "
+                        f"after INSERT OR IGNORE"
+                    )
+                page_ids.append(pid)
+            conn.execute("COMMIT")
+            return page_ids
+        except BaseException:
+            _safe_rollback(conn)
+            raise
 
     def _insert_page(self, conn: sqlite3.Connection, req: InsertPageRequest) -> int:
         conn.execute("BEGIN IMMEDIATE")

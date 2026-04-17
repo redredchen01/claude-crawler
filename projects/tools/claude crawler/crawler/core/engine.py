@@ -20,6 +20,7 @@ a bounded time even when the network is hostile.
 import concurrent.futures
 import logging
 import queue
+import sqlite3
 import threading
 from concurrent.futures import (
     Future, ThreadPoolExecutor, FIRST_COMPLETED, TimeoutError as FuturesTimeoutError,
@@ -38,7 +39,7 @@ from crawler.core.progress import ProgressCoalescer
 from crawler.core.ratelimit import DomainRateLimiter
 from crawler.core.render import RenderThread, ShutdownError, preflight
 from crawler.core.url import normalize as _normalize_url
-from crawler.core.writer import WriterThread
+from crawler.core.writer import WriterThread, WriterUnavailableError
 from crawler.models import PageWriteRequest, ScanJobUpdateRequest
 from crawler.parser import parse_page
 from crawler.storage import (
@@ -189,8 +190,21 @@ def _process_one_page(url: str, depth: int, page_id: int,
             ctx.counters.pages_done += 1
             ctx.counters.resources_found += len(result.resources)
 
+        # Stage discovered links under Frontier's lock (microsecond critical
+        # section), then flush the whole batch via one writer round-trip
+        # outside the lock. A failed push (e.g., normalization edge case) is
+        # logged and skipped so a single bad link doesn't poison the rest.
         for link in result.links:
-            ctx.frontier.push(link, depth + 1)
+            try:
+                ctx.frontier.push(link, depth + 1)
+            except Exception as exc:
+                logger.warning("frontier.push failed for %s: %s", link, exc)
+        try:
+            ctx.frontier.flush_batch()
+        except Exception as exc:
+            logger.warning(
+                "frontier.flush_batch failed for page %s: %s", url, exc,
+            )
 
         _emit_progress(ctx, url)
 
@@ -348,79 +362,128 @@ def run_crawl(
         counters_lock=counters_lock,
     )
 
+    # Build executor explicitly (not via `with`) so we control the order in
+    # which it is shut down relative to render/writer. The `with` form would
+    # call executor.shutdown(wait=True) on context exit BEFORE our finally
+    # block runs, which is what made the documented "inverted shutdown"
+    # actually executor-first.
+    executor = ThreadPoolExecutor(
+        max_workers=workers, thread_name_prefix="crawl-w",
+    )
     final_status = "completed"
+    in_flight: set[Future] = set()
     try:
-        with ThreadPoolExecutor(max_workers=workers,
-                                thread_name_prefix="crawl-w") as executor:
-            in_flight: set[Future] = set()
-            pages_submitted = 0
+        pages_submitted = 0
 
-            while True:
-                # Top up active workers from the frontier.
-                while len(in_flight) < workers and pages_submitted < max_pages:
-                    item = frontier.pop()
-                    if item is None:
-                        break
-                    # Writer-aware Frontier always yields 3-tuples in
-                    # production; the 2-tuple branch is only reached if
-                    # someone constructs Frontier without a writer (tests).
-                    if len(item) == 3:
-                        url, depth, page_id = item
-                    else:
-                        url, depth = item
-                        page_id = writer.insert_page(scan_job_id, url, depth)
-                    pages_submitted += 1
-                    in_flight.add(executor.submit(
-                        _process_one_page, url, depth, page_id, ctx,
-                    ))
-
-                if not in_flight:
-                    # Frontier empty AND no work outstanding → done.
-                    if pages_submitted >= max_pages or frontier.is_done():
-                        break
-                    # Nothing to submit and nothing in flight; bail to avoid
-                    # spinning. (Pages discovered later require an in-flight
-                    # worker to have pushed them.)
+        while True:
+            # Top up active workers from the frontier.
+            while len(in_flight) < workers and pages_submitted < max_pages:
+                item = frontier.pop()
+                if item is None:
                     break
+                # Writer-aware Frontier always yields 3-tuples in
+                # production; the 2-tuple branch is only reached if
+                # someone constructs Frontier without a writer (tests).
+                if len(item) == 3:
+                    url, depth, page_id = item
+                else:
+                    url, depth = item
+                    page_id = writer.insert_page(scan_job_id, url, depth)
+                pages_submitted += 1
+                in_flight.add(executor.submit(
+                    _process_one_page, url, depth, page_id, ctx,
+                ))
 
-                done, in_flight = concurrent.futures.wait(
-                    in_flight, timeout=0.5, return_when=FIRST_COMPLETED,
-                )
-                for fut in done:
-                    _drain_future(fut)
+            if not in_flight:
+                # Frontier empty AND no work outstanding → done.
+                if pages_submitted >= max_pages or frontier.is_done():
+                    break
+                # Nothing to submit and nothing in flight; bail to avoid
+                # spinning. (Pages discovered later require an in-flight
+                # worker to have pushed them.)
+                break
 
-            # Drain any stragglers.
-            for fut in concurrent.futures.as_completed(in_flight, timeout=60.0):
+            done, in_flight = concurrent.futures.wait(
+                in_flight, timeout=0.5, return_when=FIRST_COMPLETED,
+            )
+            for fut in done:
                 _drain_future(fut)
+
+            # A6: health check between waits. If the writer thread died or
+            # raised a fatal error, abort fast — every subsequent worker
+            # write would fail anyway, and we'd otherwise silently report
+            # success while the DB diverged from our in-memory counters.
+            if not writer.is_alive() or writer.last_exception is not None:
+                logger.error(
+                    "Writer thread is no longer healthy "
+                    "(alive=%s, last_exception=%r); aborting scan",
+                    writer.is_alive(), writer.last_exception,
+                )
+                final_status = "failed"
+                break
 
     except BaseException as exc:
         logger.exception("Crawl orchestration failed: %s", exc)
         final_status = "failed"
         raise
     finally:
-        # Inverted shutdown: render first so blocked workers see exceptions
-        # immediately, then the executor (already exited via context manager
-        # above on the happy path; redundant here on error), then the writer
-        # so any pending PageWriteRequests flush before we close the DB.
+        # Truly inverted shutdown: render first so workers blocked on render
+        # Futures see exceptions immediately and don't wait their full
+        # RENDER_TIMEOUT inside the executor. Then cancel-pending the
+        # executor so queued worker tasks never start. Then drain any
+        # in-flight workers with a bounded timeout (the watchdog from A4
+        # backstops render-side hangs). Then writer terminal update + writer
+        # shutdown, then coalescer.
         try:
-            render_thread.shutdown(timeout=10.0)
+            render_thread.shutdown(timeout=5.0)
         except Exception:
             logger.exception("RenderThread shutdown raised")
 
         try:
-            writer.update_scan_job(ScanJobUpdateRequest(
-                scan_job_id=scan_job_id,
-                status=final_status,
-                pages_scanned=counters.pages_done,
-                resources_found=counters.resources_found,
-            ))
-        except Exception:
-            logger.exception("Final scan_job update raised")
+            executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            # cancel_futures arg is Python 3.9+; older fallback should never
+            # hit because pyproject.toml requires python>=3.10, but harmless.
+            executor.shutdown(wait=False)
+
+        if in_flight:
+            done, still_running = concurrent.futures.wait(in_flight, timeout=5.0)
+            for fut in done:
+                _drain_future(fut)
+            if still_running:
+                logger.warning(
+                    "%d worker future(s) did not complete within 5s drain",
+                    len(still_running),
+                )
+
+        # A6: terminal scan_job update via writer if alive; otherwise direct
+        # connection bypass so the scan_jobs row doesn't stay 'running'
+        # forever after a writer crash.
+        terminal_written = False
+        if writer.is_alive():
+            try:
+                writer.update_scan_job(ScanJobUpdateRequest(
+                    scan_job_id=scan_job_id,
+                    status=final_status,
+                    pages_scanned=counters.pages_done,
+                    resources_found=counters.resources_found,
+                ))
+                terminal_written = True
+            except (WriterUnavailableError, Exception):
+                logger.exception("Final scan_job update via writer failed")
 
         try:
-            writer.shutdown(timeout=10.0)
+            writer.shutdown(timeout=5.0)
         except Exception:
             logger.exception("WriterThread shutdown raised")
+
+        if not terminal_written:
+            # Writer was already dead or failed mid-update. Use a fresh
+            # direct connection — safe because the writer is provably gone.
+            _direct_finalize_scan_job(
+                db_path, scan_job_id, final_status,
+                counters.pages_done, counters.resources_found,
+            )
 
         coalescer.emit({
             "pages_done": counters.pages_done,
@@ -441,3 +504,29 @@ def _drain_future(fut: Future) -> None:
         fut.result()
     except BaseException as exc:
         logger.warning("worker future raised: %s", exc, exc_info=False)
+
+
+def _direct_finalize_scan_job(db_path: str, scan_job_id: int, status: str,
+                              pages_scanned: int, resources_found: int) -> None:
+    """Bypass-the-writer fallback to set scan_jobs terminal state when the
+    writer thread is dead. Safe because the writer is the only contender
+    for write locks and it's no longer running."""
+    try:
+        with sqlite3.connect(db_path, timeout=5.0) as conn:
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute(
+                "UPDATE scan_jobs SET status = ?, pages_scanned = ?, "
+                "resources_found = ?, completed_at = CURRENT_TIMESTAMP "
+                "WHERE id = ?",
+                (status, pages_scanned, resources_found, scan_job_id),
+            )
+            conn.commit()
+        logger.warning(
+            "Scan_job %d finalized via direct DB connection (writer was dead)",
+            scan_job_id,
+        )
+    except Exception:
+        logger.exception(
+            "Direct finalize of scan_job %d failed; row may remain in "
+            "'running' state", scan_job_id,
+        )

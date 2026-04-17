@@ -1,6 +1,7 @@
 """BFS URL queue for crawling — thread-safe."""
 
 import collections
+import logging
 import threading
 from typing import Optional
 from urllib.parse import urlparse
@@ -8,24 +9,27 @@ from urllib.parse import urlparse
 from crawler.config import SKIP_EXTENSIONS
 from crawler.core.url import normalize as _normalize_url
 
+logger = logging.getLogger(__name__)
+
 
 class Frontier:
     """BFS frontier that tracks visited URLs and enforces domain/depth/page limits.
 
-    Thread-safe: a single :class:`threading.Lock` guards ``_queue`` and
-    ``_visited`` so worker threads can concurrently ``push`` discovered links
-    while another worker ``pop``\\s the next URL.
+    Thread-safe: a single :class:`threading.Lock` guards ``_queue``,
+    ``_visited``, and ``_pending_batch`` so worker threads can concurrently
+    ``push`` discovered links while another worker ``pop``\\s the next URL.
 
     Two modes:
       * **Plain**: ``pop()`` returns ``(url, depth)`` 2-tuples. Used by tests
-        and any caller that doesn't need DB-backed resume.
+        only.
       * **Writer-aware**: when ``writer`` and ``scan_job_id`` are supplied,
-        ``push()`` calls ``writer.insert_page(...)`` synchronously, so every
-        discovered URL is persisted as ``status='pending'`` *before* it goes
-        on the in-memory queue. ``pop()`` returns ``(url, depth, page_id)``
-        3-tuples. This is what Unit 8's idempotent re-run depends on — a
-        process kill mid-crawl leaves the frontier reconstructible from the
-        ``pages`` table on the next run.
+        ``push()`` stages the URL in ``_pending_batch`` (under the lock,
+        microseconds-fast), and the worker calls :meth:`flush_batch` after
+        finishing its link iteration. ``flush_batch`` makes a single
+        ``insert_pages_batch`` round-trip to the writer (one fsync per page,
+        not per link) and only then moves the URLs into ``_visited`` and
+        ``_queue``. This keeps the lock-held region trivial even when a
+        page discovers thousands of links.
     """
 
     def __init__(self, seed_url: str, max_pages: int, max_depth: int,
@@ -38,6 +42,7 @@ class Frontier:
         self._writer_mode = writer is not None and scan_job_id is not None
         self._queue: collections.deque = collections.deque()
         self._visited: set[str] = set()
+        self._pending_batch: list[tuple[str, int]] = []
         self._lock = threading.Lock()
 
         parsed = urlparse(seed_url)
@@ -45,16 +50,16 @@ class Frontier:
 
         if auto_seed:
             normalized = _normalize_url(seed_url)
-            self._visited.add(normalized)
-            self._enqueue(normalized, 0)
-
-    def _enqueue(self, url: str, depth: int) -> None:
-        """Push to internal queue, persisting via writer when in writer mode."""
-        if self._writer_mode:
-            page_id = self._writer.insert_page(self._scan_job_id, url, depth)
-            self._queue.append((url, depth, page_id))
-        else:
-            self._queue.append((url, depth))
+            with self._lock:
+                self._visited.add(normalized)
+                if self._writer_mode:
+                    self._pending_batch.append((normalized, 0))
+                else:
+                    self._queue.append((normalized, 0))
+            if self._writer_mode:
+                # Flush the seed immediately so the engine sees a populated
+                # queue on the first pop().
+                self.flush_batch()
 
     @staticmethod
     def _normalize(url: str) -> str:
@@ -73,7 +78,9 @@ class Frontier:
         return True
 
     def push(self, url: str, depth: int) -> None:
-        """Add URL if same domain, not visited, within limits. Thread-safe."""
+        """Stage URL for the next batch flush (writer mode) or enqueue
+        directly (plain mode). Thread-safe; lock-held region is microseconds.
+        """
         if depth > self._max_depth:
             return
         normalized = _normalize_url(url)
@@ -85,7 +92,50 @@ class Frontier:
             if normalized in self._visited:
                 return
             self._visited.add(normalized)
-            self._enqueue(normalized, depth)
+            if self._writer_mode:
+                self._pending_batch.append((normalized, depth))
+            else:
+                self._queue.append((normalized, depth))
+
+    def flush_batch(self) -> int:
+        """Persist all staged URLs via one writer round-trip and move them
+        onto the in-memory queue with their assigned page_ids.
+
+        Called by the worker after iterating a parsed page's links. Returns
+        the number of URLs flushed. No-op (returns 0) in plain mode or when
+        the staging buffer is empty.
+
+        On writer failure the staged URLs are NOT moved to the queue; they
+        also don't get rolled back from ``_visited`` because re-adding them
+        on the next discovery would just dedup against the visited set.
+        Caller (the engine) is expected to detect the writer failure via
+        :meth:`WriterThread.is_alive` and abort the scan.
+        """
+        if not self._writer_mode:
+            return 0
+        with self._lock:
+            if not self._pending_batch:
+                return 0
+            batch = self._pending_batch
+            self._pending_batch = []
+        # Writer call OUTSIDE the lock — this is the whole point of the
+        # batch protocol. The lock is held only for the in-memory list swap.
+        try:
+            page_ids = self._writer.insert_pages_batch(
+                self._scan_job_id, batch,
+            )
+        except BaseException:
+            # Roll the staged items back into the buffer so a future flush
+            # can retry them. They stay in `_visited` so re-discovery in the
+            # same run will dedup; that's acceptable since the engine should
+            # be aborting anyway when a writer call fails.
+            with self._lock:
+                self._pending_batch = batch + self._pending_batch
+            raise
+        with self._lock:
+            for (url, depth), page_id in zip(batch, page_ids):
+                self._queue.append((url, depth, page_id))
+        return len(batch)
 
     def pop(self):
         """Return next item or None if empty.

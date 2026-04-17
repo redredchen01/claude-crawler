@@ -83,6 +83,20 @@ class InsertPageRequest:
 
 
 @dataclass
+class InsertPagesBatchRequest:
+    """Frontier-to-writer request for a batch of (url, depth) pairs.
+
+    The writer does ONE BEGIN IMMEDIATE / executemany INSERT OR IGNORE /
+    SELECT ... WHERE url IN (...) per request, returning page_ids ordered to
+    match the input items. This collapses N fsyncs into one and lets
+    Frontier.push exit its lock without waiting for any DB round-trip.
+    """
+    scan_job_id: int
+    items: list[tuple[str, int]]  # [(url, depth), ...]
+    future: Future  # Future[list[int]] — resolved page_ids in input order
+
+
+@dataclass
 class PageWriteRequest:
     """Worker-to-writer request. No reply needed; writer commits per message."""
     scan_job_id: int

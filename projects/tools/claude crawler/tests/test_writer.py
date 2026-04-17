@@ -452,6 +452,80 @@ class TestConcurrent:
         assert resource_count == 800
 
 
+class TestInsertPagesBatch:
+    """A5: insert_pages_batch — one BEGIN IMMEDIATE per batch, ordered ids."""
+
+    def test_empty_batch_returns_empty_list_no_writer_call(self, started_writer, scan_job_id):
+        # Should be a synchronous no-op without enqueuing.
+        result = started_writer.insert_pages_batch(scan_job_id, [])
+        assert result == []
+
+    def test_batch_returns_ids_in_input_order(self, started_writer, db_path, scan_job_id):
+        items = [
+            ("https://example.com/a", 1),
+            ("https://example.com/b", 1),
+            ("https://example.com/c", 2),
+        ]
+        ids = started_writer.insert_pages_batch(scan_job_id, items)
+        assert len(ids) == 3
+        assert all(isinstance(i, int) and i > 0 for i in ids)
+
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = {
+                row["url"]: row["id"]
+                for row in conn.execute(
+                    "SELECT id, url FROM pages WHERE scan_job_id = ?",
+                    (scan_job_id,),
+                )
+            }
+        for (url, _), got_id in zip(items, ids):
+            assert rows[url] == got_id
+
+    def test_batch_handles_duplicates_within_batch(self, started_writer, db_path, scan_job_id):
+        # The same URL appears twice. INSERT OR IGNORE collapses; SELECT
+        # returns one row; both input positions get the same page_id.
+        items = [
+            ("https://example.com/dup", 1),
+            ("https://example.com/dup", 1),
+        ]
+        ids = started_writer.insert_pages_batch(scan_job_id, items)
+        assert ids[0] == ids[1]
+
+        with sqlite3.connect(db_path) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM pages WHERE scan_job_id = ?", (scan_job_id,),
+            ).fetchone()[0]
+        assert count == 1
+
+    def test_batch_idempotent_with_existing_rows(self, started_writer, scan_job_id):
+        # First batch inserts.
+        first = started_writer.insert_pages_batch(scan_job_id, [
+            ("https://example.com/x", 1),
+            ("https://example.com/y", 1),
+        ])
+        # Second batch with same URLs returns the same ids.
+        second = started_writer.insert_pages_batch(scan_job_id, [
+            ("https://example.com/x", 1),
+            ("https://example.com/y", 1),
+        ])
+        assert first == second
+
+    def test_batch_atomic_on_failure(self, started_writer, db_path, scan_job_id):
+        # Trigger FK violation by using nonexistent scan_job_id. The whole
+        # batch should roll back: zero pages inserted.
+        with pytest.raises(Exception):
+            started_writer.insert_pages_batch(99999, [
+                ("https://example.com/p1", 1),
+                ("https://example.com/p2", 1),
+            ])
+        # Writer keeps running; subsequent valid batch succeeds.
+        ids = started_writer.insert_pages_batch(scan_job_id, [
+            ("https://example.com/ok", 0),
+        ])
+        assert len(ids) == 1
+
+
 class TestHealthSurface:
     """A1: bounded put + is_alive() + WriterUnavailableError."""
 
