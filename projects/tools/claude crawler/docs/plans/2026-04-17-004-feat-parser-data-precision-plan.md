@@ -1,6 +1,6 @@
 ---
 date: 2026-04-17
-status: active
+status: completed
 type: feat
 topic: parser-data-precision
 ---
