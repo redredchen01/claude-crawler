@@ -1051,25 +1051,27 @@ def _detect_page_type(html: str, url: str, soup: BeautifulSoup) -> str:
     # Wordpress archive look like this.
     is_listing_path = is_root or bool(_LISTING_PATH_RE.search(path))
 
-    # Strong list signal — many repeated thumbnails. Detail pages with a
-    # "related posts" sidebar top out around 6–10 thumbnails; 12+ is
-    # almost certainly a grid. This check runs BEFORE detail-entity
-    # detection because listing pages ship the same og:title + h1 + first
-    # item's JSON-LD that detail pages do.
-    if max_cards >= _LIST_STRONG_THRESHOLD:
-        return "list"
-    # Listing-shaped URL + modest thumbnail count is also a list —
-    # lower bar because the URL already tells us what the page is.
+    # Listing-shaped URL + enough thumbnails → list. URL path is the
+    # strongest cross-site listing signal (homepage, /updates/, /search/,
+    # etc.) so this runs FIRST to catch pages where JSON-LD describes
+    # the first carousel item rather than the page itself (Plan 005).
     if is_listing_path and max_cards >= _LIST_LISTING_URL_THRESHOLD:
         return "list"
 
-    # JSON-LD VideoObject/Article/etc. is the strongest detail signal —
-    # sites that bother emitting it are declaring "this page is ONE item".
-    # Evaluated after the strong-list check so a listing page whose
-    # JSON-LD describes the first item doesn't get mis-classified.
+    # JSON-LD VideoObject/Article/etc. — detail pages with a
+    # related-videos sidebar would otherwise get mis-classified by the
+    # strong-list threshold below, so JSON-LD wins next for non-listing
+    # URLs. A real detail page authoritatively declares itself via
+    # schema.org even if the page template includes a carousel.
     jsonld_blocks = _parse_jsonld_blocks(soup)
     if not is_root and _jsonld_has_detail_entity(jsonld_blocks):
         return "detail"
+
+    # Strong list signal — many repeated thumbnails on a non-listing URL
+    # without JSON-LD. Detail pages with a "related posts" sidebar top
+    # out around 6-10 thumbnails; 12+ is almost certainly a grid.
+    if max_cards >= _LIST_STRONG_THRESHOLD:
+        return "list"
 
     main_block = (
         soup.select_one("article")
@@ -1393,116 +1395,160 @@ def _extract_published_date(soup: BeautifulSoup, container) -> str:
     return ""
 
 
+def _breadcrumb_category(soup: BeautifulSoup, url: str) -> str:
+    """Extract category from breadcrumb navigation. Handles the case
+    where the final breadcrumb entry is the current item (its href
+    resolves to the current URL) by using the previous entry instead.
+    Returns "" when no breadcrumb present or when it yields no items."""
+    breadcrumb = (
+        soup.select_one("nav.breadcrumb")
+        or soup.select_one('[class*="breadcrumb"]')
+    )
+    if not breadcrumb:
+        return ""
+    items = breadcrumb.find_all("a")
+    current_path = urlparse(url).path
+    if items and current_path and len(items) >= 2:
+        last_href = items[-1].get("href", "") or ""
+        # Only skip when the last item has an actual href that resolves
+        # to the current URL — a bare-text last item (no href) is a
+        # typography choice, not a self-link.
+        if last_href:
+            last_path = urlparse(urljoin(url, last_href)).path
+            if last_path == current_path:
+                items = items[:-1]
+    if items:
+        return _clean_text(items[-1].get_text(strip=True))
+    return ""
+
+
 def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
-    """Extract a single Resource from a detail page."""
-    # Title — og:title first, then h1, then <title> (with suffix-strip).
-    # og:title gets the same suffix-strip when it carries an SEO chain
-    # like "Item Name｜Site Name｜Brand" (2+ separators strongly implies
-    # a site/brand tail); single-separator og:titles are left intact to
-    # avoid chopping legitimate titles that happen to contain one pipe.
-    title = _extract_meta(soup, "og:title")
-    if title:
-        title = _strip_title_site_suffix(title, require_chain=True)
+    """Extract a single Resource from a detail page.
+
+    Two-phase extraction (Plan 005):
+      1. Structured-data first — JSON-LD / OpenGraph / Twitter / microdata
+         via `_extract_structured`. Fields present in that result win.
+      2. DOM heuristics fall back for fields the structured path missed.
+
+    Each field's winning source is recorded to the provenance map and
+    serialized into `Resource.raw_data` for export/UI consumption.
+    """
+    from crawler.raw_data import (
+        PROVENANCE_DOM,
+        build_raw_data,
+    )
+
+    # Phase 1: run all four source extractors + merge
+    merged, provenance, description_value = _extract_structured(soup)
+
+    # Phase 2: per-field DOM fallback. Each block updates `merged` and
+    # marks provenance[field] = PROVENANCE_DOM when a DOM value is used.
+
+    # --- Title ---
+    title = merged.get("title", "")
     if not title:
         h1 = soup.find("h1")
         if h1:
             title = _clean_text(h1.get_text(strip=True))
+            if title:
+                provenance["title"] = PROVENANCE_DOM
     if not title:
         title_tag = soup.find("title")
         if title_tag:
             raw = title_tag.get_text(strip=True)
             title = _strip_title_site_suffix(raw, require_chain=False)
+            if title:
+                provenance["title"] = PROVENANCE_DOM
 
-    # Locate the article container once — used for both cover image and
-    # tag scoping. Without scoping, sidebar/footer "tag cloud" widgets
-    # leak into every article's tag set (the site-wide tags appear on
-    # every page, producing identical tag lists across all articles).
-    # See _pick_main_container for the multi-article disambiguation rules.
+    # --- Main container (used by cover, tags, metrics, date) ---
     container = _pick_main_container(soup)
 
-    # Cover image — see _pick_cover_image for the og:image / lazy-load /
-    # icon-filter rules.
-    cover_url = _pick_cover_image(soup, container, url)
+    # --- Cover image ---
+    cover_url = merged.get("cover_url", "")
+    if not cover_url:
+        cover_url = _pick_cover_image(soup, container, url)
+        if cover_url:
+            provenance["cover_url"] = PROVENANCE_DOM
 
-    # Tags — restrict to the article container when available; otherwise
-    # fall back to whole-document scoring but apply the tag-cloud cap
-    # (real articles rarely have >30 tags; exceeding it strongly suggests
-    # a site-wide widget leaking in).
+    # --- Tags + detected-category side effect (used by category rule) ---
+    # When structured provides tags we skip DOM tag scoring, but still
+    # compute detected_category from the tag block for the category
+    # fallback chain below.
     tag_scope = container if container is not None else soup
-    tags, detected_category = _extract_tags_and_category(tag_scope)
-    if container is None and len(tags) > _FALLBACK_TAG_CLOUD_CAP:
-        tags = []
-        detected_category = ""
+    tags = merged.get("tags") or []
+    if tags:
+        # Still scan DOM for detected_category (throw away DOM tags)
+        _, detected_category_dom = _extract_tags_and_category(tag_scope)
+    else:
+        tags, detected_category_dom = _extract_tags_and_category(tag_scope)
+        # Tag-cloud sanity cap when no container exists
+        if container is None and len(tags) > _FALLBACK_TAG_CLOUD_CAP:
+            tags = []
+            detected_category_dom = ""
+        if tags:
+            provenance["tags"] = PROVENANCE_DOM
 
-    # Metrics — prefer structured data (schema.org InteractionCounter) over
-    # keyword-proximity heuristics. Sites that care about SEO emit JSON-LD
-    # counts in canonical form; the DOM heuristic is flaky on icon-only
-    # markup (e.g. <svg #icon-eye> + <span>14143</span>) because it has
-    # nothing to anchor the "views" keyword on.
-    jsonld_metrics = _extract_jsonld_metrics(_parse_jsonld_blocks(soup))
-    # Scope the DOM heuristic to the article container (or <body>) so
+    # --- Metrics (views / likes / hearts) ---
+    # Scope DOM heuristic to the article container (or <body>) so
     # sidebar widgets and footer "© 2025" noise don't get attributed.
-    # Use explicit `in` check rather than `or` — a JSON-LD-declared `0`
-    # is a real signal, not a fallback trigger (Correctness #2).
     metric_scope = container or soup.body or soup
+    for key, kws in (
+        ("views", ["views", "view", "浏览", "浏览量"]),
+        ("likes", ["likes", "like", "赞", "点赞"]),
+        ("hearts", ["hearts", "heart", "爱心", "收藏"]),
+    ):
+        if key not in merged:
+            v = _extract_metric(metric_scope, kws)
+            if v:
+                merged[key] = v
+                provenance[key] = PROVENANCE_DOM
+            else:
+                merged[key] = 0
 
-    def _metric(key: str, kws: list[str]) -> int:
-        if key in jsonld_metrics:
-            return jsonld_metrics[key]
-        return _extract_metric(metric_scope, kws)
-
-    views = _metric("views", ["views", "view", "浏览", "浏览量"])
-    likes = _metric("likes", ["likes", "like", "赞", "点赞"])
-    hearts = _metric("hearts", ["hearts", "heart", "爱心", "收藏"])
-
-    # Category priority: breadcrumb > detected category link (from the
-    # tag block) > URL first segment. Breadcrumb wins because it's the
-    # site's own structured signal; the detected link beats URL segments
-    # because it carries the human-readable category name.
-    category = ""
-    breadcrumb = soup.select_one("nav.breadcrumb") or soup.select_one('[class*="breadcrumb"]')
-    if breadcrumb:
-        items = breadcrumb.find_all("a")
-        # Some sites include the current item as the final breadcrumb
-        # entry (Home > Tech > Roleplay > [Item Title]); picking the last
-        # item would then mis-assign the item title as the category. If
-        # the last item's href points at the current URL, drop it and
-        # use the one before it as the category.
-        current_path = urlparse(url).path
-        if items and current_path and len(items) >= 2:
-            last_href = items[-1].get("href", "") or ""
-            # Only skip when the last item has an actual href that
-            # resolves to the current URL — a bare-text last item (no
-            # href) is a typography choice, not a self-link, and should
-            # still be treated as the category (existing behavior).
-            if last_href:
-                last_path = urlparse(urljoin(url, last_href)).path
-                if last_path == current_path:
-                    items = items[:-1]
-        if items:
-            category = _clean_text(items[-1].get_text(strip=True))
-    if not category and detected_category:
-        category = detected_category
-    if not category:
+    # --- Category ---
+    # Priority: breadcrumb > structured > detected tag-block category > URL.
+    # Breadcrumb beats structured `articleSection` because breadcrumbs
+    # give "Drama > Korean"-grained paths while og:article:section often
+    # gives coarse "Entertainment"; we prefer the more specific signal.
+    breadcrumb_cat = _breadcrumb_category(soup, url)
+    if breadcrumb_cat:
+        category = breadcrumb_cat
+        provenance["category"] = PROVENANCE_DOM
+    elif merged.get("category"):
+        category = merged["category"]
+    elif detected_category_dom:
+        category = detected_category_dom
+        provenance["category"] = PROVENANCE_DOM
+    else:
         path = urlparse(url).path.strip("/")
         segments = path.split("/")
         if len(segments) >= 2:
             category = segments[0]
+            provenance["category"] = PROVENANCE_DOM
+        else:
+            category = ""
 
-    # Published date — see _extract_published_date for the container-scoped
-    # fallback rules and CJK / slash format support.
-    published_at = _extract_published_date(soup, container)
+    # --- Published date ---
+    published_at = merged.get("published_at", "")
+    if not published_at:
+        published_at = _extract_published_date(soup, container)
+        if published_at:
+            provenance["published_at"] = PROVENANCE_DOM
+
+    # --- Raw data payload (provenance + description) ---
+    raw_data = build_raw_data(provenance, description=description_value)
 
     return Resource(
         title=title,
         url=url,
         cover_url=cover_url,
         tags=tags,
-        views=views,
-        likes=likes,
-        hearts=hearts,
+        views=merged.get("views", 0),
+        likes=merged.get("likes", 0),
+        hearts=merged.get("hearts", 0),
         category=category,
         published_at=published_at,
+        raw_data=raw_data,
     )
 
 

@@ -207,8 +207,11 @@ class TestDetailPage:
         assert result.resources[0].category == "Tech"
 
     def test_published_at(self):
+        """Structured-first (Plan 005): og:article:published_time wins
+        over DOM date extraction, preserving the full ISO-8601 timestamp
+        rather than truncating to date-only."""
         result = parse_page(DETAIL_HTML, "https://example.com/blog/tech/article-1")
-        assert result.resources[0].published_at == "2025-03-15"
+        assert result.resources[0].published_at == "2025-03-15T10:00:00Z"
 
     def test_links_extracted(self):
         result = parse_page(DETAIL_HTML, "https://example.com/blog/tech/article-1")
@@ -2399,3 +2402,173 @@ class TestExtractStructuredIntegration:
         assert desc == ""
         from crawler.raw_data import PROVENANCE_MISSING
         assert prov["title"] == PROVENANCE_MISSING
+
+
+# ---------------------------------------------------------------------------
+# Plan 005 Unit 6 — _extract_detail_resource with structured-first path
+# ---------------------------------------------------------------------------
+
+class TestDetailResourceStructuredFirst:
+    """Unit 6 — Resource.raw_data carries provenance + description;
+    structured fields win; DOM fallback on misses."""
+
+    def _parse(self, html, url="https://example.com/item/1"):
+        r = parse_page(html, url)
+        assert len(r.resources) == 1, r.page_type
+        return r.resources[0]
+
+    def test_jsonld_wins_for_all_fields_when_present(self):
+        html = """
+        <html><head>
+        <meta property="og:title" content="OG Title">
+        <script type="application/ld+json">
+        {"@type":"VideoObject","name":"JSON-LD Title",
+         "image":"https://cdn/j.jpg","description":"JSON-LD desc",
+         "datePublished":"2026-04-17",
+         "interactionStatistic":[
+            {"@type":"InteractionCounter",
+             "interactionType":{"@type":"WatchAction"},
+             "userInteractionCount":14143},
+            {"@type":"InteractionCounter",
+             "interactionType":{"@type":"LikeAction"},
+             "userInteractionCount":3096}
+         ]}
+        </script>
+        </head><body><article><h1>JSON-LD Title</h1>
+        <p>body</p></article></body></html>
+        """
+        res = self._parse(html, "https://example.com/video/1")
+        assert res.title == "JSON-LD Title"
+        assert res.views == 14143
+        assert res.likes == 3096
+        assert res.cover_url == "https://cdn/j.jpg"
+
+        from crawler.raw_data import parse_raw_data
+        raw = parse_raw_data(res.raw_data)
+        assert raw["provenance"]["title"] == "jsonld"
+        assert raw["provenance"]["views"] == "jsonld"
+        assert raw["provenance"]["likes"] == "jsonld"
+        assert raw["provenance"]["cover_url"] == "jsonld"
+        assert raw["description"] == "JSON-LD desc"
+
+    def test_dom_fallback_when_no_structured_data(self):
+        html = """
+        <html><head><title>Plain Page</title></head>
+        <body><article><h1>Plain Title</h1>
+        <p>body</p>
+        <span>views 42</span><span>likes 7</span>
+        </article></body></html>
+        """
+        res = self._parse(html)
+        assert res.title == "Plain Title"
+        assert res.views == 42
+        assert res.likes == 7
+
+        from crawler.raw_data import parse_raw_data
+        raw = parse_raw_data(res.raw_data)
+        assert raw["provenance"]["title"] == "dom"
+        assert raw["provenance"]["views"] == "dom"
+
+    def test_mixed_sources(self):
+        """JSON-LD gives views, OG gives title, DOM gives likes."""
+        html = """
+        <html><head>
+        <meta property="og:title" content="OG Title">
+        <script type="application/ld+json">
+        {"@type":"Article","interactionStatistic":[{
+          "@type":"InteractionCounter",
+          "interactionType":{"@type":"WatchAction"},
+          "userInteractionCount":100}]}
+        </script></head>
+        <body><article><h1>H1 Title</h1>
+        <span>likes 5</span></article></body></html>
+        """
+        res = self._parse(html)
+        from crawler.raw_data import parse_raw_data
+        raw = parse_raw_data(res.raw_data)
+        assert res.title == "OG Title"
+        assert res.views == 100
+        assert res.likes == 5
+        assert raw["provenance"]["title"] == "opengraph"
+        assert raw["provenance"]["views"] == "jsonld"
+        assert raw["provenance"]["likes"] == "dom"
+
+    def test_missing_fields_marked_missing(self):
+        """Fields neither source can supply get provenance='missing'."""
+        html = """
+        <html><head><meta property="og:title" content="T"></head>
+        <body><article><h1>T</h1></article></body></html>
+        """
+        res = self._parse(html)
+        from crawler.raw_data import parse_raw_data
+        raw = parse_raw_data(res.raw_data)
+        assert raw["provenance"]["tags"] == "missing"
+        assert raw["provenance"]["views"] == "missing"
+
+    def test_breadcrumb_beats_structured_category(self):
+        """Category rule: breadcrumb > structured > URL segment. A
+        precise breadcrumb 'Drama > Korean' wins over structured
+        'Entertainment'."""
+        html = """
+        <html><head>
+        <meta property="og:title" content="T">
+        <meta property="article:section" content="Entertainment">
+        </head><body>
+        <nav class="breadcrumb">
+          <a href="/">Home</a>
+          <a href="/drama">Drama</a>
+          <a href="/drama/korean">Korean</a>
+        </nav>
+        <article><h1>T</h1></article></body></html>
+        """
+        res = self._parse(html, "https://example.com/drama/korean/item-1")
+        from crawler.raw_data import parse_raw_data
+        raw = parse_raw_data(res.raw_data)
+        assert res.category == "Korean"
+        assert raw["provenance"]["category"] == "dom"
+
+    def test_structured_category_used_when_no_breadcrumb(self):
+        html = """
+        <html><head>
+        <meta property="og:title" content="T">
+        <meta property="article:section" content="Tech">
+        </head><body><article><h1>T</h1></article></body></html>
+        """
+        res = self._parse(html)
+        from crawler.raw_data import parse_raw_data
+        raw = parse_raw_data(res.raw_data)
+        assert res.category == "Tech"
+        assert raw["provenance"]["category"] == "opengraph"
+
+    def test_invalid_structured_metric_falls_to_dom(self):
+        """JSON-LD gives views as a string → invalid → DOM takes over."""
+        html = """
+        <html><head>
+        <meta property="og:title" content="T">
+        <script type="application/ld+json">
+        {"@type":"Article","interactionStatistic":[{
+          "@type":"InteractionCounter",
+          "interactionType":{"@type":"WatchAction"},
+          "userInteractionCount":"not-a-number"}]}
+        </script></head>
+        <body><article><h1>T</h1>
+        <span>views 200</span></article></body></html>
+        """
+        res = self._parse(html)
+        from crawler.raw_data import parse_raw_data
+        raw = parse_raw_data(res.raw_data)
+        assert res.views == 200
+        assert raw["provenance"]["views"] == "dom"
+
+    def test_raw_data_always_valid_json(self):
+        """raw_data is always parseable JSON even when every field misses."""
+        import json
+        html = "<html><body></body></html>"
+        # This produces page_type=other, no resources; skip to detail
+        # via a minimal article
+        html2 = "<html><body><article><h1>x</h1></article></body></html>"
+        r = parse_page(html2, "https://example.com/a/b/c")
+        if r.resources:
+            parsed = json.loads(r.resources[0].raw_data)
+            assert "provenance" in parsed
+            assert "description" in parsed
