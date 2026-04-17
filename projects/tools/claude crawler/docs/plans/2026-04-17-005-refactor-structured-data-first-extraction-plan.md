@@ -271,7 +271,7 @@ graph TB
     U8 -. Phase-1 exit gate .-> U9
 ```
 
-- [ ] **Unit 1: Provenance primitives + `raw_data` v1 schema**
+- [x] **Unit 1: Provenance primitives + `raw_data` v1 schema**
 
 **Goal:** 定义字段来源枚举、raw_data JSON v1 格式、写入/读出的统一 helper，作为后续 unit 的基础零件。
 
@@ -331,7 +331,7 @@ _parse_raw_data("not json")   # corrupt
 
 ---
 
-- [ ] **Unit 2: OpenGraph + Twitter Cards extractors**
+- [x] **Unit 2: OpenGraph + Twitter Cards extractors**
 
 **Goal:** 两个结构化源 helper：`_extract_opengraph(soup) -> dict` 和 `_extract_twitter_cards(soup) -> dict`，每个返回命中字段 dict。
 
@@ -374,7 +374,7 @@ _parse_raw_data("not json")   # corrupt
 
 ---
 
-- [ ] **Unit 3: microdata extractor**
+- [x] **Unit 3: microdata extractor**
 
 **Goal:** `_extract_microdata(soup) -> dict`，从 `[itemscope][itemtype]` 块读 `itemprop` 属性。
 
@@ -410,7 +410,7 @@ _parse_raw_data("not json")   # corrupt
 
 ---
 
-- [ ] **Unit 4: Consolidate JSON-LD extractor with full field coverage**
+- [x] **Unit 4: Consolidate JSON-LD extractor with full field coverage**
 
 **Goal:** 把散落的 `_extract_jsonld_metrics` 收敛为一个 `_extract_jsonld(blocks) -> dict` 返回全部结构化字段。`_parse_jsonld_blocks` 和 `_jsonld_has_detail_entity`（page_type 检测链路）保持不变（它们不读 metrics，不在收敛范围内）。`_extract_jsonld_metrics` 本身**降为 `_extract_jsonld` 内部实现细节**：不再作为顶层独立 helper —— 其既有调用点 `_extract_detail_resource` 改为通过 `_extract_jsonld` 取值，既有的 `_extract_jsonld_metrics` 测试搬迁到 `TestJsonLdExtractorFieldCoverage` 里的 metrics 子测试。
 
@@ -451,7 +451,7 @@ _parse_raw_data("not json")   # corrupt
 
 ---
 
-- [ ] **Unit 5: `_extract_structured` merge with priority**
+- [x] **Unit 5: `_extract_structured` merge with priority**
 
 **Goal:** 顶层入口函数，按 R4 优先级链路调用 4 个 source extractor，产出 `(merged_fields, provenance_map)`。
 
@@ -494,7 +494,7 @@ _parse_raw_data("not json")   # corrupt
 
 ---
 
-- [ ] **Unit 6: Wire `_extract_structured` into `_extract_detail_resource`**
+- [x] **Unit 6: Wire `_extract_structured` into `_extract_detail_resource`**
 
 **Goal:** 改造 `_extract_detail_resource`：先跑结构化抽取，未命中字段降级给现有 DOM 启发式。每字段记录最终来源进 raw_data。
 
@@ -535,7 +535,7 @@ _parse_raw_data("not json")   # corrupt
 
 ---
 
-- [ ] **Unit 7: Real-site fixtures + regression suite**
+- [x] **Unit 7: Real-site fixtures + regression suite**
 
 **Goal:** 建立跨源覆盖的 fixture 库作为长期 regression guard。
 
@@ -578,7 +578,7 @@ _parse_raw_data("not json")   # corrupt
 
 ---
 
-- [ ] **Unit 8: Export provenance columns**
+- [x] **Unit 8: Export provenance columns**
 
 **Goal:** CSV/JSON 导出增加每字段来源信息，外部数据分析可见。
 
