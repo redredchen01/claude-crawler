@@ -28,6 +28,7 @@ class Page:
     status: str = "pending"  # pending, fetched, parsed, failed
     fetched_at: str | None = None
     failure_reason: str = ""
+    cached: bool = False
 
 
 @dataclass

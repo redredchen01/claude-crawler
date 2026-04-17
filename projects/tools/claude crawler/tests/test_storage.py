@@ -10,7 +10,8 @@ from crawler.storage import (
     init_db, create_scan_job, delete_scan_job, get_scan_job, update_scan_job,
     list_scan_jobs, insert_page, insert_resource, get_resources,
     save_resource_with_tags, get_tags, get_resources_by_tag,
-    update_tag_counts, update_page,
+    update_tag_counts, update_page, get_connection,
+    get_cached_response, save_cached_response, clear_http_cache, get_cache_metrics,
 )
 from crawler.models import Resource
 
@@ -376,3 +377,135 @@ class TestDeleteScanJob:
         sj = self._seed(db_path)
         delete_scan_job(db_path, 99_999)
         assert get_scan_job(db_path, sj) is not None
+
+
+class TestHttpCache:
+    """Tests for HTTP response caching functionality."""
+
+    def test_get_cached_response_returns_none_for_uncached_url(self, db_path):
+        """Uncached URL should return None."""
+        with get_connection(db_path) as conn:
+            result = get_cached_response(conn, "https://example.com/page1")
+            assert result is None
+
+    def test_save_and_get_cached_response(self, db_path):
+        """Save cache entry and retrieve it."""
+        with get_connection(db_path) as conn:
+            url = "https://example.com/page1"
+            body = b"<html>content</html>"
+            save_cached_response(conn, url, "abc123", "Wed, 21 Oct 2025 07:28:00 GMT", "max-age=3600", body)
+            
+            result = get_cached_response(conn, url)
+            assert result is not None
+            assert result["etag"] == "abc123"
+            assert result["last_modified"] == "Wed, 21 Oct 2025 07:28:00 GMT"
+            assert result["cache_control"] == "max-age=3600"
+            assert result["response_body"] == body
+            assert result["size_bytes"] == len(body)
+
+    def test_save_cached_response_upsert(self, db_path):
+        """Saving to same URL updates cache entry (UPSERT)."""
+        with get_connection(db_path) as conn:
+            url = "https://example.com/page1"
+            # Initial insert
+            save_cached_response(conn, url, "v1", "date1", "max-age=3600", b"old")
+            # Update
+            save_cached_response(conn, url, "v2", "date2", "max-age=7200", b"new")
+            
+            result = get_cached_response(conn, url)
+            assert result["etag"] == "v2"
+            assert result["last_modified"] == "date2"
+            assert result["cache_control"] == "max-age=7200"
+            assert result["response_body"] == b"new"
+            assert result["size_bytes"] == 3
+
+    def test_save_cached_response_with_none_headers(self, db_path):
+        """Cache entry with missing etag/last_modified is allowed."""
+        with get_connection(db_path) as conn:
+            url = "https://example.com/page1"
+            save_cached_response(conn, url, None, None, None, b"body")
+            
+            result = get_cached_response(conn, url)
+            assert result is not None
+            assert result["etag"] is None
+            assert result["last_modified"] is None
+            assert result["cache_control"] is None
+            assert result["response_body"] == b"body"
+
+    def test_clear_http_cache(self, db_path):
+        """Clear all cached responses."""
+        with get_connection(db_path) as conn:
+            # Add some entries
+            save_cached_response(conn, "https://a.com", "etag1", None, None, b"a")
+            save_cached_response(conn, "https://b.com", "etag2", None, None, b"b")
+            save_cached_response(conn, "https://c.com", "etag3", None, None, b"c")
+            
+            # Verify they exist
+            assert get_cached_response(conn, "https://a.com") is not None
+            assert get_cached_response(conn, "https://b.com") is not None
+            
+            # Clear
+            clear_http_cache(conn)
+            
+            # Verify all gone
+            assert get_cached_response(conn, "https://a.com") is None
+            assert get_cached_response(conn, "https://b.com") is None
+            assert get_cached_response(conn, "https://c.com") is None
+
+    def test_get_cache_metrics(self, db_path):
+        """Metrics report cache size and entry count."""
+        with get_connection(db_path) as conn:
+            save_cached_response(conn, "https://a.com", None, None, None, b"abc")  # 3 bytes
+            save_cached_response(conn, "https://b.com", None, None, None, b"12345")  # 5 bytes
+            
+            metrics = get_cache_metrics(conn)
+            assert metrics["total_bytes"] == 8
+            assert metrics["entry_count"] == 2
+
+    def test_cache_metrics_empty(self, db_path):
+        """Metrics for empty cache."""
+        with get_connection(db_path) as conn:
+            metrics = get_cache_metrics(conn)
+            assert metrics["total_bytes"] == 0
+            assert metrics["entry_count"] == 0
+
+    def test_concurrent_cache_writes(self, db_path):
+        """Concurrent writes to same URL via UPSERT are safe."""
+        import concurrent.futures
+        
+        def write_cache(url, etag, body):
+            with get_connection(db_path) as conn:
+                save_cached_response(conn, url, etag, None, None, body)
+        
+        url = "https://example.com/concurrent"
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = []
+            for i in range(5):
+                futures.append(executor.submit(write_cache, url, f"etag{i}", f"body{i}".encode()))
+            concurrent.futures.wait(futures)
+        
+        # Final state should be valid (last write wins)
+        with get_connection(db_path) as conn:
+            result = get_cached_response(conn, url)
+            assert result is not None
+            # etag should be one of the values, not corrupted
+            assert result["etag"] in [f"etag{i}" for i in range(5)]
+
+    def test_migration_creates_http_cache_table(self, db_path):
+        """Migration should create http_cache table (tested via successful save/get)."""
+        # If table wasn't created, this would fail
+        with get_connection(db_path) as conn:
+            save_cached_response(conn, "https://example.com", "etag", None, None, b"test")
+            result = get_cached_response(conn, "https://example.com")
+            assert result is not None
+
+    def test_migration_adds_cached_column_to_pages(self, db_path):
+        """Migration should add pages.cached column."""
+        job_id = create_scan_job(db_path, "https://example.com", "example.com")
+        page_id = insert_page(db_path, job_id, "https://example.com/page1")
+        
+        # Column should exist and default to False
+        with get_connection(db_path) as conn:
+            row = conn.execute("SELECT cached FROM pages WHERE id = ?", (page_id,)).fetchone()
+            assert row is not None
+            assert row["cached"] == 0  # False in SQLite

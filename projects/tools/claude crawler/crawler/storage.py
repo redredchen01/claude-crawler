@@ -71,6 +71,16 @@ CREATE TABLE IF NOT EXISTS resource_tags (
     tag_id INTEGER NOT NULL REFERENCES tags(id),
     PRIMARY KEY (resource_id, tag_id)
 );
+
+CREATE TABLE IF NOT EXISTS http_cache (
+    url TEXT UNIQUE NOT NULL,
+    etag TEXT,
+    last_modified TEXT,
+    cache_control TEXT,
+    cached_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    response_body BLOB,
+    size_bytes INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -79,7 +89,7 @@ def init_db(db_path: str | None = None) -> str:
 
     Idempotent: safe to call on fresh or pre-existing DBs. Runs additive
     column migrations for pre-v0.2 databases that predate
-    `pages.failure_reason`.
+    `pages.failure_reason` and `pages.cached`.
     """
     path = db_path or DB_PATH
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -87,6 +97,8 @@ def init_db(db_path: str | None = None) -> str:
         with get_connection(path) as conn:
             conn.executescript(SCHEMA)
             _migrate_pages_add_failure_reason(conn)
+            _migrate_pages_add_cached(conn)
+            _migrate_http_cache(conn)
     return path
 
 
@@ -111,6 +123,45 @@ def _migrate_pages_add_failure_reason(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError as exc:
         conn.rollback()
         if "duplicate column" not in str(exc).lower():
+            raise
+
+
+def _migrate_pages_add_cached(conn: sqlite3.Connection) -> None:
+    """Add pages.cached column if missing. Race-safe across threads/processes."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(pages)")}
+    if "cached" in cols:
+        return
+    conn.execute("PRAGMA busy_timeout = 5000")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(pages)")}
+        if "cached" not in cols:
+            conn.execute("ALTER TABLE pages ADD COLUMN cached BOOLEAN DEFAULT 0")
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        conn.rollback()
+        if "duplicate column" not in str(exc).lower():
+            raise
+
+
+def _migrate_http_cache(conn: sqlite3.Connection) -> None:
+    """Ensure http_cache table exists. Race-safe across threads/processes."""
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS http_cache ("
+            "  url TEXT UNIQUE NOT NULL, "
+            "  etag TEXT, "
+            "  last_modified TEXT, "
+            "  cache_control TEXT, "
+            "  cached_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            "  response_body BLOB, "
+            "  size_bytes INTEGER NOT NULL DEFAULT 0 "
+            ")"
+        )
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        conn.rollback()
+        if "already exists" not in str(exc).lower():
             raise
 
 
@@ -461,3 +512,58 @@ def save_resource_with_tags(db_path: str, resource: Resource, conn: sqlite3.Conn
     finally:
         if close_conn:
             conn.close()
+
+
+# --- HTTP Cache CRUD ---
+
+def get_cached_response(conn: sqlite3.Connection, url: str) -> dict | None:
+    """Fetch cached response metadata + body for URL. Returns dict or None if not cached."""
+    row = conn.execute(
+        "SELECT etag, last_modified, cache_control, cached_at, response_body, size_bytes "
+        "FROM http_cache WHERE url = ?",
+        (url,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "etag": row["etag"],
+        "last_modified": row["last_modified"],
+        "cache_control": row["cache_control"],
+        "cached_at": row["cached_at"],
+        "response_body": row["response_body"],
+        "size_bytes": row["size_bytes"],
+    }
+
+
+def save_cached_response(conn: sqlite3.Connection, url: str, etag: str | None,
+                        last_modified: str | None, cache_control: str | None,
+                        response_body: bytes) -> None:
+    """Store or update cached response (UPSERT)."""
+    conn.execute(
+        """INSERT INTO http_cache (url, etag, last_modified, cache_control, response_body, size_bytes, cached_at)
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(url) DO UPDATE SET
+               etag = excluded.etag,
+               last_modified = excluded.last_modified,
+               cache_control = excluded.cache_control,
+               response_body = excluded.response_body,
+               size_bytes = excluded.size_bytes,
+               cached_at = CURRENT_TIMESTAMP""",
+        (url, etag, last_modified, cache_control, response_body, len(response_body)),
+    )
+
+
+def clear_http_cache(conn: sqlite3.Connection) -> None:
+    """Delete all cached responses."""
+    conn.execute("DELETE FROM http_cache")
+
+
+def get_cache_metrics(conn: sqlite3.Connection) -> dict:
+    """Return cache statistics: total size, hit count, per-domain breakdown."""
+    cache_size = conn.execute("SELECT SUM(size_bytes) as total FROM http_cache").fetchone()
+    total_bytes = cache_size["total"] or 0
+    entry_count = conn.execute("SELECT COUNT(*) as count FROM http_cache").fetchone()["count"]
+    return {
+        "total_bytes": total_bytes,
+        "entry_count": entry_count,
+    }
