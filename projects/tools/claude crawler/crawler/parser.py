@@ -71,6 +71,29 @@ _METRIC_YEAR_CONTEXT_RE = re.compile(
     r"©|copyright|since|founded|版权|创建于|建立于|成立于", re.I,
 )
 
+# --- Cover image picker ---------------------------------------------------
+#
+# `container.find("img")` used to return the first <img> in the article,
+# which is often a tracking pixel, social-share icon, or decorative
+# header. The picker below: walks lazy-load attrs in priority order,
+# rejects data: URIs, filters obvious icon/logo URL patterns, drops
+# tiny declared dimensions, and prefers the largest qualifying image.
+
+# Lazy-load attribute priority — sites use one of these to hold the real
+# image URL while `src` carries a placeholder.
+_LAZY_SRC_ATTRS = ("data-src", "data-lazy-src", "data-original", "src")
+
+# URL-pattern blocklist for non-cover images: site logos, user avatars,
+# tracking pixels, decorative spacers, generic placeholders.
+_ICON_URL_RE = re.compile(
+    r"/(logo|icon|avatar|pixel|blank|spacer|placeholder)[\b./_-]", re.I,
+)
+
+# Below this dimension, a declared <img width/height> is treated as a
+# decorative element (favicon, social-share icon, ratings star). Real
+# article covers virtually always exceed this on at least one axis.
+_MIN_COVER_DIMENSION = 50
+
 
 def _class_tokens(el: BsTag) -> str:
     """Return the element's class list joined with spaces (empty if none)."""
@@ -541,6 +564,97 @@ def _pick_main_container(soup: BeautifulSoup):
     return None
 
 
+def _resolve_img_src(img: BsTag) -> str:
+    """Walk lazy-load attrs in priority order, picking the first non-empty.
+
+    Special-cases ``srcset`` (when present) by selecting the largest
+    declared width. Returns ``""`` if no usable URL is present.
+    """
+    for attr in _LAZY_SRC_ATTRS:
+        val = img.get(attr)
+        if val and isinstance(val, str) and val.strip():
+            return val.strip()
+    srcset = img.get("srcset")
+    if srcset and isinstance(srcset, str):
+        # `url1 320w, url2 640w, url3 1024w` — keep the largest by Nw token.
+        best_url, best_w = "", -1
+        for entry in srcset.split(","):
+            parts = entry.strip().split()
+            if not parts:
+                continue
+            url_part = parts[0]
+            w = 0
+            if len(parts) >= 2 and parts[1].endswith("w"):
+                try:
+                    w = int(parts[1][:-1])
+                except ValueError:
+                    pass
+            if w > best_w:
+                best_url, best_w = url_part, w
+        return best_url
+    return ""
+
+
+def _img_qualifies(img: BsTag, src: str) -> bool:
+    """True if ``src`` looks like a real cover candidate (not data: / icon /
+    sub-50px decorative element)."""
+    if not src or src.startswith("data:"):
+        return False
+    if _ICON_URL_RE.search(src):
+        return False
+    try:
+        w = int(img.get("width", 0) or 0)
+        h = int(img.get("height", 0) or 0)
+    except (TypeError, ValueError):
+        w = h = 0
+    if w and h and w < _MIN_COVER_DIMENSION and h < _MIN_COVER_DIMENSION:
+        return False
+    return True
+
+
+def _pick_cover_image(soup, container, base_url: str) -> str:
+    """Pick the most likely cover image for the resource.
+
+    Priority: ``og:image`` (from <head>) → ``twitter:image`` meta →
+    largest qualifying ``<img>`` inside ``container`` → empty string.
+
+    ``og:image``/``twitter:image`` skip ``data:`` URIs (placeholder
+    payloads SEO scrapers sometimes return); container scan applies the
+    full lazy-load + icon/avatar / size filter.
+
+    Pass ``soup=None`` to skip the meta-tag step (used by list-card
+    extraction, where each card needs its own thumbnail rather than the
+    page-wide og:image).
+    """
+    if soup is not None:
+        for meta_key in ("og:image", "twitter:image"):
+            candidate = _extract_meta(soup, meta_key)
+            if candidate and not candidate.startswith("data:"):
+                return urljoin(base_url, candidate)
+
+    if container is None:
+        return ""
+
+    qualifying: list[tuple[int, str]] = []
+    for img in container.find_all("img"):
+        src = _resolve_img_src(img)
+        if not _img_qualifies(img, src):
+            continue
+        try:
+            w = int(img.get("width", 0) or 0)
+            h = int(img.get("height", 0) or 0)
+        except (TypeError, ValueError):
+            w = h = 0
+        qualifying.append((w * h, src))
+
+    if not qualifying:
+        return ""
+    # Largest by declared area (0 area = no W/H attrs); ties resolved by
+    # document order (Python's sort is stable).
+    qualifying.sort(key=lambda t: t[0], reverse=True)
+    return urljoin(base_url, qualifying[0][1])
+
+
 def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
     """Extract a single Resource from a detail page."""
     # Title — og:title first, then h1, then <title> (with suffix-strip).
@@ -568,12 +682,9 @@ def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
     # See _pick_main_container for the multi-article disambiguation rules.
     container = _pick_main_container(soup)
 
-    # Cover image
-    cover_url = _extract_meta(soup, "og:image")
-    if not cover_url and container:
-        img = container.find("img")
-        if img and img.get("src"):
-            cover_url = urljoin(url, img["src"])
+    # Cover image — see _pick_cover_image for the og:image / lazy-load /
+    # icon-filter rules.
+    cover_url = _pick_cover_image(soup, container, url)
 
     # Tags — restrict to the article container when available; otherwise
     # fall back to whole-document scoring but apply the tag-cloud cap
@@ -705,13 +816,11 @@ def _extract_list_resources(soup: BeautifulSoup, url: str) -> list[Resource]:
         # URL
         res_url = urljoin(url, a_tag["href"])
 
-        # Cover — prefer data-src (lazy-loaded) over src placeholder
-        img = card.find("img")
-        if img:
-            img_src = img.get("data-src") or img.get("src") or ""
-            cover = urljoin(url, img_src) if img_src else ""
-        else:
-            cover = ""
+        # Cover — same picker as detail pages so the two paths share the
+        # lazy-load + icon/avatar / size filter rules. Pass `None` for
+        # soup so list cards don't grab the page-wide og:image (each card
+        # needs its own thumbnail).
+        cover = _pick_cover_image(BeautifulSoup("", "lxml"), card, url)
 
         # Tags (optional in cards) — same scoring path as detail pages so
         # the two extractors don't drift in behavior.

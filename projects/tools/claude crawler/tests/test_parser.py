@@ -748,3 +748,110 @@ class TestDetailMetricsScopedToContainer:
         assert result.page_type == "detail"
         # Container view count, not sidebar.
         assert result.resources[0].views == 42
+
+
+class TestKissavsStyleStructuredSite:
+    """End-to-end coverage of a site shaped like kissavs.com:
+
+      - No <article>/<main>; main content in <section class="video-info">
+      - JSON-LD VideoObject + InteractionCounter(WatchAction, LikeAction)
+      - og:title carries an SEO chain (Title｜Section｜Brand)
+      - Breadcrumb ends at the current item (self-link)
+
+    Each assertion protects a specific regression observed on the real
+    site before the multi-fix landed (page-type fell through to list,
+    title was "登入" from a sidebar card, metrics were 0, category was
+    the item slug).
+    """
+
+    HTML = """\
+<!DOCTYPE html>
+<html>
+<head>
+<meta property="og:title" content="GRACE-029 诱惑Sweet Room｜角色剧情｜KISSAVS">
+<meta property="og:image" content="https://cdn.example.com/grace-029.jpg">
+<script type="application/ld+json">
+{
+  "@context": "http://schema.org",
+  "@type": "VideoObject",
+  "name": "GRACE-029 诱惑Sweet Room",
+  "interactionStatistic": [
+    {"@type": "InteractionCounter",
+     "interactionType": {"@type": "WatchAction"},
+     "userInteractionCount": 14143},
+    {"@type": "InteractionCounter",
+     "interactionType": {"@type": "LikeAction"},
+     "userInteractionCount": 3096}
+  ]
+}
+</script>
+</head>
+<body>
+<ul class="dx-breadcrumbs">
+  <li><a href="/">首页</a></li>
+  <li><a href="/av/theme/roleplay/hot/">角色剧情</a></li>
+  <li><a href="/video/grace-029/">GRACE-029</a></li>
+</ul>
+<section class="video-info">
+  <h1>GRACE-029 诱惑Sweet Room</h1>
+  <svg><use xlink:href="/icons.svg#icon-eye"></use></svg>
+  <span class="mr-3">14143</span>
+  <button class="btn">
+    <span class="mr-2">点赞</span>
+    <svg><use xlink:href="/icons.svg#icon-heart"></use></svg>
+    <span class="count" id="bind_like_count">3096</span>
+  </button>
+  <div class="tags h6-md">
+    <a href="/av/theme/roleplay/" class="cat">角色剧情</a>
+    <a href="/av/tag/%E5%A4%AB%E5%A6%BB/">夫妻</a>
+    <a href="/av/tag/%E6%83%85%E8%89%B2/">情色</a>
+  </div>
+</section>
+<script>
+  // Script content mentioning "heart" used to crash the keyword
+  // heuristic into returning a stray digit as hearts=1.
+  var heartConfig = { count: 1 };
+</script>
+</body>
+</html>
+"""
+
+    def test_page_type_detail_via_jsonld(self):
+        """VideoObject in JSON-LD forces detail classification even
+        without <article>/<main>."""
+        r = parse_page(self.HTML, "https://example.com/video/grace-029/")
+        assert r.page_type == "detail"
+
+    def test_section_video_info_used_as_container(self):
+        """Main-container fallback picks section[class*='video']."""
+        r = parse_page(self.HTML, "https://example.com/video/grace-029/")
+        # Tags inside <section class="video-info"> are found (scope worked).
+        assert set(r.resources[0].tags) == {"夫妻", "情色"}
+
+    def test_views_and_likes_from_jsonld(self):
+        r = parse_page(self.HTML, "https://example.com/video/grace-029/")
+        res = r.resources[0]
+        assert res.views == 14143
+        assert res.likes == 3096
+
+    def test_hearts_not_polluted_by_script_text(self):
+        """`<script>` with a 'heart' string in it must not leak a digit
+        into hearts — pre-fix this returned 1 from the script body."""
+        r = parse_page(self.HTML, "https://example.com/video/grace-029/")
+        assert r.resources[0].hearts == 0
+
+    def test_title_seo_chain_stripped(self):
+        """og:title with 2+ pipes strips the brand tail."""
+        r = parse_page(self.HTML, "https://example.com/video/grace-029/")
+        assert r.resources[0].title == "GRACE-029 诱惑Sweet Room"
+
+    def test_title_preserves_product_code_hyphen(self):
+        """Hyphen in 'GRACE-029' must not be treated as a separator."""
+        r = parse_page(self.HTML, "https://example.com/video/grace-029/")
+        assert "GRACE-029" in r.resources[0].title
+
+    def test_breadcrumb_skips_current_item_self_link(self):
+        """Last breadcrumb href == current URL path → use the one
+        before it as category."""
+        r = parse_page(self.HTML, "https://example.com/video/grace-029/")
+        assert r.resources[0].category == "角色剧情"
