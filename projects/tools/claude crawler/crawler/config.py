@@ -8,13 +8,17 @@ MAX_DEPTH = 3
 # REQ_PER_SEC_PER_DOMAIN + token bucket.
 RATE_LIMIT = 1.0
 
-RETRY_COUNT = 3
-RETRY_BACKOFF = [1, 3, 9]  # seconds
+RETRY_COUNT = 2
+RETRY_BACKOFF = [1, 3]  # seconds
 
 # --- HTTP fetcher ---
 # Per-request timeout (connect, read). Tuple lets connect timeouts fail fast
-# while still tolerating slow but progressing reads.
-HTTP_TIMEOUT = (10, 30)
+# while still tolerating slow but progressing reads. Worst case per URL is
+# RETRY_COUNT * (connect + read) + sum(backoffs) ≈ 2 * 20 + 4 = 44s, which
+# stays comfortably under engine.shutdown's 5s drain budget for the median
+# in-flight worker. Previous (10, 30) × 3 + [1,3,9] = 124s starved
+# ThreadPoolExecutor's shutdown grace period on hostile sites.
+HTTP_TIMEOUT = (5, 15)
 # Hard cap on body size (bytes). Stream-aborted past this — defends a single
 # hostile/huge response from chewing memory or starving worker time.
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024  # 5 MB

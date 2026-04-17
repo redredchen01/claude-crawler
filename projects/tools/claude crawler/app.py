@@ -155,7 +155,18 @@ def render_sidebar(db_path: str):
                     st.session_state.pop("pending_delete_id", None)
                     st.rerun()
             with col_del:
+                # Block delete of the *currently running* scan: the live
+                # WriterThread is still INSERTing pages/resources for that
+                # scan_job_id, and tearing the parent row out from under
+                # it triggers an FK violation that crashes the writer.
+                is_running_target = (
+                    st.session_state.get("scan_running")
+                    and st.session_state.get("scan_job_id") == selected_id
+                )
                 if st.button("Delete", key="sidebar_btn_delete",
+                             disabled=is_running_target,
+                             help=("Stop the running scan before deleting it"
+                                   if is_running_target else None),
                              use_container_width=True):
                     st.session_state.pending_delete_id = selected_id
             if st.session_state.get("pending_delete_id") == selected_id:

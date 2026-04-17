@@ -187,8 +187,14 @@ def delete_scan_job(db_path: str, job_id: int) -> None:
     Schema declares FKs without ON DELETE CASCADE, so we delete children
     explicitly inside one transaction. Order matters: resource_tags →
     tags/resources → pages → scan_jobs.
+
+    Uses ``BEGIN IMMEDIATE`` so contention with a live WriterThread either
+    resolves quickly (writer commits, our delete runs) or fails fast on a
+    clear "database is locked" rather than letting the writer's next INSERT
+    silently fail an FK constraint after we deleted the parent row.
     """
     with get_connection(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             "DELETE FROM resource_tags WHERE resource_id IN "
             "(SELECT id FROM resources WHERE scan_job_id = ?)",
