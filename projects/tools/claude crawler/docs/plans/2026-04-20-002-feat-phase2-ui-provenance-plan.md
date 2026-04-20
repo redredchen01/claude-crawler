@@ -1,8 +1,9 @@
 ---
 title: "feat: Streamlit UI Provenance Display (Phase 2)"
 type: feat
-status: active
+status: complete
 date: 2026-04-20
+completed: 2026-04-20
 origin: docs/plans/2026-04-17-005-refactor-structured-data-first-extraction-plan.md#Unit-9
 ---
 

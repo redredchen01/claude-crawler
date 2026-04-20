@@ -1565,6 +1565,11 @@ def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
 def _extract_list_resources(soup: BeautifulSoup, url: str) -> list[Resource]:
     """Extract multiple Resources from a list/tag page."""
     resources: list[Resource] = []
+    from crawler.raw_data import (
+        PROVENANCE_DOM,
+        PROVENANCE_JSONLD,
+        build_raw_data,
+    )
 
     # Find repeated card structures. Rather than committing to the first
     # non-empty tier, compute all three sources and pick whichever is
@@ -1650,6 +1655,31 @@ def _extract_list_resources(soup: BeautifulSoup, url: str) -> list[Resource]:
         likes = card_metrics.get('likes') or _extract_metric(card, ["likes", "like", "赞", "点赞"])
         hearts = card_metrics.get('hearts') or _extract_metric(card, ["hearts", "heart", "爱心", "收藏"])
 
+        # Track provenance for list items
+        provenance = {}
+
+        # Metrics source tracking
+        if 'views' in card_metrics:
+            provenance['views'] = PROVENANCE_JSONLD
+        elif views:
+            provenance['views'] = PROVENANCE_DOM
+        if 'likes' in card_metrics:
+            provenance['likes'] = PROVENANCE_JSONLD
+        elif likes:
+            provenance['likes'] = PROVENANCE_DOM
+        if 'hearts' in card_metrics:
+            provenance['hearts'] = PROVENANCE_JSONLD
+        elif hearts:
+            provenance['hearts'] = PROVENANCE_DOM
+        
+        # Other fields from card DOM
+        if tags:
+            provenance['tags'] = PROVENANCE_DOM
+        if title:
+            provenance['title'] = PROVENANCE_DOM
+        
+        raw_data = build_raw_data(provenance)
+        
         resources.append(Resource(
             title=title,
             url=res_url,
@@ -1658,6 +1688,7 @@ def _extract_list_resources(soup: BeautifulSoup, url: str) -> list[Resource]:
             views=views,
             likes=likes,
             hearts=hearts,
+            raw_data=raw_data,
         ))
 
     return resources

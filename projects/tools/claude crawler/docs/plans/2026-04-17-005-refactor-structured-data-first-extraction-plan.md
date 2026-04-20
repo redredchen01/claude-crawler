@@ -610,7 +610,7 @@ _parse_raw_data("not json")   # corrupt
 
 ---
 
-- [ ] **Unit 9: Streamlit UI provenance display** *(Phase 2 — deferred)*
+- [x] **Unit 9: Streamlit UI provenance display** *(Phase 2 — complete 2026-04-20)*
 
 **Goal:** `render_rankings` 的 dataframe 提供字段来源可见性。
 
