@@ -1044,7 +1044,7 @@ def _detect_page_type(html: str, url: str, soup: BeautifulSoup) -> str:
     # Covers: /detail/, /video/, /article/, /post/, /novel/, /chapter/, etc.
     detail_patterns = [
         "/detail/", "/video/", "/article/", "/post/", "/chapter/",
-        "/novel/", "/story/, /item/", "/view/", "/watch/"
+        "/novel/", "/story/", "/item/", "/view/", "/watch/"
     ]
     if any(p in url for p in detail_patterns) and not is_root:
         return "detail"
