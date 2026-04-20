@@ -269,7 +269,8 @@ _WEAK_TITLE_MAX_LEN = 6
 _LISTING_PATH_RE = re.compile(
     r"/(updates|list|search|archive|archives|category|categories|"
     r"channel|channels|tag|tags|theme|themes|hot|new|recent|trending|"
-    r"popular|latest|page/\d+)/?",
+    r"popular|latest|page/\d+|browse|index|feed|feeds)"
+    r"(?!/(?:item|view|watch|detail|article|post|video)/[a-z0-9-]+)/?",
     re.I,
 )
 # Thumbnail count that tips a page into "list" unconditionally. Detail
