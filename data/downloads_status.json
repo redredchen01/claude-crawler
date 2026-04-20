@@ -1,0 +1,443 @@
+{
+  "scan_time": "2026-04-20T10:46:03.881767",
+  "downloads_path": "/Users/dex/Downloads",
+  "summary": {
+    "total_files": 24,
+    "total_size": 443176678,
+    "total_size_human": "422.65 MB",
+    "unique_extensions": 11
+  },
+  "extensions_rank": [
+    {
+      "extension": ".mp4",
+      "count": 5,
+      "size": 86144189,
+      "size_human": "82.15 MB"
+    },
+    {
+      "extension": ".pdf",
+      "count": 3,
+      "size": 137618,
+      "size_human": "134.39 KB"
+    },
+    {
+      "extension": ".md",
+      "count": 2,
+      "size": 9368,
+      "size_human": "9.15 KB"
+    },
+    {
+      "extension": ".zip",
+      "count": 2,
+      "size": 29858,
+      "size_human": "29.16 KB"
+    },
+    {
+      "extension": "[no_ext]",
+      "count": 2,
+      "size": 10244,
+      "size_human": "10.00 KB"
+    },
+    {
+      "extension": ".dmg",
+      "count": 2,
+      "size": 351841644,
+      "size_human": "335.54 MB"
+    },
+    {
+      "extension": ".csv",
+      "count": 2,
+      "size": 188533,
+      "size_human": "184.11 KB"
+    },
+    {
+      "extension": ".png",
+      "count": 2,
+      "size": 4604752,
+      "size_human": "4.39 MB"
+    },
+    {
+      "extension": ".json",
+      "count": 2,
+      "size": 201760,
+      "size_human": "197.03 KB"
+    },
+    {
+      "extension": ".skill",
+      "count": 1,
+      "size": 4356,
+      "size_human": "4.25 KB"
+    }
+  ],
+  "hotspots": {
+    "large_files_threshold": "100MB",
+    "large_files_count": 2,
+    "large_files": [
+      {
+        "name": "Recordly-arm64.dmg",
+        "size_human": "184.49 MB"
+      },
+      {
+        "name": "Cavalry.dmg",
+        "size_human": "151.06 MB"
+      }
+    ]
+  },
+  "recent_files": [
+    {
+      "name": "kissav.mp4",
+      "path": "/Users/dex/Downloads/kissav.mp4",
+      "size": 38490695,
+      "size_human": "36.71 MB",
+      "modified_time": "2026-04-17T17:43:33.144894",
+      "extension": ".mp4"
+    },
+    {
+      "name": "tags_9.csv",
+      "path": "/Users/dex/Downloads/tags_9.csv",
+      "size": 1433,
+      "size_human": "1.40 KB",
+      "modified_time": "2026-04-17T17:42:32.568391",
+      "extension": ".csv"
+    },
+    {
+      "name": ".com.anthropic.claudefordesktop.6P3maO",
+      "path": "/Users/dex/Downloads/.com.anthropic.claudefordesktop.6P3maO",
+      "size": 4356,
+      "size_human": "4.25 KB",
+      "modified_time": "2026-04-17T17:33:24.982749",
+      "extension": ".6p3mao"
+    },
+    {
+      "name": "exec-weekly-report-brief.skill",
+      "path": "/Users/dex/Downloads/exec-weekly-report-brief.skill",
+      "size": 4356,
+      "size_human": "4.25 KB",
+      "modified_time": "2026-04-17T17:33:23.106997",
+      "extension": ".skill"
+    },
+    {
+      "name": "2026-04-17T08-40_export.csv",
+      "path": "/Users/dex/Downloads/2026-04-17T08-40_export.csv",
+      "size": 187100,
+      "size_human": "182.71 KB",
+      "modified_time": "2026-04-17T16:40:13.217974",
+      "extension": ".csv"
+    },
+    {
+      "name": "ChatGPT Image 2026年4月17日 下午03_03_13.png",
+      "path": "/Users/dex/Downloads/ChatGPT Image 2026年4月17日 下午03_03_13.png",
+      "size": 2442471,
+      "size_human": "2.33 MB",
+      "modified_time": "2026-04-17T15:03:14.187342",
+      "extension": ".png"
+    },
+    {
+      "name": "Cavalry.dmg",
+      "path": "/Users/dex/Downloads/Cavalry.dmg",
+      "size": 158392751,
+      "size_human": "151.06 MB",
+      "modified_time": "2026-04-17T13:00:39.814777",
+      "extension": ".dmg"
+    },
+    {
+      "name": "xhssex.json",
+      "path": "/Users/dex/Downloads/xhssex.json",
+      "size": 201345,
+      "size_human": "196.63 KB",
+      "modified_time": "2026-04-17T11:28:49.102615",
+      "extension": ".json"
+    },
+    {
+      "name": "yy1735_2604_claudecode.pdf",
+      "path": "/Users/dex/Downloads/yy1735_2604_claudecode.pdf",
+      "size": 57255,
+      "size_human": "55.91 KB",
+      "modified_time": "2026-04-16T16:16:30.383637",
+      "extension": ".pdf"
+    },
+    {
+      "name": "0416.json",
+      "path": "/Users/dex/Downloads/0416.json",
+      "size": 415,
+      "size_human": "415.00 B",
+      "modified_time": "2026-04-16T15:14:51.525959",
+      "extension": ".json"
+    },
+    {
+      "name": ".DS_Store",
+      "path": "/Users/dex/Downloads/.DS_Store",
+      "size": 10244,
+      "size_human": "10.00 KB",
+      "modified_time": "2026-04-16T12:46:31.395653",
+      "extension": "[no_ext]"
+    },
+    {
+      "name": "yy1735_202604.pdf",
+      "path": "/Users/dex/Downloads/yy1735_202604.pdf",
+      "size": 23834,
+      "size_human": "23.28 KB",
+      "modified_time": "2026-04-16T12:44:49.022043",
+      "extension": ".pdf"
+    },
+    {
+      "name": "claudecode_2604.pdf",
+      "path": "/Users/dex/Downloads/claudecode_2604.pdf",
+      "size": 56529,
+      "size_human": "55.20 KB",
+      "modified_time": "2026-04-16T12:41:53.127564",
+      "extension": ".pdf"
+    },
+    {
+      "name": "export-1776162298586.mp4",
+      "path": "/Users/dex/Downloads/export-1776162298586.mp4",
+      "size": 12653301,
+      "size_human": "12.07 MB",
+      "modified_time": "2026-04-14T18:25:08.847551",
+      "extension": ".mp4"
+    },
+    {
+      "name": "找封面.mp4",
+      "path": "/Users/dex/Downloads/找封面.mp4",
+      "size": 29887575,
+      "size_human": "28.50 MB",
+      "modified_time": "2026-04-13T16:43:19.427092",
+      "extension": ".mp4"
+    },
+    {
+      "name": "dfa91baa2d80b7ca4214f7a5c461a0d8.zip",
+      "path": "/Users/dex/Downloads/dfa91baa2d80b7ca4214f7a5c461a0d8.zip",
+      "size": 15787,
+      "size_human": "15.42 KB",
+      "modified_time": "2026-04-13T15:49:02.110431",
+      "extension": ".zip"
+    },
+    {
+      "name": "video_Lossess_Compress_2604_v11.zip",
+      "path": "/Users/dex/Downloads/video_Lossess_Compress_2604_v11.zip",
+      "size": 14071,
+      "size_human": "13.74 KB",
+      "modified_time": "2026-04-10T18:28:34.725204",
+      "extension": ".zip"
+    },
+    {
+      "name": "Recordly-arm64.dmg",
+      "path": "/Users/dex/Downloads/Recordly-arm64.dmg",
+      "size": 193448893,
+      "size_human": "184.49 MB",
+      "modified_time": "2026-04-10T14:42:24.364691",
+      "extension": ".dmg"
+    },
+    {
+      "name": "hugZ7k11ID1UGv6_.mp4",
+      "path": "/Users/dex/Downloads/hugZ7k11ID1UGv6_.mp4",
+      "size": 2383026,
+      "size_human": "2.27 MB",
+      "modified_time": "2026-04-10T11:05:53.079559",
+      "extension": ".mp4"
+    },
+    {
+      "name": "pMVDIV1s9RFnAFbs.mp4",
+      "path": "/Users/dex/Downloads/pMVDIV1s9RFnAFbs.mp4",
+      "size": 2729592,
+      "size_human": "2.60 MB",
+      "modified_time": "2026-04-10T11:04:50.776641",
+      "extension": ".mp4"
+    }
+  ],
+  "all_files": [
+    {
+      "name": "exec-weekly-report-brief.skill",
+      "path": "/Users/dex/Downloads/exec-weekly-report-brief.skill",
+      "size": 4356,
+      "size_human": "4.25 KB",
+      "modified_time": "2026-04-17T17:33:23.106997",
+      "extension": ".skill"
+    },
+    {
+      "name": ".com.anthropic.claudefordesktop.6P3maO",
+      "path": "/Users/dex/Downloads/.com.anthropic.claudefordesktop.6P3maO",
+      "size": 4356,
+      "size_human": "4.25 KB",
+      "modified_time": "2026-04-17T17:33:24.982749",
+      "extension": ".6p3mao"
+    },
+    {
+      "name": "kissav.mp4",
+      "path": "/Users/dex/Downloads/kissav.mp4",
+      "size": 38490695,
+      "size_human": "36.71 MB",
+      "modified_time": "2026-04-17T17:43:33.144894",
+      "extension": ".mp4"
+    },
+    {
+      "name": "EXECUTION_SUMMARY.md",
+      "path": "/Users/dex/Downloads/EXECUTION_SUMMARY.md",
+      "size": 5825,
+      "size_human": "5.69 KB",
+      "modified_time": "2026-04-09T17:56:04.707727",
+      "extension": ".md"
+    },
+    {
+      "name": "dfa91baa2d80b7ca4214f7a5c461a0d8.zip",
+      "path": "/Users/dex/Downloads/dfa91baa2d80b7ca4214f7a5c461a0d8.zip",
+      "size": 15787,
+      "size_human": "15.42 KB",
+      "modified_time": "2026-04-13T15:49:02.110431",
+      "extension": ".zip"
+    },
+    {
+      "name": ".DS_Store",
+      "path": "/Users/dex/Downloads/.DS_Store",
+      "size": 10244,
+      "size_human": "10.00 KB",
+      "modified_time": "2026-04-16T12:46:31.395653",
+      "extension": "[no_ext]"
+    },
+    {
+      "name": "找封面.mp4",
+      "path": "/Users/dex/Downloads/找封面.mp4",
+      "size": 29887575,
+      "size_human": "28.50 MB",
+      "modified_time": "2026-04-13T16:43:19.427092",
+      "extension": ".mp4"
+    },
+    {
+      "name": "hugZ7k11ID1UGv6_.mp4",
+      "path": "/Users/dex/Downloads/hugZ7k11ID1UGv6_.mp4",
+      "size": 2383026,
+      "size_human": "2.27 MB",
+      "modified_time": "2026-04-10T11:05:53.079559",
+      "extension": ".mp4"
+    },
+    {
+      "name": "export-1776162298586.mp4",
+      "path": "/Users/dex/Downloads/export-1776162298586.mp4",
+      "size": 12653301,
+      "size_human": "12.07 MB",
+      "modified_time": "2026-04-14T18:25:08.847551",
+      "extension": ".mp4"
+    },
+    {
+      "name": "yy1735_202604.pdf",
+      "path": "/Users/dex/Downloads/yy1735_202604.pdf",
+      "size": 23834,
+      "size_human": "23.28 KB",
+      "modified_time": "2026-04-16T12:44:49.022043",
+      "extension": ".pdf"
+    },
+    {
+      "name": ".localized",
+      "path": "/Users/dex/Downloads/.localized",
+      "size": 0,
+      "size_human": "0.00 B",
+      "modified_time": "2026-03-23T11:04:25.538148",
+      "extension": "[no_ext]"
+    },
+    {
+      "name": "VP_DIAGNOSTIC_REPORT.md",
+      "path": "/Users/dex/Downloads/VP_DIAGNOSTIC_REPORT.md",
+      "size": 3543,
+      "size_human": "3.46 KB",
+      "modified_time": "2026-04-09T17:55:37.057849",
+      "extension": ".md"
+    },
+    {
+      "name": "video_Lossess_Compress_2604_v11.zip",
+      "path": "/Users/dex/Downloads/video_Lossess_Compress_2604_v11.zip",
+      "size": 14071,
+      "size_human": "13.74 KB",
+      "modified_time": "2026-04-10T18:28:34.725204",
+      "extension": ".zip"
+    },
+    {
+      "name": "Recordly-arm64.dmg",
+      "path": "/Users/dex/Downloads/Recordly-arm64.dmg",
+      "size": 193448893,
+      "size_human": "184.49 MB",
+      "modified_time": "2026-04-10T14:42:24.364691",
+      "extension": ".dmg"
+    },
+    {
+      "name": "tags_9.csv",
+      "path": "/Users/dex/Downloads/tags_9.csv",
+      "size": 1433,
+      "size_human": "1.40 KB",
+      "modified_time": "2026-04-17T17:42:32.568391",
+      "extension": ".csv"
+    },
+    {
+      "name": "ChatGPT Image 2026年4月17日 下午03_03_13.png",
+      "path": "/Users/dex/Downloads/ChatGPT Image 2026年4月17日 下午03_03_13.png",
+      "size": 2442471,
+      "size_human": "2.33 MB",
+      "modified_time": "2026-04-17T15:03:14.187342",
+      "extension": ".png"
+    },
+    {
+      "name": "Cavalry.dmg",
+      "path": "/Users/dex/Downloads/Cavalry.dmg",
+      "size": 158392751,
+      "size_human": "151.06 MB",
+      "modified_time": "2026-04-17T13:00:39.814777",
+      "extension": ".dmg"
+    },
+    {
+      "name": "yy1735_2604_claudecode.pdf",
+      "path": "/Users/dex/Downloads/yy1735_2604_claudecode.pdf",
+      "size": 57255,
+      "size_human": "55.91 KB",
+      "modified_time": "2026-04-16T16:16:30.383637",
+      "extension": ".pdf"
+    },
+    {
+      "name": "0416.json",
+      "path": "/Users/dex/Downloads/0416.json",
+      "size": 415,
+      "size_human": "415.00 B",
+      "modified_time": "2026-04-16T15:14:51.525959",
+      "extension": ".json"
+    },
+    {
+      "name": "pMVDIV1s9RFnAFbs.mp4",
+      "path": "/Users/dex/Downloads/pMVDIV1s9RFnAFbs.mp4",
+      "size": 2729592,
+      "size_human": "2.60 MB",
+      "modified_time": "2026-04-10T11:04:50.776641",
+      "extension": ".mp4"
+    },
+    {
+      "name": "0407_test_preview_fast_cover.png",
+      "path": "/Users/dex/Downloads/0407_test_preview_fast_cover.png",
+      "size": 2162281,
+      "size_human": "2.06 MB",
+      "modified_time": "2026-04-09T17:55:31.654414",
+      "extension": ".png"
+    },
+    {
+      "name": "claudecode_2604.pdf",
+      "path": "/Users/dex/Downloads/claudecode_2604.pdf",
+      "size": 56529,
+      "size_human": "55.20 KB",
+      "modified_time": "2026-04-16T12:41:53.127564",
+      "extension": ".pdf"
+    },
+    {
+      "name": "2026-04-17T08-40_export.csv",
+      "path": "/Users/dex/Downloads/2026-04-17T08-40_export.csv",
+      "size": 187100,
+      "size_human": "182.71 KB",
+      "modified_time": "2026-04-17T16:40:13.217974",
+      "extension": ".csv"
+    },
+    {
+      "name": "xhssex.json",
+      "path": "/Users/dex/Downloads/xhssex.json",
+      "size": 201345,
+      "size_human": "196.63 KB",
+      "modified_time": "2026-04-17T11:28:49.102615",
+      "extension": ".json"
+    }
+  ],
+  "status": "success"
+}
