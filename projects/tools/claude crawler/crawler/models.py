@@ -21,6 +21,15 @@ class ScanJob:
 
 
 @dataclass
+class ScanJobStats:
+    scan_job_id: int = 0
+    pages_success: int = 0
+    pages_failed: int = 0
+    failed_reasons_dict: dict[str, int] = field(default_factory=dict)
+    resources_avg_per_page: float = 0.0
+
+
+@dataclass
 class Page:
     id: int | None = None
     scan_job_id: int = 0

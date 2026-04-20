@@ -23,6 +23,7 @@ import logging
 import queue
 import sqlite3
 import threading
+import time
 from concurrent.futures import (
     Future, ThreadPoolExecutor, FIRST_COMPLETED, TimeoutError as FuturesTimeoutError,
 )
@@ -109,6 +110,8 @@ class _WorkerContext:
     counters: "_Counters"
     counters_lock: threading.Lock
     cache_service: CacheService
+    db_path: str = ""
+    start_time: float = 0.0
     # B3: latch ensures the "render disabled" UI warning fires exactly once
     # per scan, not once per page that hits the disabled path.
     render_disabled_warned: threading.Event = field(
@@ -125,11 +128,25 @@ class _Counters:
 
 
 def _emit_progress(ctx: _WorkerContext, current_url: str, status: str = "running") -> None:
+    from crawler.storage import get_scan_job_stats
+
+    elapsed = time.time() - ctx.start_time
+    speed = ctx.counters.pages_done / max(elapsed, 0.1) if ctx.counters.pages_done > 0 else 0.0
+    eta = (ctx.max_pages - ctx.counters.pages_done) / max(speed, 0.001) if speed > 0 else 0
+
+    stats = get_scan_job_stats(ctx.db_path, ctx.scan_job_id)
+    failed_count = stats.pages_failed if stats else 0
+    failure_reasons = stats.failed_reasons_dict if stats else {}
+
     ctx.coalescer.emit({
         "pages_done": ctx.counters.pages_done,
         "pages_total": ctx.max_pages,
         "current_url": current_url,
         "status": status,
+        "failed_count": failed_count,
+        "failure_reasons": failure_reasons,
+        "speed_pages_per_sec": round(speed, 2),
+        "estimated_seconds_remaining": int(eta),
     })
 
 
@@ -439,6 +456,7 @@ def run_crawl(
     robots_cache: dict = {}
     robots_lock = threading.Lock()
     cache_service = CacheService(db_path)
+    start_time = time.time()
 
     ctx = _WorkerContext(
         scan_job_id=scan_job_id,
@@ -454,6 +472,8 @@ def run_crawl(
         counters=counters,
         counters_lock=counters_lock,
         cache_service=cache_service,
+        db_path=db_path,
+        start_time=start_time,
     )
 
     # Build executor explicitly (not via `with`) so we control the order in

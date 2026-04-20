@@ -1,5 +1,6 @@
 """Streamlit Web UI for Claude Crawler."""
 
+import json
 import queue
 import re
 import sqlite3
@@ -80,6 +81,16 @@ def main():
         st.session_state.progress = None
     if "scan_started_at" not in st.session_state:
         st.session_state.scan_started_at = None
+    if "history_search" not in st.session_state:
+        st.session_state.history_search = ""
+    if "history_status_filter" not in st.session_state:
+        st.session_state.history_status_filter = None
+    if "history_resource_range" not in st.session_state:
+        st.session_state.history_resource_range = (0, 10000)
+    if "history_sort_by" not in st.session_state:
+        st.session_state.history_sort_by = "created_at"
+    if "history_page" not in st.session_state:
+        st.session_state.history_page = 0
 
     # --- Sidebar: Scan Control ---
     render_sidebar(db_path)
@@ -260,6 +271,33 @@ def start_scan(db_path: str, url: str, max_pages: int, max_depth: int,
     st.rerun()
 
 
+def _format_duration(seconds: int) -> str:
+    """Format seconds as M:SS."""
+    if seconds < 0:
+        return "N/A"
+    minutes = seconds // 60
+    secs = seconds % 60
+    return f"{minutes}:{secs:02d}"
+
+
+def _render_performance_panel(progress: dict) -> None:
+    """Display performance metrics: speed, ETA, failure count."""
+    speed = progress.get("speed_pages_per_sec", 0.0)
+    eta_sec = progress.get("estimated_seconds_remaining", 0)
+    failed_count = progress.get("failed_count", 0)
+    pages_total = progress.get("pages_total", 1)
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Speed", f"{speed:.2f} p/s", delta=None)
+    with col2:
+        st.metric("ETA", _format_duration(eta_sec))
+    with col3:
+        st.metric("Failed", failed_count, delta=None)
+    with col4:
+        st.metric("Success Rate", f"{((pages_total - failed_count) / max(pages_total, 1) * 100):.1f}%")
+
+
 def render_progress():
     st.subheader("Scanning in progress...")
 
@@ -318,6 +356,12 @@ def render_progress():
         st.metric("Elapsed", f"{int(elapsed)}s")
 
     st.progress(min(pages_done / max(pages_total, 1), 1.0))
+
+    st.divider()
+    st.subheader("Performance Metrics")
+    _render_performance_panel(prog)
+
+    st.divider()
     st.caption(f"Current: {current_url}")
 
     # Auto-refresh while scanning
@@ -587,13 +631,40 @@ def render_tag_analysis(db_path: str, scan_job_id: int):
         st.download_button("Download Tags JSON", json_data, f"tags_{scan_job_id}.json", "application/json")
 
 
-def render_history(db_path: str):
-    st.info("Enter a URL in the sidebar and click 'Start Scan' to begin.")
-    jobs = storage.list_scan_jobs(db_path)
+def _render_history_filters(db_path: str) -> None:
+    """Display filter controls for history scan list."""
+    col1, col2, col3 = st.columns([2, 1, 1])
+    with col1:
+        st.session_state.history_search = st.text_input(
+            "Search by domain/URL", value=st.session_state.history_search
+        )
+    with col2:
+        st.session_state.history_status_filter = st.selectbox(
+            "Status", [None, "completed", "failed"], index=0 if st.session_state.history_status_filter is None else ([None, "completed", "failed"].index(st.session_state.history_status_filter) + 1) if st.session_state.history_status_filter in [None, "completed", "failed"] else 0, key="history_status_select"
+        )
+    with col3:
+        st.session_state.history_sort_by = st.selectbox(
+            "Sort", ["created_at", "created_at_asc", "pages_scanned_desc"], key="history_sort_select"
+        )
+
+    col1, col2, col3 = st.columns([1, 1, 2])
+    with col1:
+        min_res = st.number_input("Min Resources", 0, 100000, 0, key="history_res_min")
+    with col2:
+        max_res = st.number_input("Max Resources", 0, 100000, 10000, key="history_res_max")
+    with col3:
+        if st.button("Apply Filters", key="history_filter_btn"):
+            st.session_state.history_resource_range = (min_res, max_res)
+            st.session_state.history_page = 0
+            st.rerun()
+
+
+def _render_history_table(db_path: str, jobs: list) -> None:
+    """Display paginated history scan table with download buttons."""
     if not jobs:
+        st.info("No scans match your filters.")
         return
 
-    st.subheader("Previous Scans")
     data = [{
         "ID": j.id,
         "Domain": j.domain,
@@ -604,30 +675,69 @@ def render_history(db_path: str):
     } for j in jobs]
     st.dataframe(data, use_container_width=True, hide_index=True)
 
-    empty_jobs = [j for j in jobs if j.resources_found == 0]
-    if empty_jobs:
-        st.caption(
-            f"{len(empty_jobs)} scan(s) found no resources — likely failed "
-            "fetches or unparseable pages."
-        )
-        confirm = st.checkbox(
-            f"Confirm delete of {len(empty_jobs)} empty scan(s)",
-            key="confirm_purge_empty",
-        )
-        if st.button("Purge empty scans", key="purge_empty_btn",
-                     disabled=not confirm):
-            # Always clear the checkbox state — even if a per-row delete
-            # raises mid-loop. Without try/finally the sticky checkbox
-            # auto-re-arms next render and silently re-purges.
-            try:
-                for j in empty_jobs:
-                    storage.delete_scan_job(db_path, j.id)
-                    if st.session_state.get("scan_job_id") == j.id:
-                        st.session_state.scan_job_id = None
-            finally:
-                st.session_state.pop("confirm_purge_empty", None)
-            st.success(f"Deleted {len(empty_jobs)} empty scan(s).")
+    for job in jobs:
+        col1, col2, col3 = st.columns([3, 1, 1])
+        with col1:
+            st.caption(f"Scan #{job.id}: {job.domain}")
+        with col2:
+            if st.button("View Details", key=f"view_{job.id}"):
+                st.session_state.scan_job_id = job.id
+                st.rerun()
+        with col3:
+            metadata = storage.export_scan_job_metadata(db_path, job.id)
+            st.download_button(
+                "Download",
+                data=json.dumps(metadata, indent=2),
+                file_name=f"scan_{job.domain}_{job.id}.json",
+                mime="application/json",
+                key=f"download_{job.id}"
+            )
+
+
+def _render_pagination(total_count: int, page_size: int = 50) -> None:
+    """Display pagination controls."""
+    total_pages = (total_count + page_size - 1) // page_size
+    current_page = st.session_state.history_page
+
+    col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
+    with col1:
+        if st.button("← Previous", disabled=current_page <= 0, key="history_prev_btn"):
+            st.session_state.history_page = max(0, current_page - 1)
             st.rerun()
+    with col2:
+        st.caption(f"Page {current_page + 1}/{max(1, total_pages)}")
+    with col3:
+        if st.button("Next →", disabled=current_page >= total_pages - 1, key="history_next_btn"):
+            st.session_state.history_page = min(total_pages - 1, current_page + 1)
+            st.rerun()
+    with col4:
+        st.caption(f"Total: {total_count} scan(s)")
+
+
+def render_history(db_path: str):
+    st.info("Enter a URL in the sidebar and click 'Start Scan' to begin.")
+
+    st.subheader("Previous Scans")
+    _render_history_filters(db_path)
+
+    domain_filter = st.session_state.history_search if st.session_state.history_search else None
+    status_filter = st.session_state.history_status_filter
+    resource_min, resource_max = st.session_state.history_resource_range
+    sort_by = st.session_state.history_sort_by
+    page = st.session_state.history_page
+    page_size = 50
+
+    total_count = storage.count_scan_jobs_filtered(
+        db_path, domain_filter, status_filter, resource_min, resource_max
+    )
+    offset = page * page_size
+
+    jobs = storage.list_scan_jobs_filtered(
+        db_path, domain_filter, status_filter, resource_min, resource_max, sort_by, limit=page_size, offset=offset
+    )
+
+    _render_history_table(db_path, jobs)
+    _render_pagination(total_count, page_size)
 
 
 if __name__ == "__main__":

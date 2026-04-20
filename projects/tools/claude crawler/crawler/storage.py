@@ -587,3 +587,213 @@ def get_cache_metrics(conn: sqlite3.Connection) -> dict:
         "total_bytes": total_bytes,
         "entry_count": entry_count,
     }
+
+
+def get_scan_job_stats(db_path: str, scan_job_id: int):
+    """Get statistics for a scan job: success/failure counts, failure reasons distribution, avg resources/page."""
+    from crawler.models import ScanJobStats
+
+    with get_connection(db_path) as conn:
+        job_row = conn.execute(
+            "SELECT id FROM scan_jobs WHERE id = ?", (scan_job_id,)
+        ).fetchone()
+        if not job_row:
+            return None
+
+        stats_row = conn.execute(
+            """SELECT
+               COUNT(CASE WHEN status = 'fetched' THEN 1 END) as pages_success,
+               COUNT(CASE WHEN status = 'failed' THEN 1 END) as pages_failed,
+               COALESCE(AVG(
+                   COALESCE((SELECT COUNT(*) FROM resources WHERE page_id = pages.id), 0)
+               ), 0.0) as resources_avg_per_page
+            FROM pages WHERE scan_job_id = ?""",
+            (scan_job_id,)
+        ).fetchone()
+
+        failure_reasons = conn.execute(
+            """SELECT failure_reason, COUNT(*) as count
+            FROM pages WHERE scan_job_id = ? AND status = 'failed' AND failure_reason != ''
+            GROUP BY failure_reason""",
+            (scan_job_id,)
+        ).fetchall()
+
+        failed_reasons_dict = {row["failure_reason"]: row["count"] for row in failure_reasons}
+
+        return ScanJobStats(
+            scan_job_id=scan_job_id,
+            pages_success=stats_row["pages_success"],
+            pages_failed=stats_row["pages_failed"],
+            failed_reasons_dict=failed_reasons_dict,
+            resources_avg_per_page=stats_row["resources_avg_per_page"],
+        )
+
+
+def list_scan_jobs_filtered(
+    db_path: str,
+    domain_filter: str | None = None,
+    status_filter: str | None = None,
+    resource_min: int | None = None,
+    resource_max: int | None = None,
+    sort_by: str = "created_at",
+    limit: int | None = None,
+    offset: int = 0,
+):
+    """List scan jobs with filtering and pagination."""
+    from crawler.models import ScanJob
+
+    with get_connection(db_path) as conn:
+        query = "SELECT * FROM scan_jobs WHERE 1=1"
+        params = []
+
+        if domain_filter:
+            query += " AND domain LIKE ?"
+            params.append(f"%{domain_filter}%")
+
+        if status_filter:
+            query += " AND status = ?"
+            params.append(status_filter)
+
+        if resource_min is not None:
+            query += " AND resources_found >= ?"
+            params.append(resource_min)
+
+        if resource_max is not None:
+            query += " AND resources_found <= ?"
+            params.append(resource_max)
+
+        if sort_by == "created_at":
+            query += " ORDER BY created_at DESC"
+        elif sort_by == "created_at_asc":
+            query += " ORDER BY created_at ASC"
+        elif sort_by == "pages_scanned_desc":
+            query += " ORDER BY pages_scanned DESC"
+        else:
+            query += " ORDER BY created_at DESC"
+
+        if limit is not None:
+            query += f" LIMIT {limit}"
+
+        if offset:
+            query += f" OFFSET {offset}"
+
+        rows = conn.execute(query, params).fetchall()
+        return [
+            ScanJob(
+                id=row["id"],
+                entry_url=row["entry_url"],
+                domain=row["domain"],
+                status=row["status"],
+                max_pages=row["max_pages"],
+                max_depth=row["max_depth"],
+                pages_scanned=row["pages_scanned"],
+                resources_found=row["resources_found"],
+                created_at=row["created_at"],
+                completed_at=row["completed_at"],
+                cache_hits=row["cache_hits"],
+                cache_misses=row["cache_misses"],
+            )
+            for row in rows
+        ]
+
+
+def count_scan_jobs_filtered(
+    db_path: str,
+    domain_filter: str | None = None,
+    status_filter: str | None = None,
+    resource_min: int | None = None,
+    resource_max: int | None = None,
+) -> int:
+    """Count scan jobs matching filters (for pagination)."""
+    with get_connection(db_path) as conn:
+        query = "SELECT COUNT(*) as count FROM scan_jobs WHERE 1=1"
+        params = []
+
+        if domain_filter:
+            query += " AND domain LIKE ?"
+            params.append(f"%{domain_filter}%")
+
+        if status_filter:
+            query += " AND status = ?"
+            params.append(status_filter)
+
+        if resource_min is not None:
+            query += " AND resources_found >= ?"
+            params.append(resource_min)
+
+        if resource_max is not None:
+            query += " AND resources_found <= ?"
+            params.append(resource_max)
+
+        row = conn.execute(query, params).fetchone()
+        return row["count"]
+
+
+def export_scan_job_metadata(db_path: str, scan_job_id: int) -> dict:
+    """Export scan job metadata as JSON-friendly dict: {scan_job: {...}, pages: [...], stats: {...}}."""
+    from crawler.models import ScanJob
+
+    with get_connection(db_path) as conn:
+        job_row = conn.execute(
+            "SELECT * FROM scan_jobs WHERE id = ?", (scan_job_id,)
+        ).fetchone()
+        if not job_row:
+            return {}
+
+        job = ScanJob(
+            id=job_row["id"],
+            entry_url=job_row["entry_url"],
+            domain=job_row["domain"],
+            status=job_row["status"],
+            max_pages=job_row["max_pages"],
+            max_depth=job_row["max_depth"],
+            pages_scanned=job_row["pages_scanned"],
+            resources_found=job_row["resources_found"],
+            created_at=job_row["created_at"],
+            completed_at=job_row["completed_at"],
+            cache_hits=job_row["cache_hits"],
+            cache_misses=job_row["cache_misses"],
+        )
+
+        pages = conn.execute(
+            """SELECT id, url, page_type, depth, status, failure_reason
+            FROM pages WHERE scan_job_id = ?
+            ORDER BY depth ASC""",
+            (scan_job_id,)
+        ).fetchall()
+
+        stats = get_scan_job_stats(db_path, scan_job_id)
+
+        return {
+            "scan_job": {
+                "id": job.id,
+                "entry_url": job.entry_url,
+                "domain": job.domain,
+                "status": job.status,
+                "max_pages": job.max_pages,
+                "max_depth": job.max_depth,
+                "pages_scanned": job.pages_scanned,
+                "resources_found": job.resources_found,
+                "created_at": job.created_at,
+                "completed_at": job.completed_at,
+                "cache_hits": job.cache_hits,
+                "cache_misses": job.cache_misses,
+            },
+            "pages": [
+                {
+                    "id": p["id"],
+                    "url": p["url"],
+                    "page_type": p["page_type"],
+                    "depth": p["depth"],
+                    "status": p["status"],
+                    "failure_reason": p["failure_reason"],
+                }
+                for p in pages
+            ],
+            "stats": {
+                "pages_success": stats.pages_success,
+                "pages_failed": stats.pages_failed,
+                "failed_reasons_dict": stats.failed_reasons_dict,
+                "resources_avg_per_page": stats.resources_avg_per_page,
+            } if stats else {},
+        }
