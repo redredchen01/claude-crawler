@@ -1,10 +1,10 @@
 {
-  "scan_time": "2026-04-20T10:46:50.770973",
+  "scan_time": "2026-04-20T14:07:06.698771",
   "projects_root": "/Users/dex/YD 2026/projects",
   "summary": {
     "total_projects": 34,
     "total_git_repos": 19,
-    "dirty_repos": 8,
+    "dirty_repos": 1,
     "categories": [
       "experimental",
       "tools",
@@ -22,15 +22,15 @@
     },
     "tools": {
       "project_count": 10,
-      "total_size_human": "510.40 MB",
+      "total_size_human": "513.91 MB",
       "git_repos": 5,
-      "dirty_repos": 3
+      "dirty_repos": 0
     },
     "archive": {
       "project_count": 9,
-      "total_size_human": "3.58 GB",
+      "total_size_human": "3.08 GB",
       "git_repos": 3,
-      "dirty_repos": 1
+      "dirty_repos": 0
     },
     "skills-publishing": {
       "project_count": 7,
@@ -40,9 +40,9 @@
     },
     "production": {
       "project_count": 6,
-      "total_size_human": "465.37 MB",
+      "total_size_human": "465.59 MB",
       "git_repos": 4,
-      "dirty_repos": 4
+      "dirty_repos": 1
     }
   },
   "projects": [
@@ -50,14 +50,14 @@
       "name": "cover-selector",
       "path": "/Users/dex/YD 2026/projects/archive/cover-selector",
       "category": "archive",
-      "size_bytes": 540153659,
-      "size_human": "515.13 MB",
-      "last_modified": "2026-04-20T10:46:11.364930",
+      "size_bytes": 1830540,
+      "size_human": "1.75 MB",
+      "last_modified": "2026-04-20T14:06:53.215720",
       "git": {
         "is_git_repo": true,
         "branch": "main",
-        "has_changes": true,
-        "uncommitted_files": 87,
+        "has_changes": false,
+        "uncommitted_files": 0,
         "last_commit": {
           "hash": "6216fc42",
           "author": "redredchen01",
@@ -75,7 +75,7 @@
       "category": "archive",
       "size_bytes": 799459899,
       "size_human": "762.42 MB",
-      "last_modified": "2026-04-20T10:39:26.877535",
+      "last_modified": "2026-04-20T11:20:45.524575",
       "git": {
         "is_git_repo": false
       }
@@ -86,7 +86,7 @@
       "category": "archive",
       "size_bytes": 317901667,
       "size_human": "303.17 MB",
-      "last_modified": "2026-04-20T10:37:43.596474",
+      "last_modified": "2026-04-20T11:20:45.531498",
       "git": {
         "is_git_repo": false
       }
@@ -119,7 +119,7 @@
       "category": "archive",
       "size_bytes": 1161664572,
       "size_human": "1.08 GB",
-      "last_modified": "2026-04-20T10:46:27.411913",
+      "last_modified": "2026-04-20T14:06:59.765789",
       "git": {
         "is_git_repo": true,
         "branch": "feat/phase2-extractor-pluggable",
@@ -153,7 +153,7 @@
       "category": "archive",
       "size_bytes": 54433352,
       "size_human": "51.91 MB",
-      "last_modified": "2026-04-20T10:46:44.406388",
+      "last_modified": "2026-04-20T14:07:03.255085",
       "git": {
         "is_git_repo": true,
         "branch": "main",
@@ -176,7 +176,7 @@
       "category": "archive",
       "size_bytes": 482236038,
       "size_human": "459.90 MB",
-      "last_modified": "2026-04-20T10:46:19.403260",
+      "last_modified": "2026-04-20T14:06:55.292211",
       "git": {
         "is_git_repo": false
       }
@@ -187,7 +187,7 @@
       "category": "experimental",
       "size_bytes": 805979,
       "size_human": "787.09 KB",
-      "last_modified": "2026-04-20T10:46:05.426426",
+      "last_modified": "2026-04-20T14:06:51.298700",
       "git": {
         "is_git_repo": true,
         "branch": "master",
@@ -210,7 +210,7 @@
       "category": "experimental",
       "size_bytes": 31230787,
       "size_human": "29.78 MB",
-      "last_modified": "2026-04-17T10:20:14.160074",
+      "last_modified": "2026-04-20T11:20:45.534181",
       "git": {
         "is_git_repo": false
       }
@@ -219,14 +219,14 @@
       "name": "claude_code_telegram_bot",
       "path": "/Users/dex/YD 2026/projects/production/claude_code_telegram_bot",
       "category": "production",
-      "size_bytes": 152659242,
-      "size_human": "145.59 MB",
-      "last_modified": "2026-04-20T10:46:49.789181",
+      "size_bytes": 152868460,
+      "size_human": "145.79 MB",
+      "last_modified": "2026-04-20T14:07:06.333463",
       "git": {
         "is_git_repo": true,
         "branch": "master",
         "has_changes": true,
-        "uncommitted_files": 19,
+        "uncommitted_files": 1,
         "last_commit": {
           "hash": "a7a4b663",
           "author": "redredchen01",
@@ -244,7 +244,7 @@
       "category": "production",
       "size_bytes": 9935,
       "size_human": "9.70 KB",
-      "last_modified": "2026-04-17T10:20:16.221925",
+      "last_modified": "2026-04-20T11:20:45.536827",
       "git": {
         "is_git_repo": false
       }
@@ -253,69 +253,69 @@
       "name": "gwx",
       "path": "/Users/dex/YD 2026/projects/production/gwx",
       "category": "production",
-      "size_bytes": 115305417,
-      "size_human": "109.96 MB",
-      "last_modified": "2026-04-20T10:46:47.476464",
+      "size_bytes": 115310657,
+      "size_human": "109.97 MB",
+      "last_modified": "2026-04-20T14:07:05.332663",
       "git": {
         "is_git_repo": true,
         "branch": "feat/gwx-v1.1-week5-dx",
-        "has_changes": true,
-        "uncommitted_files": 2,
+        "has_changes": false,
+        "uncommitted_files": 0,
         "last_commit": {
-          "hash": "de8e2713",
+          "hash": "b42be9c5",
           "author": "redredchen01",
           "email": "redredchen01@gmail.com",
-          "date": "Wed Apr 15 12:50:35 2026 +0800",
-          "message": "test: Expand internal/workflow test coverage - Phase 2"
+          "date": "Mon Apr 20 11:39:32 2026 +0800",
+          "message": "chore: update lint config and coverage"
         },
-        "commit_count": 126,
-        "latest_tag": "v1.0.0-8-gde8e271"
+        "commit_count": 127,
+        "latest_tag": "v1.0.0-9-gb42be9c"
       }
     },
     {
       "name": "video-watermark-removal-system",
       "path": "/Users/dex/YD 2026/projects/production/video-watermark-removal-system",
       "category": "production",
-      "size_bytes": 115616499,
-      "size_human": "110.26 MB",
-      "last_modified": "2026-04-20T10:46:46.482499",
+      "size_bytes": 115624584,
+      "size_human": "110.27 MB",
+      "last_modified": "2026-04-20T14:07:05.068925",
       "git": {
         "is_git_repo": true,
         "branch": "main",
-        "has_changes": true,
-        "uncommitted_files": 4,
+        "has_changes": false,
+        "uncommitted_files": 0,
         "last_commit": {
-          "hash": "388d268f",
+          "hash": "ec647b0b",
           "author": "redredchen01",
           "email": "redredchen01@gmail.com",
-          "date": "Tue Apr 7 16:35:30 2026 +0800",
-          "message": "fix: skip pytest-benchmark dependent performance tests"
+          "date": "Mon Apr 20 11:11:38 2026 +0800",
+          "message": "chore: sync local changes"
         },
-        "commit_count": 69,
-        "latest_tag": "v1.1.0-beta-17-g388d268"
+        "commit_count": 70,
+        "latest_tag": "v1.1.0-beta-18-gec647b0"
       }
     },
     {
       "name": "vts",
       "path": "/Users/dex/YD 2026/projects/production/vts",
       "category": "production",
-      "size_bytes": 75263648,
+      "size_bytes": 75264504,
       "size_human": "71.78 MB",
-      "last_modified": "2026-04-20T10:46:45.492630",
+      "last_modified": "2026-04-20T14:07:04.354054",
       "git": {
         "is_git_repo": true,
         "branch": "main",
-        "has_changes": true,
-        "uncommitted_files": 1,
+        "has_changes": false,
+        "uncommitted_files": 0,
         "last_commit": {
-          "hash": "5de7002c",
+          "hash": "ba35e9da",
           "author": "redredchen01",
           "email": "redredchen01@users.noreply.github.com",
-          "date": "Tue Apr 7 11:12:51 2026 +0800",
-          "message": "feat: enhance vts v0.1.0 with tests, logging, and error handling"
+          "date": "Mon Apr 20 11:39:33 2026 +0800",
+          "message": "docs: add contributing guide"
         },
-        "commit_count": 2,
-        "latest_tag": "5de7002"
+        "commit_count": 3,
+        "latest_tag": "ba35e9d"
       }
     },
     {
@@ -324,7 +324,7 @@
       "category": "production",
       "size_bytes": 29125894,
       "size_human": "27.78 MB",
-      "last_modified": "2026-04-17T10:20:14.712643",
+      "last_modified": "2026-04-20T11:20:45.542577",
       "git": {
         "is_git_repo": false
       }
@@ -335,7 +335,7 @@
       "category": "skills-publishing",
       "size_bytes": 83390,
       "size_human": "81.44 KB",
-      "last_modified": "2026-04-20T10:46:45.500564",
+      "last_modified": "2026-04-20T14:07:04.362816",
       "git": {
         "is_git_repo": true,
         "branch": "main",
@@ -358,7 +358,7 @@
       "category": "skills-publishing",
       "size_bytes": 77878,
       "size_human": "76.05 KB",
-      "last_modified": "2026-04-20T10:46:45.508108",
+      "last_modified": "2026-04-20T14:07:04.373351",
       "git": {
         "is_git_repo": true,
         "branch": "main",
@@ -381,7 +381,7 @@
       "category": "skills-publishing",
       "size_bytes": 67395,
       "size_human": "65.82 KB",
-      "last_modified": "2026-04-20T10:46:45.515761",
+      "last_modified": "2026-04-20T14:07:04.382834",
       "git": {
         "is_git_repo": true,
         "branch": "main",
@@ -404,7 +404,7 @@
       "category": "skills-publishing",
       "size_bytes": 60789,
       "size_human": "59.36 KB",
-      "last_modified": "2026-04-20T10:46:45.523249",
+      "last_modified": "2026-04-20T14:07:04.393468",
       "git": {
         "is_git_repo": true,
         "branch": "main",
@@ -427,7 +427,7 @@
       "category": "skills-publishing",
       "size_bytes": 1017,
       "size_human": "1017.00 B",
-      "last_modified": "2026-04-17T10:20:13.907095",
+      "last_modified": "2026-04-20T11:20:45.545659",
       "git": {
         "is_git_repo": false
       }
@@ -438,7 +438,7 @@
       "category": "skills-publishing",
       "size_bytes": 97098,
       "size_human": "94.82 KB",
-      "last_modified": "2026-04-20T10:46:45.530772",
+      "last_modified": "2026-04-20T14:07:04.402481",
       "git": {
         "is_git_repo": true,
         "branch": "main",
@@ -461,7 +461,7 @@
       "category": "skills-publishing",
       "size_bytes": 66864,
       "size_human": "65.30 KB",
-      "last_modified": "2026-04-20T10:46:44.548481",
+      "last_modified": "2026-04-20T14:07:03.409669",
       "git": {
         "is_git_repo": true,
         "branch": "main",
@@ -482,9 +482,9 @@
       "name": "claude crawler",
       "path": "/Users/dex/YD 2026/projects/tools/claude crawler",
       "category": "tools",
-      "size_bytes": 9820878,
-      "size_human": "9.37 MB",
-      "last_modified": "2026-04-20T10:43:55.930881",
+      "size_bytes": 13494337,
+      "size_human": "12.87 MB",
+      "last_modified": "2026-04-20T13:52:20.080630",
       "git": {
         "is_git_repo": false
       }
@@ -495,7 +495,7 @@
       "category": "tools",
       "size_bytes": 7456536,
       "size_human": "7.11 MB",
-      "last_modified": "2026-04-20T10:46:05.533602",
+      "last_modified": "2026-04-20T14:06:51.403769",
       "git": {
         "is_git_repo": true,
         "branch": "main",
@@ -518,7 +518,7 @@
       "category": "tools",
       "size_bytes": 19380758,
       "size_human": "18.48 MB",
-      "last_modified": "2026-04-20T10:46:05.557030",
+      "last_modified": "2026-04-20T14:06:51.423259",
       "git": {
         "is_git_repo": true,
         "branch": "feat/phase3-canvas-visualization",
@@ -539,23 +539,23 @@
       "name": "crawl4ai",
       "path": "/Users/dex/YD 2026/projects/tools/crawl4ai",
       "category": "tools",
-      "size_bytes": 183235607,
+      "size_bytes": 183238208,
       "size_human": "174.75 MB",
-      "last_modified": "2026-04-20T10:46:05.571511",
+      "last_modified": "2026-04-20T14:06:51.438234",
       "git": {
         "is_git_repo": true,
         "branch": "main",
-        "has_changes": true,
-        "uncommitted_files": 2,
+        "has_changes": false,
+        "uncommitted_files": 0,
         "last_commit": {
-          "hash": "1debe5f5",
-          "author": "UncleCode",
-          "email": "unclecode@kidocode.com",
-          "date": "Mon Mar 30 09:59:58 2026 +0700",
-          "message": "Merge pull request #1885 from unclecode/develop"
+          "hash": "1a2d61c4",
+          "author": "redredchen01",
+          "email": "redredchen01@gmail.com",
+          "date": "Mon Apr 20 11:39:31 2026 +0800",
+          "message": "test: add crawl api test files"
         },
-        "commit_count": 1468,
-        "latest_tag": "docker-rebuild-v0.8.6-4-g1debe5f"
+        "commit_count": 1469,
+        "latest_tag": "docker-rebuild-v0.8.6-5-g1a2d61c"
       }
     },
     {
@@ -564,7 +564,7 @@
       "category": "tools",
       "size_bytes": 30295209,
       "size_human": "28.89 MB",
-      "last_modified": "2026-04-17T10:20:25.807388",
+      "last_modified": "2026-04-20T11:20:45.570751",
       "git": {
         "is_git_repo": false
       }
@@ -573,23 +573,23 @@
       "name": "markitdown-web",
       "path": "/Users/dex/YD 2026/projects/tools/markitdown-web",
       "category": "tools",
-      "size_bytes": 500558,
-      "size_human": "488.83 KB",
-      "last_modified": "2026-04-20T10:46:06.576753",
+      "size_bytes": 504609,
+      "size_human": "492.78 KB",
+      "last_modified": "2026-04-20T14:06:51.446709",
       "git": {
         "is_git_repo": true,
         "branch": "main",
-        "has_changes": true,
-        "uncommitted_files": 2,
+        "has_changes": false,
+        "uncommitted_files": 0,
         "last_commit": {
-          "hash": "218038b6",
+          "hash": "dbe25363",
           "author": "redredchen01",
           "email": "sooneocean@gmail.com",
-          "date": "Thu Apr 16 17:30:30 2026 +0800",
-          "message": "docs: add project completion summary with all deliverables and next steps"
+          "date": "Mon Apr 20 11:39:34 2026 +0800",
+          "message": "chore: update coverage and logs"
         },
-        "commit_count": 7,
-        "latest_tag": "218038b"
+        "commit_count": 8,
+        "latest_tag": "dbe2536"
       }
     },
     {
@@ -598,7 +598,7 @@
       "category": "tools",
       "size_bytes": 231331390,
       "size_human": "220.61 MB",
-      "last_modified": "2026-04-17T10:20:25.826140",
+      "last_modified": "2026-04-20T11:20:45.586282",
       "git": {
         "is_git_repo": false
       }
@@ -609,7 +609,7 @@
       "category": "tools",
       "size_bytes": 2707372,
       "size_human": "2.58 MB",
-      "last_modified": "2026-04-17T10:20:25.836546",
+      "last_modified": "2026-04-20T11:20:45.594706",
       "git": {
         "is_git_repo": false
       }
@@ -620,7 +620,7 @@
       "category": "tools",
       "size_bytes": 41729,
       "size_human": "40.75 KB",
-      "last_modified": "2026-04-17T10:20:13.908964",
+      "last_modified": "2026-04-20T11:20:45.596011",
       "git": {
         "is_git_repo": false
       }
@@ -629,23 +629,23 @@
       "name": "wm-tool",
       "path": "/Users/dex/YD 2026/projects/tools/wm-tool",
       "category": "tools",
-      "size_bytes": 50423292,
+      "size_bytes": 50425310,
       "size_human": "48.09 MB",
-      "last_modified": "2026-04-20T10:46:06.587378",
+      "last_modified": "2026-04-20T14:06:51.458226",
       "git": {
         "is_git_repo": true,
         "branch": "main",
-        "has_changes": true,
-        "uncommitted_files": 1,
+        "has_changes": false,
+        "uncommitted_files": 0,
         "last_commit": {
-          "hash": "cf57a975",
+          "hash": "729873fa",
           "author": "redredchen01",
           "email": "redredchen01@gmail.com",
-          "date": "Thu Apr 16 16:34:18 2026 +0800",
-          "message": "chore: separate markitdown-web project — focus on watermark removal only"
+          "date": "Mon Apr 20 11:11:51 2026 +0800",
+          "message": "chore: remove lock file"
         },
-        "commit_count": 172,
-        "latest_tag": "v8.0.0-32-gcf57a97"
+        "commit_count": 173,
+        "latest_tag": "v8.0.0-33-g729873f"
       }
     }
   ],
