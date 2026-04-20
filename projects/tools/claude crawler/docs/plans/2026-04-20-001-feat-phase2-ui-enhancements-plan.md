@@ -1,7 +1,7 @@
 ---
 title: feat: Phase 2 UI 增强 — 实时进度统计 & 历史管理
 type: feat
-status: active
+status: completed
 date: 2026-04-20
 origin: docs/brainstorms/2026-04-20-crawler-ui-enhancements-requirements.md
 ---
