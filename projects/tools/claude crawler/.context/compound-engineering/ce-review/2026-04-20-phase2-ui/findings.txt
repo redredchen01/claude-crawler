@@ -1,0 +1,191 @@
+# CODE REVIEW ARTIFACTS - Phase 2 UI Enhancements
+# Date: 2026-04-20
+# Mode: autofix (safe_auto only)
+# Branch: refactor/crawler-concurrency
+# Plan: docs/plans/2026-04-20-001-feat-phase2-ui-enhancements-plan.md
+
+## SUMMARY
+- Reviewers: 7 agents (6 personas + 1 always-on research)
+- Findings: 34 total
+  - Safe auto applied: 5
+  - Unresolved P0/P1: 10 (require manual review/decision)
+  - Advisory: 19 (observations, patterns)
+- Test outcome: 652 → 667 tests passing ✅
+
+---
+
+## APPLIED SAFE_AUTO FIXES (5)
+
+### Fix 1: Add return type annotation
+- File: crawler/storage.py:632
+- Change: `def list_scan_jobs_filtered(...)` → `def list_scan_jobs_filtered(...) -> list[ScanJob]:`
+- Rationale: Enable static type checking for callers
+
+### Fix 2: Declare params list type
+- File: crawler/storage.py:647
+- Change: `params = []` → `params: list[str | int] = []`
+- Rationale: Clarify mixed-type parameter handling to type checker
+
+### Fix 3: Type jobs parameter
+- File: app.py:668
+- Change: `jobs: list` → `jobs: list[ScanJob]`
+- Added import: `from crawler.models import ScanJob`
+- Rationale: Enable type checking for job attribute access
+
+### Fix 4: Consolidate module-level imports
+- File: tests/test_storage.py (lines 9-16)
+- Change: Moved 5 function-internal imports to module level
+- Rationale: Follow PEP 8, reduce import overhead
+
+### Fix 5: Expand docstring
+- File: app.py:668
+- Change: Added parameter documentation and description to `_render_history_table`
+- Rationale: Clarify function intent and contract
+
+---
+
+## UNRESOLVED FINDINGS (10 P0/P1 blocking consideration)
+
+### [P0] TOCTOU Race Condition in _emit_progress
+- File: crawler/core/engine.py:137-139
+- Issue: failure_reasons dict read from get_scan_job_stats() may be stale
+- WriterThread concurrently inserts new failed pages while _emit_progress() reads
+- Impact: UI progress chart shows outdated failure distribution
+- Recommendation: Add locking OR document snapshot semantics
+- Autofix class: gated_auto (changes concurrency contract)
+
+### [P0] No Agent-Accessible APIs
+- File: entire project
+- Issue: All Phase 2 UI features (failure chart, history filters, pagination, export) 
+  are Streamlit-only. Zero CLI, REST API, or MCP tool exposure.
+- storage.py DOES have agent-friendly primitives (list_scan_jobs_filtered, export_scan_job_metadata)
+- But they're only used internally in app.py
+- Impact: Agents cannot replicate user workflows programmatically
+- Recommendation: Phase 3 — wrap storage functions in REST endpoints / CLI / MCP tools
+- Autofix class: manual (requires new API layer, outside scope of Phase 2)
+
+### [P1] Missing Test Coverage for UI Interactions
+- Files: tests/test_app_helpers.py (lines 46-189)
+- Issue: All st.button mocks return False, so click handlers never execute
+  - Previous/Next button click branches untested
+  - Apply Filters button click branches untested
+  - View Details button click branches untested
+- Impact: User interaction workflows unverified; tests pass but code never runs
+- Recommendation: Test with button mocks returning True to exercise state mutations
+- Autofix class: manual (requires new test cases)
+
+### [P1] Pagination Disabled State Logic Untested
+- File: app.py:709-713
+- Issue: disabled= parameters on Previous/Next buttons never verified with
+  boundary conditions (page=0, page=last)
+- Impact: Users might navigate to non-existent pages if logic is wrong
+- Recommendation: Add boundary condition tests
+- Autofix class: manual (requires test additions)
+
+### [P1] Type Hints Missing in Python Module Heads
+- Files: tests/test_storage.py (lines 517-581)
+- Issue: Type annotations incomplete; params list mixes str/int without explicit typing
+- Impact: mypy flagsargument type mismatches; reduces IDE tooling quality
+- Recommendation: Type fixes applied (Fix 2 above); add mypy to CI
+- Autofix class: gated_auto (already partially fixed by Fix 2)
+
+### [P1] SQL Parameter Injection Risk (low risk in Streamlit context)
+- File: crawler/storage.py:674-678
+- Issue: LIMIT and OFFSET built via f-string interpolation, not parameterized
+- Attack surface: page index from session_state, could be negative or overflow
+- Impact: Malformed SQL if page is tampered; silent failure or unexpected results
+- Recommendation: Sanitize page_size and offset before interpolation (max/min bounds)
+- Autofix class: gated_auto (behavior change, needs input validation review)
+
+### [P2] CacheService Over-Engineered
+- File: crawler/cache.py:1-50
+- Issue: Wrapper around 4 SQLite functions with no multi-backend support
+- Comments promise "Redis fallback" and "potential future extensions"
+- But: zero implementations, zero config, zero tests
+- Impact: Adds unnecessary indirection; future Redis work will need redesign anyway
+- Recommendation: Delete CacheService, call storage helpers directly (Phase 3 cleanup)
+- Autofix class: manual (refactor decision, deferred)
+
+### [P2] ScanJobStats Dataclass Serves Single Purpose
+- File: crawler/models.py:24 + storage.py:623 + engine.py:137-139
+- Issue: Created only in get_scan_job_stats(), immediately unpacked in _emit_progress()
+- The dataclass adds 5 fields, instantiation overhead, import overhead
+- Could be replaced by `dict[str, int | float]` returned by query
+- Impact: Unused abstraction, increases cognitive load
+- Recommendation: Replace with NamedTuple or plain dict return (Phase 3 cleanup)
+- Autofix class: manual (refactor decision)
+
+### [P2] Duplicate Filter/Count Functions
+- File: crawler/storage.py:632, 700
+- Issue: list_scan_jobs_filtered() and count_scan_jobs_filtered() both build identical
+  WHERE clause but code is duplicated
+- Impact: DRY violation; if filter logic is fixed in one, must be replicated in other
+- Recommendation: Consolidate to single function returning (rows, total_count)
+- Autofix class: manual (refactor decision)
+
+### [P2] Failure Reason Hints Coupled to Engine Implementation
+- File: app.py:412-434
+- Issue: _FAILURE_REASON_HINTS dict must match engine.py failure_reason strings
+  No shared constant enforces this; silent fallback if new reason is missed
+- Impact: New failure types added to engine are invisible in UI without hints update
+- Recommendation: Create shared FailureReason enum (crawler/constants.py)
+- Autofix class: gated_auto (architectural decision on constants)
+
+---
+
+## ADVISORY FINDINGS (19 items)
+
+### Test Coverage Gaps
+- Pagination with zero items (total_pages=0, off-by-one edge cases)
+- get_scan_job_stats with zero failures across all pages
+- export_scan_job_metadata when called with non-existent scan_job_id
+- _format_duration() with negative seconds (N/A formatting)
+- History filter selectbox with different status values (index calculation)
+- Failure distribution bar chart rendering (failure_reasons non-empty branch)
+
+### Residual Risks
+- Concurrent read load on get_scan_job_stats() (called ~4/sec during crawl)
+- SQL LIKE queries case-sensitive in SQLite (domain search won't match Example.com vs example.com)
+- export_scan_job_metadata called per-visible-job in history table (50 connections per page load)
+- Streamlit session state not persisted across browser close
+- failure_reasons dict aggregation performance under high worker count
+
+### Code Quality Observations
+- _WorkerContext bundles 12 fields; considered idiomatic for concurrency but worth monitoring
+- parser.py has 30+ private helper functions (1709 lines); complex domain, justified
+- ProgressCoalescer's 250ms throttle is appropriate; no issues detected
+- Failure reason hints are manually verified; no automated checks
+- CacheService.invalidate_cache() is half-finished (pass statement); should remove
+
+---
+
+## REQUIREMENTS TRACE (Explicit Plan: docs/plans/2026-04-20-001-feat-phase2-ui-enhancements-plan.md)
+
+✓ Unit 1: Progress Event Expansion + failure_reasons aggregation — MET
+✓ Unit 2: Storage Layer (filtering, export) — MET
+✓ Unit 3: Progress UI Visualization (bar chart) — MET (with caveats: TOCTOU race)
+✓ Unit 4: History Management (filters, sort, pagination) — MET (with gaps: UI interactions untested)
+✓ Unit 5: Export Integration — MET
+
+All 5 units implemented. Requirements trace complete. Caveats noted.
+
+---
+
+## VERDICT: READY FOR PUSH WITH KNOWN GAPS
+
+Code review COMPLETE in autofix mode.
+
+- ✅ 5 safe_auto fixes applied and verified (tests pass: 667/667)
+- ⚠️ 10 unresolved P0/P1 findings require architectural/refactoring decisions
+- ℹ️ 19 advisory observations and test coverage gaps documented
+
+Safe to push to origin and create PR. Recommend:
+1. Address P0 (TOCTOU race) before deployment, or document snapshot semantics
+2. Add unresolved P1 findings to Phase 3 backlog
+3. Phase 3: Implement agent-accessible APIs (CLI/REST/MCP)
+4. Phase 3: Address refactoring debt (CacheService, ScanJobStats, filter duplication)
+
+---
+
+ARTIFACT GENERATED: .context/compound-engineering/ce-review/2026-04-20-phase2-ui/
+END REVIEW

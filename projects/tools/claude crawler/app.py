@@ -12,7 +12,9 @@ import streamlit as st
 
 from crawler import config, storage, analysis, export
 from crawler.cache import CacheService
+from crawler.models import ScanJob
 from crawler.core.engine import run_crawl
+from crawler.models import ScanJob
 from crawler.core.url import is_private_host
 
 
@@ -665,8 +667,16 @@ def _render_history_filters(db_path: str) -> None:
             st.rerun()
 
 
-def _render_history_table(db_path: str, jobs: list) -> None:
-    """Display paginated history scan table with download buttons."""
+def _render_history_table(db_path: str, jobs: list[ScanJob]) -> None:
+    """Display paginated history scan table with download buttons.
+    
+    Args:
+        db_path: Path to SQLite database
+        jobs: List of ScanJob objects from list_scan_jobs_filtered()
+    
+    Renders table with scan metadata and provides 'View Details' and
+    'Download Metadata' buttons for each scan.
+    """
     if not jobs:
         st.info("No scans match your filters.")
         return

@@ -644,7 +644,7 @@ def list_scan_jobs_filtered(
 
     with get_connection(db_path) as conn:
         query = "SELECT * FROM scan_jobs WHERE 1=1"
-        params = []
+        params: list[str | int] = []
 
         if domain_filter:
             query += " AND domain LIKE ?"
@@ -707,7 +707,7 @@ def count_scan_jobs_filtered(
     """Count scan jobs matching filters (for pagination)."""
     with get_connection(db_path) as conn:
         query = "SELECT COUNT(*) as count FROM scan_jobs WHERE 1=1"
-        params = []
+        params: list[str | int] = []
 
         if domain_filter:
             query += " AND domain LIKE ?"

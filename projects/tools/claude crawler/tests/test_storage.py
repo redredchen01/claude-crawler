@@ -14,6 +14,15 @@ from crawler.storage import (
     get_cached_response, save_cached_response, clear_http_cache, get_cache_metrics,
 )
 from crawler.models import Resource
+import json
+import concurrent.futures
+from unittest.mock import patch
+from crawler.storage import list_scan_jobs_filtered, count_scan_jobs_filtered
+from crawler.storage import list_scan_jobs_filtered
+from crawler.storage import get_scan_job_stats
+from crawler.storage import export_scan_job_metadata
+from crawler.storage import count_scan_jobs_filtered, list_scan_jobs_filtered
+from contextlib import contextmanager
 
 
 @pytest.fixture
@@ -268,8 +277,6 @@ class TestGetResourcesQueryCount:
         try:
             # Import the actual function and monkey-patch get_connection to
             # return our traced connection.
-            from unittest.mock import patch
-            from contextlib import contextmanager
 
             @contextmanager
             def fake_get_conn(_path=None):
@@ -471,7 +478,6 @@ class TestHttpCache:
 
     def test_concurrent_cache_writes(self, db_path):
         """Concurrent writes to same URL via UPSERT are safe."""
-        import concurrent.futures
         
         def write_cache(url, etag, body):
             with get_connection(db_path) as conn:
@@ -514,7 +520,6 @@ class TestHttpCache:
 class TestScanJobStats:
     def test_get_scan_job_stats_success(self, db_path):
         """Test stats query returns correct success/failure counts."""
-        from crawler.storage import get_scan_job_stats
         
         job_id = create_scan_job(db_path, "https://example.com", "example.com")
         
@@ -535,7 +540,6 @@ class TestScanJobStats:
 
     def test_list_scan_jobs_filtered_by_domain(self, db_path):
         """Test filtered list returns only matching domains."""
-        from crawler.storage import list_scan_jobs_filtered
         
         job1 = create_scan_job(db_path, "https://example.com", "example.com")
         job2 = create_scan_job(db_path, "https://other.com", "other.com")
@@ -546,7 +550,6 @@ class TestScanJobStats:
 
     def test_list_scan_jobs_filtered_pagination(self, db_path):
         """Test pagination with LIMIT/OFFSET."""
-        from crawler.storage import list_scan_jobs_filtered, count_scan_jobs_filtered
         
         for i in range(5):
             create_scan_job(db_path, f"https://example{i}.com", f"example{i}.com")
@@ -563,7 +566,6 @@ class TestScanJobStats:
 
     def test_count_scan_jobs_filtered(self, db_path):
         """Test count function matches filtered list length."""
-        from crawler.storage import count_scan_jobs_filtered, list_scan_jobs_filtered
         
         create_scan_job(db_path, "https://example.com", "example.com")
         update_scan_job(db_path, 1, status="completed", resources_found=10)
@@ -575,8 +577,6 @@ class TestScanJobStats:
 
     def test_export_scan_job_metadata_structure(self, db_path):
         """Test export returns valid JSON-serializable dict."""
-        from crawler.storage import export_scan_job_metadata
-        import json
         
         job_id = create_scan_job(db_path, "https://example.com", "example.com")
         page_id = insert_page(db_path, job_id, "https://example.com/page1")
