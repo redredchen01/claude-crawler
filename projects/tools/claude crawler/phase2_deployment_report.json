@@ -1,0 +1,18 @@
+{
+  "timestamp": "2026-04-20T13:35:44.773872",
+  "dry_run": true,
+  "stages": {
+    "schema_migration": {
+      "status": "pass"
+    },
+    "backfill": {
+      "status": "fail",
+      "output": "Starting backfill: limit=10, dry_run=True\n\n\u2713 Backfill complete\n  Total: 0\n  Successful: 0 (0%)\n  Failed: 0\n  Invalid HTML: 0\n  Elapsed: 0.0s\n\n\u2717 Gate failed: <80% valid HTML (0%)\n"
+    },
+    "extraction_validation": {
+      "status": "fail",
+      "reason": "[Errno 2] No such file or directory: '/tmp/validate_phase2.json'"
+    }
+  },
+  "elapsed_seconds": 0.260064
+}
