@@ -88,7 +88,8 @@ def _heading_hierarchy_signal(soup: BeautifulSoup) -> str | None:
 def _detect_page_type(html: str, url: str, soup: BeautifulSoup) -> str:
     """Determine page type from URL and HTML structure."""
     # Lazy imports to avoid circular dependency with parser_main and structured_data
-    from crawler.parser_legacy import _is_link_card, _parse_jsonld_blocks, _extract_meta
+    from crawler.parser_extractors import _is_link_card, _extract_meta
+    from crawler.parser_structured_data import _parse_jsonld_blocks
 
     path = urlparse(url).path.strip("/")
     is_root = not path  # homepage / index

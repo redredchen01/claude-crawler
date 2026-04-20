@@ -526,8 +526,8 @@ class TestRenderRankings:
 
             render_rankings(db_path, sj_id)
 
-        # Verify st.download_button was called (2 times for CSV and JSON)
-        assert mock_st.download_button.call_count == 2
+        # Verify st.download_button was called (4 times: CSV, JSON, Stats JSON, Report MD)
+        assert mock_st.download_button.call_count == 4
 
     def test_render_rankings_empty_resources_shows_diagnosis(self, db_path, sj_id):
         """Verify render_rankings shows diagnosis when no resources found."""
