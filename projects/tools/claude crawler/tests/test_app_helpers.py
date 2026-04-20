@@ -20,7 +20,7 @@ from app import (
     _normalize_entry_url, _render_zero_resources_diagnosis,
     _render_performance_panel, _render_history_filters,
     _render_history_table, _render_pagination, _format_duration,
-    _format_sources_compact,
+    _format_sources_compact, render_rankings,
 )
 from crawler.storage import (
     create_scan_job, init_db, insert_page, update_page,
@@ -389,6 +389,161 @@ class TestRenderPerformancePanel:
 
 
 # ─── _render_history_filters ───
+
+# ─── render_rankings ───
+
+class TestRenderRankings:
+    def test_render_rankings_includes_sources_column(self, db_path, sj_id):
+        """Verify rankings dataframe includes Sources column."""
+        from crawler.storage import insert_resource, insert_page
+        from crawler.raw_data import build_raw_data
+        from crawler.models import Resource
+
+        # Create a page first
+        page_id = insert_page(db_path, sj_id, "https://example.com/article")
+
+        # Insert a resource with provenance
+        raw = build_raw_data({"title": "jsonld", "views": "opengraph"})
+        resource = Resource(
+            scan_job_id=sj_id,
+            page_id=page_id,
+            title="Test Article",
+            url="https://example.com/article",
+            raw_data=raw,
+        )
+        insert_resource(db_path, resource)
+
+        with patch("app.st") as mock_st:
+            mock_st.info = MagicMock()
+            mock_st.dataframe = MagicMock()
+            mock_st.columns.return_value = [MagicMock(), MagicMock()]
+            mock_st.download_button = MagicMock()
+
+            render_rankings(db_path, sj_id)
+
+        # Verify st.dataframe was called with data containing Sources
+        mock_st.dataframe.assert_called_once()
+        call_args = mock_st.dataframe.call_args[0][0]
+        assert len(call_args) > 0
+        assert "Sources" in call_args[0]
+
+    def test_render_rankings_multiple_resources_with_different_provenance(self, db_path, sj_id):
+        """Verify multiple resources show correct provenance in Sources column."""
+        from crawler.storage import insert_resource, insert_page
+        from crawler.raw_data import build_raw_data
+        from crawler.models import Resource
+
+        # Insert multiple resources with different provenance
+        page_id1 = insert_page(db_path, sj_id, "https://example.com/1")
+        raw1 = build_raw_data({"title": "jsonld", "views": "opengraph"})
+        resource1 = Resource(
+            scan_job_id=sj_id,
+            page_id=page_id1,
+            title="Article 1",
+            url="https://example.com/1",
+            raw_data=raw1,
+        )
+        insert_resource(db_path, resource1)
+
+        page_id2 = insert_page(db_path, sj_id, "https://example.com/2")
+        raw2 = build_raw_data({"title": "opengraph", "likes": "dom"})
+        resource2 = Resource(
+            scan_job_id=sj_id,
+            page_id=page_id2,
+            title="Article 2",
+            url="https://example.com/2",
+            raw_data=raw2,
+        )
+        insert_resource(db_path, resource2)
+
+        with patch("app.st") as mock_st:
+            mock_st.info = MagicMock()
+            mock_st.dataframe = MagicMock()
+            mock_st.columns.return_value = [MagicMock(), MagicMock()]
+            mock_st.download_button = MagicMock()
+
+            render_rankings(db_path, sj_id)
+
+        # Verify st.dataframe was called with 2 rows
+        call_args = mock_st.dataframe.call_args[0][0]
+        assert len(call_args) == 2
+        # Check that both expected sources appear
+        # Note: json.dumps with sort_keys=True sorts fields alphabetically in output
+        sources_set = {call_args[0]["Sources"], call_args[1]["Sources"]}
+        # raw1: {"title": "jsonld", "views": "opengraph"} -> alphabetical: "t:jl v:og"
+        # raw2: {"title": "opengraph", "likes": "dom"} -> alphabetical: "l:dom t:og"
+        expected_sources_set = {"t:jl v:og", "l:dom t:og"}
+        assert sources_set == expected_sources_set
+
+    def test_render_rankings_legend_displayed(self, db_path, sj_id):
+        """Verify legend/info block is displayed explaining Sources column."""
+        from crawler.storage import insert_resource, insert_page
+        from crawler.models import Resource
+
+        page_id = insert_page(db_path, sj_id, "https://example.com/article")
+        resource = Resource(
+            scan_job_id=sj_id,
+            page_id=page_id,
+            title="Test",
+            url="https://example.com/article",
+        )
+        insert_resource(db_path, resource)
+
+        with patch("app.st") as mock_st:
+            mock_st.info = MagicMock()
+            mock_st.dataframe = MagicMock()
+            mock_st.columns.return_value = [MagicMock(), MagicMock()]
+            mock_st.download_button = MagicMock()
+
+            render_rankings(db_path, sj_id)
+
+        # Verify st.info was called (legend)
+        mock_st.info.assert_called_once()
+        legend_text = mock_st.info.call_args[0][0]
+        assert "Sources" in legend_text
+        assert "JSON-LD" in legend_text
+        assert "OpenGraph" in legend_text
+
+    def test_render_rankings_export_buttons(self, db_path, sj_id):
+        """Verify CSV and JSON export buttons are present."""
+        from crawler.storage import insert_resource, insert_page
+        from crawler.models import Resource
+
+        page_id = insert_page(db_path, sj_id, "https://example.com/article")
+        resource = Resource(
+            scan_job_id=sj_id,
+            page_id=page_id,
+            title="Test",
+            url="https://example.com/article",
+        )
+        insert_resource(db_path, resource)
+
+        with patch("app.st") as mock_st:
+            mock_st.info = MagicMock()
+            mock_st.dataframe = MagicMock()
+            mock_st.columns.return_value = [MagicMock(), MagicMock()]
+            mock_st.download_button = MagicMock()
+
+            render_rankings(db_path, sj_id)
+
+        # Verify st.download_button was called (2 times for CSV and JSON)
+        assert mock_st.download_button.call_count == 2
+
+    def test_render_rankings_empty_resources_shows_diagnosis(self, db_path, sj_id):
+        """Verify render_rankings shows diagnosis when no resources found."""
+        with patch("app.st") as mock_st:
+            # Don't mock st.error/warning to allow diagnosis to render
+            mock_st.error = MagicMock()
+            mock_st.warning = MagicMock()
+            mock_st.info = MagicMock()
+            mock_st.caption = MagicMock()
+
+            render_rankings(db_path, sj_id)
+
+        # Should have called diagnostic UI (not dataframe)
+        # Either error, warning, or info should be called
+        assert mock_st.error.called or mock_st.warning.called or mock_st.info.called
+
 
 class TestRenderHistoryFilters:
     def test_render_history_filters_renders_without_error(self, db_path):
