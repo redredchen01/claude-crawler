@@ -14,8 +14,8 @@ from crawler import config, storage, analysis, export
 from crawler.cache import CacheService
 from crawler.models import ScanJob
 from crawler.core.engine import run_crawl
-from crawler.models import ScanJob
 from crawler.core.url import is_private_host
+from crawler.raw_data import parse_raw_data
 
 
 # Matches inputs that LOOK like 'scheme:rest' but aren't a real URL with
@@ -556,6 +556,40 @@ def render_failed_pages(db_path: str, scan_job_id: int):
                 for r in failed_rows if (r["failure_reason"] or "(unknown)") == reason
             ]
             st.dataframe(urls, use_container_width=True, hide_index=True)
+
+
+def _format_sources_compact(raw_data: str) -> str:
+    """Convert raw_data JSON provenance into compact readable format.
+
+    Format: "field:source field:source ..." where both are abbreviated.
+    Skips "missing" entries. Returns "–" if no provenance.
+    Example: "t:jl v:og l:dom" means title from JSON-LD, views from OpenGraph,
+    likes from DOM heuristics.
+    """
+    FIELD_ABBREV = {
+        "title": "t", "views": "v", "likes": "l", "hearts": "h",
+        "category": "k", "cover_url": "c", "published_at": "p",
+        "tags": "g", "description": "d",
+    }
+    SOURCE_ABBREV = {
+        "jsonld": "jl", "opengraph": "og", "twitter": "tw",
+        "microdata": "md", "dom": "dom",
+    }
+
+    data = parse_raw_data(raw_data)
+    provenance = data.get("provenance", {})
+    if not provenance:
+        return "–"
+
+    parts = []
+    for field, source in provenance.items():
+        if source == "missing":
+            continue
+        field_abbr = FIELD_ABBREV.get(field, field)
+        source_abbr = SOURCE_ABBREV.get(source, source)
+        parts.append(f"{field_abbr}:{source_abbr}")
+
+    return " ".join(parts) if parts else "–"
 
 
 def render_rankings(db_path: str, scan_job_id: int):

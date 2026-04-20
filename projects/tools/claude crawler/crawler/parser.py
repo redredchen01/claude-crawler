@@ -1633,10 +1633,22 @@ def _extract_list_resources(soup: BeautifulSoup, url: str) -> list[Resource]:
         # the two extractors don't drift in behavior.
         tags, _ = _extract_tags_and_category(card)
 
-        # Metrics (optional)
-        views = _extract_metric(card, ["views", "view", "浏览"])
-        likes = _extract_metric(card, ["likes", "like", "赞"])
-        hearts = _extract_metric(card, ["hearts", "heart", "收藏"])
+        # Try structured data first for card metrics
+        card_metrics = {}
+        if res_url:
+            # For list items, try to extract from page-level structured data
+            # pointing to this specific URL (rare but some carousels do it)
+            blocks = _parse_jsonld_blocks(soup)
+            for block in blocks:
+                if isinstance(block, dict):
+                    if block.get('url') == res_url:
+                        card_metrics = _extract_jsonld_metrics([block])
+                        if card_metrics:
+                            break
+        # Metrics: structured data first, then DOM fallback
+        views = card_metrics.get('views') or _extract_metric(card, ["views", "view", "浏览", "浏览量"])
+        likes = card_metrics.get('likes') or _extract_metric(card, ["likes", "like", "赞", "点赞"])
+        hearts = card_metrics.get('hearts') or _extract_metric(card, ["hearts", "heart", "爱心", "收藏"])
 
         resources.append(Resource(
             title=title,
