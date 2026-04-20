@@ -1478,6 +1478,20 @@ def _breadcrumb_category(soup: BeautifulSoup, url: str) -> str:
     return ""
 
 
+def _is_placeholder_url(url: str) -> bool:
+    """Return True if URL points to a placeholder image (1x1 GIF, data URL, etc.)."""
+    if not url:
+        return True
+    url_lower = url.lower()
+    # Data URLs, SVG placeholders
+    if url_lower.startswith("data:"):
+        return True
+    # Common 1x1 GIF patterns
+    if "1x1" in url_lower or "pixel" in url_lower:
+        return True
+    return False
+
+
 def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
     """Extract a single Resource from a detail page.
 

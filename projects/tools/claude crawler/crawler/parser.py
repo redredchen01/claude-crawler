@@ -14,8 +14,15 @@ from typing import Any
 # Re-export everything from parser_legacy for compatibility
 from crawler import parser_legacy
 
+# Explicit imports from new submodules (Unit 2+)
+from crawler.parser_page_type_detection import (
+    _detect_page_type,
+    _heading_hierarchy_signal,
+    _jsonld_has_detail_entity,
+)
+
 def __getattr__(name: str) -> Any:
-    """Dynamically import attributes from parser_legacy."""
+    """Dynamically import attributes from parser_legacy or submodules."""
     try:
         return getattr(parser_legacy, name)
     except AttributeError:
