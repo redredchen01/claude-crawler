@@ -1,0 +1,41 @@
+{
+  "threshold_sets": [
+    {
+      "name": "Set A (Conservative)",
+      "h1_max": 1,
+      "h2_max": 3,
+      "body_min": 500,
+      "h2_list_min": 8,
+      "h1_list_min": 2,
+      "precision": 1.0,
+      "recall": 0.75,
+      "f1_score": 0.86
+    },
+    {
+      "name": "Set C (Lenient)",
+      "h1_max": 1,
+      "h2_max": 6,
+      "body_min": 600,
+      "h2_list_min": 7,
+      "h1_list_min": 2,
+      "precision": 1.0,
+      "recall": 0.75,
+      "f1_score": 0.86
+    },
+    {
+      "name": "Set B (Balanced)",
+      "h1_max": 1,
+      "h2_max": 5,
+      "body_min": 800,
+      "h2_list_min": 6,
+      "h1_list_min": 2,
+      "precision": 1.0,
+      "recall": 0.5,
+      "f1_score": 0.67
+    }
+  ],
+  "recommended_set": "Set A (Conservative)",
+  "best_precision": 1.0,
+  "best_f1": 0.86,
+  "samples_evaluated": 8
+}
