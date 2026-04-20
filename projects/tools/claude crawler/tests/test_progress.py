@@ -114,3 +114,47 @@ class TestThreadSafety:
         # Each event must be a complete dict (no partial writes).
         for event in _drain(out):
             assert "status" in event and "pages_done" in event
+
+
+class TestProgressNewFields:
+    def test_progress_coalescer_new_fields(self):
+        """Test that coalescer handles new optional fields without error."""
+        out = queue.Queue()
+        coalescer = ProgressCoalescer(out, flush_ms=10)
+        coalescer.start()
+        try:
+            coalescer.emit({
+                "status": "running",
+                "pages_done": 5,
+                "pages_total": 100,
+                "failed_count": 2,
+                "speed_pages_per_sec": 1.5,
+                "estimated_seconds_remaining": 60,
+            })
+            time.sleep(0.05)
+        finally:
+            coalescer.shutdown(timeout=1.0)
+
+        events = _drain(out)
+        assert len(events) >= 1
+        last = events[-1]
+        assert last["failed_count"] == 2
+        assert last["speed_pages_per_sec"] == 1.5
+        assert last["estimated_seconds_remaining"] == 60
+
+    def test_progress_backward_compatible_without_new_fields(self):
+        """Test that events without new fields still work."""
+        out = queue.Queue()
+        coalescer = ProgressCoalescer(out, flush_ms=10)
+        coalescer.start()
+        try:
+            coalescer.emit({"status": "running", "pages_done": 5})
+            time.sleep(0.05)
+        finally:
+            coalescer.shutdown(timeout=1.0)
+
+        events = _drain(out)
+        assert len(events) >= 1
+        assert events[-1]["pages_done"] == 5
+        # New fields should not be present if not emitted
+        assert "failed_count" not in events[-1] or events[-1].get("failed_count") is None

@@ -16,9 +16,14 @@ from unittest.mock import patch
 
 import pytest
 
-from app import _normalize_entry_url, _render_zero_resources_diagnosis
+from app import (
+    _normalize_entry_url, _render_zero_resources_diagnosis,
+    _render_performance_panel, _render_history_filters,
+    _render_history_table, _render_pagination, _format_duration,
+)
 from crawler.storage import (
     create_scan_job, init_db, insert_page, update_page,
+    get_scan_job_stats, list_scan_jobs_filtered,
 )
 
 

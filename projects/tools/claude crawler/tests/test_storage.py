@@ -509,3 +509,86 @@ class TestHttpCache:
             row = conn.execute("SELECT cached FROM pages WHERE id = ?", (page_id,)).fetchone()
             assert row is not None
             assert row["cached"] == 0  # False in SQLite
+
+
+class TestScanJobStats:
+    def test_get_scan_job_stats_success(self, db_path):
+        """Test stats query returns correct success/failure counts."""
+        from crawler.storage import get_scan_job_stats
+        
+        job_id = create_scan_job(db_path, "https://example.com", "example.com")
+        
+        page1 = insert_page(db_path, job_id, "https://example.com/page1")
+        page2 = insert_page(db_path, job_id, "https://example.com/page2")
+        page3 = insert_page(db_path, job_id, "https://example.com/page3")
+        
+        update_page(db_path, page1, status="fetched")
+        update_page(db_path, page2, status="fetched")
+        update_page(db_path, page3, status="failed", failure_reason="http_error")
+        
+        stats = get_scan_job_stats(db_path, job_id)
+        assert stats is not None
+        assert stats.pages_success == 2
+        assert stats.pages_failed == 1
+        assert "http_error" in stats.failed_reasons_dict
+        assert stats.failed_reasons_dict["http_error"] == 1
+
+    def test_list_scan_jobs_filtered_by_domain(self, db_path):
+        """Test filtered list returns only matching domains."""
+        from crawler.storage import list_scan_jobs_filtered
+        
+        job1 = create_scan_job(db_path, "https://example.com", "example.com")
+        job2 = create_scan_job(db_path, "https://other.com", "other.com")
+        
+        filtered = list_scan_jobs_filtered(db_path, domain_filter="example")
+        assert len(filtered) == 1
+        assert filtered[0].domain == "example.com"
+
+    def test_list_scan_jobs_filtered_pagination(self, db_path):
+        """Test pagination with LIMIT/OFFSET."""
+        from crawler.storage import list_scan_jobs_filtered, count_scan_jobs_filtered
+        
+        for i in range(5):
+            create_scan_job(db_path, f"https://example{i}.com", f"example{i}.com")
+        
+        page1 = list_scan_jobs_filtered(db_path, limit=2, offset=0)
+        page2 = list_scan_jobs_filtered(db_path, limit=2, offset=2)
+        
+        assert len(page1) == 2
+        assert len(page2) == 2
+        assert page1[0].id != page2[0].id
+        
+        total = count_scan_jobs_filtered(db_path)
+        assert total == 5
+
+    def test_count_scan_jobs_filtered(self, db_path):
+        """Test count function matches filtered list length."""
+        from crawler.storage import count_scan_jobs_filtered, list_scan_jobs_filtered
+        
+        create_scan_job(db_path, "https://example.com", "example.com")
+        update_scan_job(db_path, 1, status="completed", resources_found=10)
+        
+        count = count_scan_jobs_filtered(db_path, status_filter="completed", resource_min=5, resource_max=15)
+        filtered = list_scan_jobs_filtered(db_path, status_filter="completed", resource_min=5, resource_max=15)
+        
+        assert count == len(filtered)
+
+    def test_export_scan_job_metadata_structure(self, db_path):
+        """Test export returns valid JSON-serializable dict."""
+        from crawler.storage import export_scan_job_metadata
+        import json
+        
+        job_id = create_scan_job(db_path, "https://example.com", "example.com")
+        page_id = insert_page(db_path, job_id, "https://example.com/page1")
+        update_page(db_path, page_id, status="fetched")
+        
+        metadata = export_scan_job_metadata(db_path, job_id)
+        
+        assert "scan_job" in metadata
+        assert "pages" in metadata
+        assert "stats" in metadata
+        assert metadata["scan_job"]["id"] == job_id
+        assert len(metadata["pages"]) == 1
+        
+        serializable = json.dumps(metadata)
+        assert isinstance(serializable, str)

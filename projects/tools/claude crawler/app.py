@@ -281,10 +281,11 @@ def _format_duration(seconds: int) -> str:
 
 
 def _render_performance_panel(progress: dict) -> None:
-    """Display performance metrics: speed, ETA, failure count."""
+    """Display performance metrics: speed, ETA, failure count, failure distribution."""
     speed = progress.get("speed_pages_per_sec", 0.0)
     eta_sec = progress.get("estimated_seconds_remaining", 0)
     failed_count = progress.get("failed_count", 0)
+    failure_reasons = progress.get("failure_reasons", {})
     pages_total = progress.get("pages_total", 1)
 
     col1, col2, col3, col4 = st.columns(4)
@@ -296,6 +297,11 @@ def _render_performance_panel(progress: dict) -> None:
         st.metric("Failed", failed_count, delta=None)
     with col4:
         st.metric("Success Rate", f"{((pages_total - failed_count) / max(pages_total, 1) * 100):.1f}%")
+
+    # Display failure reasons distribution if any failures
+    if failure_reasons:
+        st.subheader("Failure Distribution", divider=False)
+        st.bar_chart(failure_reasons)
 
 
 def render_progress():
