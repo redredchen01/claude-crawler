@@ -1032,6 +1032,47 @@ def _extract_structured(soup: BeautifulSoup) -> tuple[dict, dict, str]:
 # Page-type detection
 # ---------------------------------------------------------------------------
 
+def _heading_hierarchy_signal(soup: BeautifulSoup) -> str | None:
+    """Infer page type from heading structure.
+
+    Detail pages: single h1 + few h2/h3 + reasonable body
+    List pages: many h2+ headings (card titles) or no h1
+    Returns: 'detail', 'list', or None if inconclusive.
+
+    Thresholds from Unit 3.5 threshold discovery (Set A — conservative):
+    h1_max=1, h2_max=3, body_min=500, h2_list_min=8, h1_list_min=2.
+    """
+    h1_count = len(soup.find_all("h1"))
+    h2_plus_count = len(soup.find_all(["h2", "h3", "h4"]))
+    body_text = soup.get_text(strip=True)
+    body_length = len(body_text)
+
+    # Thresholds from Unit 3.5 threshold discovery (Set A)
+    HEADING_DETAIL_H1_MAX = 1
+    HEADING_DETAIL_H2_MAX = 3
+    HEADING_DETAIL_BODY_MIN = 500
+    HEADING_LIST_H2_MIN = 8
+    HEADING_LIST_H1_MIN = 2
+
+    # No h1 at all → unclear, likely list or missing structure
+    if h1_count == 0:
+        return "list" if h2_plus_count > 5 else None
+
+    # Single h1 + sparse h2+ + reasonable body → detail
+    if h1_count <= HEADING_DETAIL_H1_MAX and h2_plus_count <= HEADING_DETAIL_H2_MAX and body_length > HEADING_DETAIL_BODY_MIN:
+        return "detail"
+
+    # Many h2+ relative to h1 → likely list grid with h2 card titles
+    if h2_plus_count >= HEADING_LIST_H2_MIN:
+        return "list"
+
+    # Multiple h1 (unusual) → list-like
+    if h1_count >= HEADING_LIST_H1_MIN:
+        return "list"
+
+    return None
+
+
 def _detect_page_type(html: str, url: str, soup: BeautifulSoup) -> str:
     """Determine page type from URL and HTML structure."""
     path = urlparse(url).path.strip("/")
@@ -1112,6 +1153,11 @@ def _detect_page_type(html: str, url: str, soup: BeautifulSoup) -> str:
         return "list"
     if len(link_cards) > 5:
         return "list"
+
+    # Heading hierarchy heuristic (Unit 4) — last resort before "other"
+    hierarchy_signal = _heading_hierarchy_signal(soup)
+    if hierarchy_signal is not None:
+        return hierarchy_signal
 
     return "other"
 
