@@ -1033,12 +1033,21 @@ def _extract_structured(soup: BeautifulSoup) -> tuple[dict, dict, str]:
 
 def _detect_page_type(html: str, url: str, soup: BeautifulSoup) -> str:
     """Determine page type from URL and HTML structure."""
-    # Tag pages
-    if "/tag/" in url or "/tags/" in url:
-        return "tag"
-
     path = urlparse(url).path.strip("/")
     is_root = not path  # homepage / index
+    
+    # Tag pages — check before detail patterns
+    if "/tag/" in url or "/tags/" in url:
+        return "tag"
+    
+    # Detail page URL patterns — most reliable signal
+    # Covers: /detail/, /video/, /article/, /post/, /novel/, /chapter/, etc.
+    detail_patterns = [
+        "/detail/", "/video/", "/article/", "/post/", "/chapter/",
+        "/novel/", "/story/, /item/", "/view/", "/watch/"
+    ]
+    if any(p in url for p in detail_patterns) and not is_root:
+        return "detail"
 
     # Repeated-card counts, computed once and reused by all signals below.
     articles = soup.select("article")
@@ -1464,17 +1473,32 @@ def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
     container = _pick_main_container(soup)
 
     # --- Cover image ---
-    # When structured extractors miss cover_url (not present, or
-    # rejected as placeholder), scan only the container's <img> tags.
-    # Pass soup=None to skip _pick_cover_image's og:image/twitter:image
-    # re-read — those were already evaluated by the structured path and
-    # rejecting them there but accepting them here would defeat the
-    # placeholder filter.
+    # Multi-fallback chain when structured extractors miss cover_url
     cover_url = merged.get("cover_url", "")
-    if not cover_url:
+    if not cover_url and container:
+        # Try container's images first
         cover_url = _pick_cover_image(None, container, url)
         if cover_url:
             provenance["cover_url"] = PROVENANCE_DOM
+    if not cover_url:
+        # Try any <img> in the page (for video thumbnails, etc.)
+        img = soup.find("img")
+        if img and img.get("src"):
+            src = img.get("src", "").strip()
+            if src and not _is_placeholder_url(src):
+                cover_url = urljoin(url, src)
+                provenance["cover_url"] = PROVENANCE_DOM
+    if not cover_url:
+        # Last resort: try video poster attribute or thumbnail data attribute
+        for video in soup.find_all(["video", "source"]):
+            if video.get("poster"):
+                cover_url = urljoin(url, video["poster"])
+                provenance["cover_url"] = PROVENANCE_DOM
+                break
+            if video.get("src"):
+                cover_url = urljoin(url, video["src"])
+                provenance["cover_url"] = PROVENANCE_DOM
+                break
 
     # --- Tags + detected-category side effect (used by category rule) ---
     # When structured provides tags we skip DOM tag scoring, but still
@@ -1512,10 +1536,7 @@ def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
                 merged[key] = 0
 
     # --- Category ---
-    # Priority: breadcrumb > structured > detected tag-block category > URL.
-    # Breadcrumb beats structured `articleSection` because breadcrumbs
-    # give "Drama > Korean"-grained paths while og:article:section often
-    # gives coarse "Entertainment"; we prefer the more specific signal.
+    # Priority: breadcrumb > structured > detected tag-block > URL path > domain hint
     breadcrumb_cat = _breadcrumb_category(soup, url)
     if breadcrumb_cat:
         category = breadcrumb_cat
@@ -1526,13 +1547,22 @@ def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
         category = detected_category_dom
         provenance["category"] = PROVENANCE_DOM
     else:
+        # Aggressive URL-based category extraction
         path = urlparse(url).path.strip("/")
-        segments = path.split("/")
-        if len(segments) >= 2:
+        segments = [s for s in path.split("/") if s and s not in ("detail", "video", "article", "post")]
+        if segments:
+            # Pick first non-pattern segment as category
             category = segments[0]
             provenance["category"] = PROVENANCE_DOM
         else:
-            category = ""
+            # Last resort: use domain-based hint
+            domain = urlparse(url).netloc.replace("www.", "")
+            domain_hint = domain.split(".")[0]
+            if domain_hint and len(domain_hint) > 2:
+                category = domain_hint
+                provenance["category"] = PROVENANCE_DOM
+            else:
+                category = ""
 
     # --- Published date ---
     published_at = merged.get("published_at", "")
@@ -1744,6 +1774,15 @@ def parse_page(html: str, url: str) -> ParseResult:
         resources = [res]
     elif page_type in ("list", "tag"):
         resources = _extract_list_resources(soup, url)
+    elif page_type == "other":
+        # Fallback: try detail extraction for "other" pages with h1/title
+        # Better to extract something than nothing
+        h1 = soup.find("h1")
+        title_tag = soup.find("title")
+        if h1 or title_tag:
+            res = _extract_detail_resource(soup, url)
+            if res.title:  # Only use if we got a title
+                resources = [res]
 
     return ParseResult(
         page_type=page_type,
