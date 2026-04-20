@@ -1,4 +1,15 @@
-"""HTML page parser — extracts resources, links, and page metadata."""
+"""Structured data extraction and merge: JSON-LD, OpenGraph, Twitter, microdata.
+
+This module handles extraction from multiple metadata sources with priority-based merging:
+- JSON-LD: schema.org @type detection, script block parsing, entity field extraction
+- OpenGraph: og:* meta tags, image https preference
+- Twitter Cards: twitter:* meta tags for media-rich pages
+- Microdata: itemscope/itemprop parsing for older semantic markup
+- Merge logic: priority chain (JSON-LD > OG > Twitter > microdata) with raw_data provenance
+
+All sources feed a unified merge interface that tracks field source for debugging.
+Calls _extract_metric() from parser_extractors for JSON-LD metrics extraction.
+"""
 
 import json
 import re

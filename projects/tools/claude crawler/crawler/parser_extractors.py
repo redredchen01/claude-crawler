@@ -1,4 +1,14 @@
-"""HTML page parser — extracts resources, links, and page metadata."""
+"""Tag, metric, image, date, and title extraction from HTML DOM.
+
+This module contains helper functions for extracting structured signals from HTML:
+- Tag scoring: multi-signal detection (class, href path, rel=tag, keyword stuffing gate)
+- Metrics: scoped extraction with multiplier support (K, M, B, 万, 千, 亿)
+- Images: srcset parsing, lazy-load attribute detection, quality filtering
+- Dates: ISO 8601, slash-separated, CJK formats, time tag extraction
+- Titles: site suffix stripping, weak title rescue from siblings
+
+All functions operate on BeautifulSoup DOM elements. No external APIs.
+"""
 
 import json
 import re

@@ -1,4 +1,16 @@
-"""HTML page parser — extracts resources, links, and page metadata."""
+"""Entry points and orchestration for HTML page parsing.
+
+This module contains:
+- parse_page(): public API that orchestrates page type detection and resource extraction
+- _extract_detail_resource(): Phase 1 (structured) + Phase 2 (DOM fallback) for detail pages
+- _extract_list_resources(): card iteration and title rescue for list pages
+- Container selection and link extraction helpers
+
+Coordinates imports from:
+- parser_page_type_detection: page type classification
+- parser_extractors: tag/metric/image/date helpers
+- parser_structured_data: JSON-LD, OG, Twitter, microdata extraction & merge
+"""
 
 import json
 import re
