@@ -610,8 +610,17 @@ def render_rankings(db_path: str, scan_job_id: int):
             "Tags": ", ".join(r.tags) if r.tags else "",
             "Category": r.category,
             "Published": r.published_at,
+            "Sources": _format_sources_compact(r.raw_data),
             "URL": r.url,
         })
+
+    # Legend for Sources column
+    st.info(
+        "**Sources** column shows extraction sources for each field using "
+        "abbreviations: t=title, v=views, l=likes, h=hearts, k=category, "
+        "c=cover_url, p=published_at, g=tags. Source: jl=JSON-LD, og=OpenGraph, "
+        "tw=Twitter, md=Microdata, dom=DOM heuristics."
+    )
 
     st.dataframe(data, use_container_width=True, hide_index=True)
 

@@ -20,6 +20,7 @@ from app import (
     _normalize_entry_url, _render_zero_resources_diagnosis,
     _render_performance_panel, _render_history_filters,
     _render_history_table, _render_pagination, _format_duration,
+    _format_sources_compact,
 )
 from crawler.storage import (
     create_scan_job, init_db, insert_page, update_page,
@@ -189,6 +190,127 @@ class TestRenderZeroResourcesDiagnosis:
         with patch("app.st") as mock_st:
             _render_zero_resources_diagnosis(db_path, sj_id)
         mock_st.info.assert_called_once()
+
+
+# ─── _format_sources_compact ───
+
+class TestFormatSourcesCompact:
+    def test_happy_path_multiple_sources(self):
+        """Verify compact formatting with multiple provenance entries."""
+        import json
+        from crawler.raw_data import build_raw_data
+        raw = build_raw_data({
+            "title": "jsonld",
+            "views": "opengraph",
+            "likes": "dom",
+        })
+        result = _format_sources_compact(raw)
+        assert "t:jl" in result
+        assert "v:og" in result
+        assert "l:dom" in result
+
+    def test_partial_provenance(self):
+        """Verify compact format skips missing sources."""
+        import json
+        from crawler.raw_data import build_raw_data
+        raw = build_raw_data({
+            "title": "jsonld",
+            "views": "missing",
+            "likes": "opengraph",
+        })
+        result = _format_sources_compact(raw)
+        assert "t:jl" in result
+        assert "l:og" in result
+        assert "missing" not in result
+
+    def test_empty_provenance_returns_dash(self):
+        """Verify empty provenance dict returns '–' (em-dash)."""
+        import json
+        raw = json.dumps({"provenance": {}, "description": ""})
+        result = _format_sources_compact(raw)
+        assert result == "–"
+
+    def test_null_raw_data_returns_dash(self):
+        """Verify null/empty raw_data string returns '–'."""
+        result = _format_sources_compact("")
+        assert result == "–"
+
+    def test_malformed_json_returns_dash(self):
+        """Verify malformed JSON is handled gracefully by parse_raw_data."""
+        result = _format_sources_compact("not valid json")
+        assert result == "–"
+
+    def test_future_field_name_fallback(self):
+        """Verify future field names not in FIELD_ABBREV dict are output as-is."""
+        import json
+        # Manually craft raw_data with a field that doesn't exist in current FIELD_ABBREV
+        raw = json.dumps({
+            "provenance": {
+                "title": "jsonld",
+                "future_field": "opengraph",
+            },
+            "description": ""
+        })
+        result = _format_sources_compact(raw)
+        assert "t:jl" in result
+        # future_field should be output as "future_field:og" since it's not in FIELD_ABBREV
+        assert "future_field:og" in result
+
+    def test_all_field_abbreviations(self):
+        """Verify all documented field abbreviations are correct."""
+        import json
+        from crawler.raw_data import build_raw_data
+        raw = build_raw_data({
+            "title": "jsonld",
+            "views": "opengraph",
+            "likes": "twitter",
+            "hearts": "microdata",
+            "category": "dom",
+            "cover_url": "jsonld",
+            "published_at": "opengraph",
+            "tags": "twitter",
+        })
+        result = _format_sources_compact(raw)
+        # Check all abbreviations
+        expected_pairs = [
+            "t:jl", "v:og", "l:tw", "h:md", "k:dom",
+            "c:jl", "p:og", "g:tw",
+        ]
+        for pair in expected_pairs:
+            assert pair in result
+
+    def test_all_source_abbreviations(self):
+        """Verify all source abbreviations map correctly."""
+        import json
+        from crawler.raw_data import build_raw_data
+        raw = build_raw_data({
+            "title": "jsonld",
+            "views": "opengraph",
+            "likes": "twitter",
+            "hearts": "microdata",
+            "category": "dom",
+        })
+        result = _format_sources_compact(raw)
+        assert ":jl" in result
+        assert ":og" in result
+        assert ":tw" in result
+        assert ":md" in result
+        assert ":dom" in result
+
+    def test_output_format_space_separated(self):
+        """Verify output is space-separated pairs, not comma or other delimiters."""
+        import json
+        from crawler.raw_data import build_raw_data
+        raw = build_raw_data({
+            "title": "jsonld",
+            "views": "opengraph",
+        })
+        result = _format_sources_compact(raw)
+        # Should have a space between pairs
+        assert " " in result
+        # Should not have comma or other delimiters
+        assert "," not in result
+        assert ";" not in result
 
 
 # ─── _format_duration ───
