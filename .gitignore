@@ -139,3 +139,11 @@ aws_credentials
 private/
 secrets/
 .gstack/
+
+# Independent Git repositories (tracked separately, not by main workspace)
+projects/production/gwx/
+projects/tools/crawl4ai/
+projects/tools/markitdown-web/
+
+# Existing submodules (for reference)
+projects/production/vts/
