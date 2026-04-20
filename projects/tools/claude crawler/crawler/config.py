@@ -115,3 +115,44 @@ SKIP_EXTENSIONS = {
 }
 
 DB_PATH = "data/crawler.db"
+
+# --- Performance Profiles (for different crawl scenarios) ---
+# Users can set PERF_PROFILE env var to switch profiles
+# E.g.: PERF_PROFILE=aggressive python app.py
+
+PERF_PROFILES = {
+    "default": {
+        "WORKER_COUNT": 8,
+        "REQ_PER_SEC_PER_DOMAIN": 5.0,
+        "RENDER_QUEUE_SIZE": 16,
+        "RENDER_TIMEOUT": 30,
+    },
+    "fast": {
+        "WORKER_COUNT": 12,
+        "REQ_PER_SEC_PER_DOMAIN": 10.0,
+        "RENDER_QUEUE_SIZE": 24,
+        "RENDER_TIMEOUT": 15,
+    },
+    "aggressive": {
+        "WORKER_COUNT": 16,
+        "REQ_PER_SEC_PER_DOMAIN": 15.0,
+        "RENDER_QUEUE_SIZE": 32,
+        "RENDER_TIMEOUT": 10,
+    },
+    "conservative": {
+        "WORKER_COUNT": 4,
+        "REQ_PER_SEC_PER_DOMAIN": 2.0,
+        "RENDER_QUEUE_SIZE": 8,
+        "RENDER_TIMEOUT": 45,
+    },
+}
+
+# Load profile from env or use default
+import os
+PERF_PROFILE = os.getenv("PERF_PROFILE", "default")
+if PERF_PROFILE in PERF_PROFILES:
+    profile = PERF_PROFILES[PERF_PROFILE]
+    WORKER_COUNT = profile["WORKER_COUNT"]
+    REQ_PER_SEC_PER_DOMAIN = profile["REQ_PER_SEC_PER_DOMAIN"]
+    RENDER_QUEUE_SIZE = profile["RENDER_QUEUE_SIZE"]
+    RENDER_TIMEOUT = profile["RENDER_TIMEOUT"]

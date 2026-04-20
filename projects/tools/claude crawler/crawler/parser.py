@@ -1574,6 +1574,9 @@ def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
     # --- Raw data payload (provenance + description) ---
     raw_data = build_raw_data(provenance, description=description_value)
 
+    # Deduplicate and normalize tags
+    tags = _deduplicate_tags(tags)
+    
     return Resource(
         title=title,
         url=url,
@@ -1710,6 +1713,9 @@ def _extract_list_resources(soup: BeautifulSoup, url: str) -> list[Resource]:
         
         raw_data = build_raw_data(provenance)
         
+        # Deduplicate and normalize tags
+        tags = _deduplicate_tags(tags)
+        
         resources.append(Resource(
             title=title,
             url=res_url,
@@ -1747,9 +1753,10 @@ def _extract_links(soup: BeautifulSoup, base_url: str) -> list[str]:
             continue
 
         absolute = urljoin(base_url, href)
+        normalized = _normalize_url(absolute)
 
-        if absolute not in seen:
-            seen.add(absolute)
+        if normalized not in seen:
+            seen.add(normalized)
             links.append(absolute)
 
     return links
@@ -1789,3 +1796,73 @@ def parse_page(html: str, url: str) -> ParseResult:
         resources=resources,
         links=links,
     )
+
+
+# --- URL Normalization (deduplication) ---
+
+def _normalize_url(url: str) -> str:
+    """Normalize URL to reduce duplicates.
+    
+    - Remove trailing slashes
+    - Remove tracking params (utm_*, fbclid, gclid, etc.)
+    - Lowercase domain  
+    - Sort query params
+    """
+    from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+    
+    parsed = urlparse(url)
+    netloc = parsed.netloc.lower()
+    path = parsed.path.rstrip('/')
+    
+    # Filter tracking params
+    tracking = {'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term',
+                'fbclid', 'gclid', 'msclkid', '_ga', 'ref', 'source'}
+    params = parse_qs(parsed.query, keep_blank_values=False)
+    params = {k: v for k, v in params.items() if k.lower() not in tracking}
+    
+    query = urlencode(sorted(params.items())) if params else ''
+    return urlunparse((parsed.scheme, netloc, path, '', query, ''))
+
+
+# --- Tag Deduplication & Normalization ---
+
+_TAG_ALIASES = {
+    # Common variations
+    '巨乳': ['大乳', '大波', '丰乳'],
+    '少女': ['萝莉', '幼女'],
+    '熟女': ['老妇', '妇女'],
+    '丝袜': ['黑丝', '连裤袜'],
+    '骑乘': ['上位', '女上位'],
+    '口交': ['吹箫', '含', '吞'],
+    '肛交': ['后庭', '菊花'],
+    '自慰': ['自摸', '打手枪', '手淫'],
+    '出轨': ['婚外', '背夫'],
+    '调教': ['训练', '调习'],
+    '颜射': ['脸射', '面射'],
+}
+
+
+def _normalize_tag(tag: str) -> str:
+    """Normalize tag: lowercase, strip, deduplicate variants."""
+    tag = tag.strip().lower()
+    # Find canonical form
+    for canonical, aliases in _TAG_ALIASES.items():
+        if tag == canonical.lower() or tag in [a.lower() for a in aliases]:
+            return canonical.lower()
+    return tag
+
+
+def _deduplicate_tags(tags: list[str]) -> list[str]:
+    """Remove duplicate tags (accounting for aliases) and sort by frequency."""
+    if not tags:
+        return []
+    
+    normalized = [_normalize_tag(t) for t in tags]
+    # Keep first occurrence of each normalized tag
+    seen = set()
+    result = []
+    for tag in normalized:
+        if tag and tag not in seen:
+            seen.add(tag)
+            result.append(tag)
+    return result

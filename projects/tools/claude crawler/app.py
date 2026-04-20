@@ -632,6 +632,18 @@ def render_rankings(db_path: str, scan_job_id: int):
     with col2:
         json_data = export.export_resources_json(db_path, scan_job_id)
         st.download_button("Download JSON", json_data, f"resources_{scan_job_id}.json", "application/json")
+        
+        # Enhanced exports
+        col1, col2 = st.columns(2)
+        with col1:
+            stats = export.export_stats_summary(db_path, scan_job_id)
+            import json as json_lib
+            stats_json = json_lib.dumps(stats, indent=2, ensure_ascii=False)
+            st.download_button("📊 Download Stats", stats_json, f"stats_{scan_job_id}.json", "application/json")
+        
+        with col2:
+            md_report = export.export_markdown_report(db_path, scan_job_id)
+            st.download_button("📄 Download Report (MD)", md_report, f"report_{scan_job_id}.md", "text/markdown")
 
 
 def render_tag_analysis(db_path: str, scan_job_id: int):
