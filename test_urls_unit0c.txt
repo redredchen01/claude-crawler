@@ -1,0 +1,23 @@
+# Unit 0c Real-world Validation URLs
+# Format: url | expected_type | features_to_test
+
+# SPA Websites (should trigger page detection -> render)
+https://example.com | spa | page_detection
+https://github.com/redredchen01 | spa | page_detection
+https://www.instagram.com/ | spa | page_detection,infinite_scroll
+
+# Static Websites (should NOT render, detected as static)
+https://example.org | static | page_detection
+https://www.wikipedia.org/wiki/Python_(programming_language) | static | page_detection
+
+# News/Blog Sites with Infinite Scroll (Unit 4)
+https://news.ycombinator.com/ | static_with_scroll | infinite_scroll
+https://www.reddit.com/r/programming/ | spa | infinite_scroll
+
+# Slow Loading / Potential Timeouts (Unit 7)
+https://httpstat.us/200?sleep=5000 | slow | timeout_fallback
+https://example.com/?delay=10 | static | timeout_fallback
+
+# Mixed Content Sites
+https://twitter.com/explore | spa | page_detection,infinite_scroll
+https://www.medium.com/ | spa | page_detection

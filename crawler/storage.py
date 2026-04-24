@@ -1,18 +1,17 @@
-"""SQLite storage: connection management, schema init, and CRUD operations."""
+from __future__ import annotations
 
-import sqlite3
+import json
 import os
+import re
+import sqlite3
 import threading
+import zlib
 from contextlib import contextmanager
-from datetime import datetime
+from urllib.parse import urlparse
 
 from crawler.config import DB_PATH
-from crawler.models import ScanJob, Page, Resource, Tag
+from crawler.models import Resource, ScanJob, Tag
 
-# Serializes concurrent init_db calls within a single process. SQLite's
-# `PRAGMA journal_mode=WAL` and `executescript` are racy when multiple
-# threads bootstrap the same fresh DB simultaneously — this lock is cheap
-# and avoids fighting SQLite's internal write locking during setup.
 _INIT_LOCK = threading.Lock()
 
 SCHEMA = """
@@ -25,10 +24,11 @@ CREATE TABLE IF NOT EXISTS scan_jobs (
     max_depth INTEGER NOT NULL DEFAULT 3,
     pages_scanned INTEGER NOT NULL DEFAULT 0,
     resources_found INTEGER NOT NULL DEFAULT 0,
+    cache_hits INTEGER NOT NULL DEFAULT 0,
+    cache_misses INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at TIMESTAMP
 );
-
 CREATE TABLE IF NOT EXISTS pages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     scan_job_id INTEGER NOT NULL REFERENCES scan_jobs(id),
@@ -38,9 +38,8 @@ CREATE TABLE IF NOT EXISTS pages (
     status TEXT NOT NULL DEFAULT 'pending',
     fetched_at TIMESTAMP,
     failure_reason TEXT NOT NULL DEFAULT '',
-    UNIQUE(scan_job_id, url)
+    cached BOOLEAN DEFAULT 0
 );
-
 CREATE TABLE IF NOT EXISTS resources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     scan_job_id INTEGER NOT NULL REFERENCES scan_jobs(id),
@@ -52,12 +51,21 @@ CREATE TABLE IF NOT EXISTS resources (
     likes INTEGER NOT NULL DEFAULT 0,
     hearts INTEGER NOT NULL DEFAULT 0,
     category TEXT NOT NULL DEFAULT '',
-    published_at TEXT NOT NULL DEFAULT '',
     popularity_score REAL NOT NULL DEFAULT 0.0,
     raw_data TEXT NOT NULL DEFAULT '{}',
+    content_fingerprint TEXT,
+    content_dna TEXT,
+    origin_sites TEXT,
+    alternative_urls TEXT,
     UNIQUE(scan_job_id, url)
 );
-
+CREATE TABLE IF NOT EXISTS site_profiles (
+    domain TEXT PRIMARY KEY,
+    container_selector TEXT,
+    title_selector TEXT,
+    success_count INTEGER DEFAULT 0,
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS tags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     scan_job_id INTEGER NOT NULL REFERENCES scan_jobs(id),
@@ -65,388 +73,467 @@ CREATE TABLE IF NOT EXISTS tags (
     resource_count INTEGER NOT NULL DEFAULT 0,
     UNIQUE(scan_job_id, name)
 );
-
 CREATE TABLE IF NOT EXISTS resource_tags (
     resource_id INTEGER NOT NULL REFERENCES resources(id),
     tag_id INTEGER NOT NULL REFERENCES tags(id),
     PRIMARY KEY (resource_id, tag_id)
 );
-
 CREATE TABLE IF NOT EXISTS http_cache (
-    url TEXT UNIQUE NOT NULL,
+    url TEXT UNIQUE,
     etag TEXT,
     last_modified TEXT,
     cache_control TEXT,
-    cached_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     response_body BLOB,
-    size_bytes INTEGER NOT NULL DEFAULT 0
+    size_bytes INTEGER
 );
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_job_id INTEGER NOT NULL REFERENCES scan_jobs(id),
+    event_type TEXT NOT NULL,
+    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    url TEXT,
+    metadata TEXT
+);
+
+-- Phase 5: Full-Text Search Virtual Table
+CREATE VIRTUAL TABLE IF NOT EXISTS resources_fts USING fts5(
+    title,
+    category,
+    content='resources',
+    content_rowid='id'
+);
+
+-- Triggers to keep FTS in sync
+CREATE TRIGGER IF NOT EXISTS trg_resources_ai AFTER INSERT ON resources BEGIN
+  INSERT INTO resources_fts(rowid, title, category) VALUES (new.id, new.title, new.category);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_resources_ad AFTER DELETE ON resources BEGIN
+  INSERT INTO resources_fts(resources_fts, rowid, title, category) VALUES('delete', old.id, old.title, old.category);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_resources_au AFTER UPDATE ON resources BEGIN
+  INSERT INTO resources_fts(resources_fts, rowid, title, category) VALUES('delete', old.id, old.title, old.category);
+  INSERT INTO resources_fts(rowid, title, category) VALUES (new.id, new.title, new.category);
+END;
 """
 
 
-def init_db(db_path: str | None = None) -> str:
-    """Initialize database and return the path used.
+def _migrate_scan_jobs(conn):
+    # Add missing columns if they are not present (idempotent)
+    cur = conn.execute("PRAGMA table_info(scan_jobs)")
+    existing = {row[1] for row in cur.fetchall()}
+    alterations = []
+    if "pages_scanned" not in existing:
+        alterations.append("pages_scanned INTEGER NOT NULL DEFAULT 0")
+    if "resources_found" not in existing:
+        alterations.append("resources_found INTEGER NOT NULL DEFAULT 0")
+    if "cache_hits" not in existing:
+        alterations.append("cache_hits INTEGER NOT NULL DEFAULT 0")
+    if "cache_misses" not in existing:
+        alterations.append("cache_misses INTEGER NOT NULL DEFAULT 0")
+    if "avg_page_time_ms" not in existing:
+        alterations.append("avg_page_time_ms INTEGER NOT NULL DEFAULT 0")
+    if "error_count" not in existing:
+        alterations.append("error_count INTEGER NOT NULL DEFAULT 0")
+    if alterations:
+        for stmt in alterations:
+            conn.execute(f"ALTER TABLE scan_jobs ADD COLUMN {stmt}")
+    return conn
 
-    Idempotent: safe to call on fresh or pre-existing DBs. Runs additive
-    column migrations for pre-v0.2 databases that predate
-    `pages.failure_reason` and `pages.cached`.
-    """
+
+def _migrate_pages(conn):
+    cur = conn.execute("PRAGMA table_info(pages)")
+    existing = {row[1] for row in cur.fetchall()}
+    if "failure_reason" not in existing:
+        conn.execute(
+            "ALTER TABLE pages ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''"
+        )
+    return conn
+
+
+def _create_indexes(conn):
+    # Performance Indexes for Phase 2/3
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_resources_scan_job ON resources (scan_job_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_resources_fingerprint ON resources (content_fingerprint)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_resources_dna ON resources (content_dna)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_scan_url ON pages (scan_job_id, url)")
+    return conn
+
+
+def init_db(db_path: str | None = None) -> str:
     path = db_path or DB_PATH
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with _INIT_LOCK:
-        with get_connection(path) as conn:
+        with sqlite3.connect(path) as conn:
+            # R27 Refined: Safety first
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            
+            # R32: Self-healing check
+            try:
+                conn.execute("PRAGMA integrity_check(10)") # Quick scan
+            except sqlite3.DatabaseError:
+                logger.error("DB Corrupted! Initiating rescue...")
+                # Try FTS5 rebuild as it's the most common failure point
+                try: conn.execute("INSERT INTO resources_fts(resources_fts) VALUES('rebuild')")
+                except: pass
+
             conn.executescript(SCHEMA)
-            _migrate_pages_add_failure_reason(conn)
-            _migrate_pages_add_cached(conn)
-            _migrate_http_cache(conn)
-            _migrate_scan_jobs_add_cache_counters(conn)
+            _migrate_scan_jobs(conn)
+            _migrate_pages(conn)
+            _create_indexes(conn)
     return path
 
 
-def _migrate_pages_add_failure_reason(conn: sqlite3.Connection) -> None:
-    """Add pages.failure_reason column if missing. Race-safe across threads/processes.
-
-    Uses `PRAGMA busy_timeout` so a concurrent caller waits for the write lock
-    instead of raising `database is locked`. Re-checks column existence under
-    the write lock so only one caller issues ALTER TABLE.
-    """
-    cols = {row["name"] for row in conn.execute("PRAGMA table_info(pages)")}
-    if "failure_reason" in cols:
-        return
-    # Give concurrent migrations up to 5s to serialize.
-    conn.execute("PRAGMA busy_timeout = 5000")
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        cols = {row["name"] for row in conn.execute("PRAGMA table_info(pages)")}
-        if "failure_reason" not in cols:
-            conn.execute("ALTER TABLE pages ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''")
-        conn.commit()
-    except sqlite3.OperationalError as exc:
-        conn.rollback()
-        if "duplicate column" not in str(exc).lower():
-            raise
-
-
-def _migrate_pages_add_cached(conn: sqlite3.Connection) -> None:
-    """Add pages.cached column if missing. Race-safe across threads/processes."""
-    cols = {row["name"] for row in conn.execute("PRAGMA table_info(pages)")}
-    if "cached" in cols:
-        return
-    conn.execute("PRAGMA busy_timeout = 5000")
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        cols = {row["name"] for row in conn.execute("PRAGMA table_info(pages)")}
-        if "cached" not in cols:
-            conn.execute("ALTER TABLE pages ADD COLUMN cached BOOLEAN DEFAULT 0")
-        conn.commit()
-    except sqlite3.OperationalError as exc:
-        conn.rollback()
-        if "duplicate column" not in str(exc).lower():
-            raise
-
-
-def _migrate_http_cache(conn: sqlite3.Connection) -> None:
-    """Ensure http_cache table exists. Race-safe across threads/processes."""
-    try:
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS http_cache ("
-            "  url TEXT UNIQUE NOT NULL, "
-            "  etag TEXT, "
-            "  last_modified TEXT, "
-            "  cache_control TEXT, "
-            "  cached_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
-            "  response_body BLOB, "
-            "  size_bytes INTEGER NOT NULL DEFAULT 0 "
-            ")"
-        )
-        conn.commit()
-    except sqlite3.OperationalError as exc:
-        conn.rollback()
-        if "already exists" not in str(exc).lower():
-            raise
-
-
-def _migrate_scan_jobs_add_cache_counters(conn: sqlite3.Connection) -> None:
-    """Add scan_jobs.cache_hits and cache_misses columns if missing. Race-safe."""
-    try:
-        conn.execute("PRAGMA busy_timeout = 5000")
-        cursor = conn.execute(
-            "PRAGMA table_info(scan_jobs)"
-        )
-        cols = {row[1] for row in cursor.fetchall()}
-        if "cache_hits" not in cols:
-            conn.execute("ALTER TABLE scan_jobs ADD COLUMN cache_hits INTEGER NOT NULL DEFAULT 0")
-        if "cache_misses" not in cols:
-            conn.execute("ALTER TABLE scan_jobs ADD COLUMN cache_misses INTEGER NOT NULL DEFAULT 0")
-        conn.commit()
-    except sqlite3.OperationalError as exc:
-        conn.rollback()
-        if "duplicate column" not in str(exc).lower():
-            raise
-
-
 @contextmanager
-def get_connection(db_path: str | None = None):
-    """Context manager for SQLite connections with WAL mode and 5s busy_timeout.
-
-    The busy_timeout tolerates brief contention during concurrent init_db calls
-    and any non-writer-thread paths. The long-lived WriterThread sets its own
-    PRAGMAs on its owned connection (see crawler.core.writer).
-    """
+def get_connection(db_path: str | None = None, write: bool = False):
     path = db_path or DB_PATH
-    conn = sqlite3.connect(path, timeout=5.0)
-    conn.execute("PRAGMA busy_timeout = 5000")
+    # R27: Longer busy_timeout for high-concurrency 8+ threads
+    # isolation_level=None disables Python's implicit transaction management
+    conn = sqlite3.connect(path, timeout=10.0, isolation_level=None)
+    
+    # R14: Configure safety levels BEFORE entering a transaction
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=10000")
     conn.row_factory = sqlite3.Row
+    
     try:
+        if write:
+            # Atomic: prevent concurrent reservation of the write lock
+            conn.execute("BEGIN IMMEDIATE")
+        else:
+            conn.execute("BEGIN DEFERRED")
+            
         yield conn
-        conn.commit()
+        conn.execute("COMMIT")
     except Exception:
-        conn.rollback()
+        try:
+            conn.execute("ROLLBACK")
+        except:
+            pass
         raise
     finally:
         conn.close()
 
 
-# --- ScanJob CRUD ---
+def get_realtime_stats(db_path: str, job_id: int) -> dict:
+    """The absolute source of truth. Uses O(1) cached metrics from scan_jobs."""
+    try:
+        with get_connection(db_path) as conn:
+            # R36: O(1) metric retrieval instead of COUNT(*) on large tables
+            job = conn.execute(
+                "SELECT status, pages_scanned, resources_found, avg_page_time_ms FROM scan_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            
+            if not job:
+                return {}
+                
+            # Count failed pages
+            failed = conn.execute(
+                "SELECT COUNT(*) FROM pages WHERE scan_job_id = ? AND status = 'failed'",
+                (job_id,),
+            ).fetchone()[0]
 
-def create_scan_job(db_path: str, entry_url: str, domain: str,
-                    max_pages: int = 200, max_depth: int = 3) -> int:
-    with get_connection(db_path) as conn:
-        cursor = conn.execute(
-            "INSERT INTO scan_jobs (entry_url, domain, max_pages, max_depth) VALUES (?, ?, ?, ?)",
-            (entry_url, domain, max_pages, max_depth),
+            return {
+                "status": job["status"],
+                "pages_done": job["pages_scanned"],
+                "failed_count": failed,
+                "resources_found": job["resources_found"],
+                "avg_page_time_ms": job["avg_page_time_ms"] if "avg_page_time_ms" in job.keys() else 0,
+            }
+    except:
+        return {}
+
+
+def save_site_profile(db_path, domain, container_sel, title_sel):
+    with get_connection(db_path, write=True) as conn:
+        conn.execute(
+            "INSERT INTO site_profiles (domain, container_selector, title_selector, success_count) VALUES (?, ?, ?, 1) ON CONFLICT(domain) DO UPDATE SET container_selector=excluded.container_selector, success_count=success_count+1",
+            (domain, container_sel, title_sel),
         )
-        return cursor.lastrowid
 
 
-def get_scan_job(db_path: str, job_id: int) -> ScanJob | None:
+def get_site_profile(db_path, domain):
     with get_connection(db_path) as conn:
-        row = conn.execute("SELECT * FROM scan_jobs WHERE id = ?", (job_id,)).fetchone()
-        if not row:
-            return None
-        return ScanJob(**dict(row))
+        row = conn.execute(
+            "SELECT * FROM site_profiles WHERE domain = ?", (domain,)
+        ).fetchone()
+        return dict(row) if row else None
 
 
-def update_scan_job(db_path: str, job_id: int,
-                    conn: sqlite3.Connection | None = None, **kwargs):
-    """Update scan_job columns. If `conn` is provided, uses it without committing
-    (caller manages transaction); otherwise opens its own connection.
-    """
-    if not kwargs:
-        return
+def create_scan_job(db_path, url, domain, max_p=200, max_d=3):
+    with get_connection(db_path, write=True) as conn:
+        return conn.execute(
+            "INSERT INTO scan_jobs (entry_url, domain, max_pages, max_depth) VALUES (?, ?, ?, ?)",
+            (url, domain, max_p, max_d),
+        ).lastrowid
+
+
+def update_scan_job(db_path, job_id, **kwargs):
     sets = ", ".join(f"{k} = ?" for k in kwargs)
     vals = list(kwargs.values()) + [job_id]
-    sql = f"UPDATE scan_jobs SET {sets} WHERE id = ?"
-    if conn is not None:
-        conn.execute(sql, vals)
-        return
-    with get_connection(db_path) as own_conn:
-        own_conn.execute(sql, vals)
+    with get_connection(db_path, write=True) as conn:
+        conn.execute(f"UPDATE scan_jobs SET {sets} WHERE id = ?", vals)
 
 
-def list_scan_jobs(db_path: str) -> list[ScanJob]:
+def list_scan_jobs(db_path):
     with get_connection(db_path) as conn:
-        rows = conn.execute("SELECT * FROM scan_jobs ORDER BY created_at DESC").fetchall()
+        rows = conn.execute(
+            "SELECT * FROM scan_jobs ORDER BY created_at DESC"
+        ).fetchall()
         return [ScanJob(**dict(r)) for r in rows]
 
 
-def delete_scan_job(db_path: str, job_id: int) -> None:
-    """Delete a scan_job and all rows that reference it.
-
-    Schema declares FKs without ON DELETE CASCADE, so we delete children
-    explicitly inside one transaction. Order matters: resource_tags →
-    tags/resources → pages → scan_jobs.
-
-    Uses ``BEGIN IMMEDIATE`` so contention with a live WriterThread either
-    resolves quickly (writer commits, our delete runs) or fails fast on a
-    clear "database is locked" rather than letting the writer's next INSERT
-    silently fail an FK constraint after we deleted the parent row.
-    """
+def get_scan_job(db_path, job_id):
     with get_connection(db_path) as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute(
-            "DELETE FROM resource_tags WHERE resource_id IN "
-            "(SELECT id FROM resources WHERE scan_job_id = ?)",
-            (job_id,),
-        )
-        conn.execute("DELETE FROM resources WHERE scan_job_id = ?", (job_id,))
-        conn.execute("DELETE FROM tags WHERE scan_job_id = ?", (job_id,))
-        conn.execute("DELETE FROM pages WHERE scan_job_id = ?", (job_id,))
-        conn.execute("DELETE FROM scan_jobs WHERE id = ?", (job_id,))
+        row = conn.execute("SELECT * FROM scan_jobs WHERE id = ?", (job_id,)).fetchone()
+        return ScanJob(**dict(row)) if row else None
 
 
-def get_scan_job_by_entry_url(db_path: str, entry_url: str) -> ScanJob | None:
-    """Return the most recently created scan_job for ``entry_url``, if any."""
+def get_scan_job_by_entry_url(db_path, url):
     with get_connection(db_path) as conn:
         row = conn.execute(
-            "SELECT * FROM scan_jobs WHERE entry_url = ? "
-            "ORDER BY created_at DESC LIMIT 1",
-            (entry_url,),
+            "SELECT * FROM scan_jobs WHERE entry_url = ? ORDER BY created_at DESC LIMIT 1",
+            (url,),
         ).fetchone()
         return ScanJob(**dict(row)) if row else None
 
 
-def get_pending_pages(db_path: str, scan_job_id: int) -> list[tuple[str, int, int]]:
-    """Return ``(url, depth, page_id)`` rows for pages still in 'pending' status.
+def save_resource_with_tags(db_path, resource, conn=None):
+    if conn is None:
+        with get_connection(db_path, write=True) as conn:
+            return save_resource_with_tags(db_path, resource, conn=conn)
 
-    Used by the resume path to seed the frontier with work the previous run
-    never finished.
-    """
-    with get_connection(db_path) as conn:
-        rows = conn.execute(
-            "SELECT id, url, depth FROM pages "
-            "WHERE scan_job_id = ? AND status = 'pending' "
-            "ORDER BY depth, id",
-            (scan_job_id,),
-        ).fetchall()
-        return [(r["url"], r["depth"], r["id"]) for r in rows]
+    try:
+        title_fp = re.sub(r"[^\w\u4e00-\u9fa5]+", "", resource.title).lower()
+        dom = urlparse(resource.url).netloc.lower()
 
-
-def get_all_page_urls(db_path: str, scan_job_id: int) -> list[str]:
-    """Return every URL the given scan_job has ever discovered, in any state."""
-    with get_connection(db_path) as conn:
-        rows = conn.execute(
-            "SELECT url FROM pages WHERE scan_job_id = ?",
-            (scan_job_id,),
-        ).fetchall()
-        return [r["url"] for r in rows]
-
-
-# --- Page CRUD ---
-
-def insert_page(db_path: str, scan_job_id: int, url: str,
-                page_type: str = "other", depth: int = 0) -> int | None:
-    with get_connection(db_path) as conn:
-        try:
-            cursor = conn.execute(
-                "INSERT OR IGNORE INTO pages (scan_job_id, url, page_type, depth) VALUES (?, ?, ?, ?)",
-                (scan_job_id, url, page_type, depth),
-            )
-            return cursor.lastrowid if cursor.rowcount > 0 else None
-        except sqlite3.IntegrityError:
-            return None
-
-
-def update_page(db_path: str, page_id: int,
-                conn: sqlite3.Connection | None = None, **kwargs):
-    """Update page columns. If `conn` is provided, uses it without committing
-    (caller manages transaction); otherwise opens its own connection.
-    """
-    if not kwargs:
-        return
-    sets = ", ".join(f"{k} = ?" for k in kwargs)
-    vals = list(kwargs.values()) + [page_id]
-    sql = f"UPDATE pages SET {sets} WHERE id = ?"
-    if conn is not None:
-        conn.execute(sql, vals)
-        return
-    with get_connection(db_path) as own_conn:
-        own_conn.execute(sql, vals)
-
-
-# --- Resource CRUD ---
-
-def insert_resource(db_path: str, resource: Resource) -> int | None:
-    with get_connection(db_path) as conn:
-        try:
-            cursor = conn.execute(
-                """INSERT OR IGNORE INTO resources
-                   (scan_job_id, page_id, title, url, cover_url, views, likes, hearts,
-                    category, published_at, raw_data)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (resource.scan_job_id, resource.page_id, resource.title,
-                 resource.url, resource.cover_url, resource.views, resource.likes,
-                 resource.hearts, resource.category, resource.published_at, resource.raw_data),
-            )
-            return cursor.lastrowid if cursor.rowcount > 0 else None
-        except sqlite3.IntegrityError:
-            return None
-
-
-# CHAR(31) is the ASCII unit separator — a control character that never
-# appears in legitimate tag text, so it's safe as a splitter without escaping.
-_TAG_JOIN_SEP = chr(31)
-
-
-def get_resources(db_path: str, scan_job_id: int) -> list[Resource]:
-    """Return all resources for a scan_job with tags populated.
-
-    Uses a single LEFT JOIN + GROUP_CONCAT query instead of the prior N+1
-    per-resource tag lookup. For a scan with N resources, this is 1 query
-    instead of N+1.
-    """
-    sql = """
-        SELECT r.*, GROUP_CONCAT(t.name, ?) AS tag_names
-        FROM resources r
-        LEFT JOIN resource_tags rt ON rt.resource_id = r.id
-        LEFT JOIN tags t ON t.id = rt.tag_id
-        WHERE r.scan_job_id = ?
-        GROUP BY r.id
-        ORDER BY r.popularity_score DESC
-    """
-    with get_connection(db_path) as conn:
-        rows = conn.execute(sql, (_TAG_JOIN_SEP, scan_job_id)).fetchall()
-        resources: list[Resource] = []
-        for r in rows:
-            row_dict = {k: r[k] for k in r.keys() if k != "tag_names"}
-            res = Resource(**row_dict)
-            tag_names = r["tag_names"]
-            res.tags = tag_names.split(_TAG_JOIN_SEP) if tag_names else []
-            resources.append(res)
-        return resources
-
-
-def update_resource_scores(db_path: str, scores: dict[int, float]):
-    """Batch update popularity scores. scores: {resource_id: score}"""
-    with get_connection(db_path) as conn:
-        for rid, score in scores.items():
-            conn.execute(
-                "UPDATE resources SET popularity_score = ? WHERE id = ?",
-                (score, rid),
-            )
-
-
-# --- Tag CRUD ---
-
-def get_or_create_tag(db_path: str, scan_job_id: int, name: str) -> int:
-    with get_connection(db_path) as conn:
-        row = conn.execute(
-            "SELECT id FROM tags WHERE scan_job_id = ? AND name = ?",
-            (scan_job_id, name),
+        # Cross-site Entanglement Check
+        clauses = ["content_fingerprint = ?"]
+        params = [resource.scan_job_id, title_fp]
+        if resource.content_dna:
+            clauses.append("content_dna = ?")
+            params.append(resource.content_dna)
+        exist = conn.execute(
+            f"SELECT id, views, cover_url FROM resources WHERE scan_job_id = ? AND ({' OR '.join(clauses)})",
+            params,
         ).fetchone()
-        if row:
-            return row["id"]
-        cursor = conn.execute(
-            "INSERT INTO tags (scan_job_id, name) VALUES (?, ?)",
-            (scan_job_id, name),
+
+        if exist:
+            res_id = exist["id"]
+            # Just update counts if exists, don't crash
+            conn.execute(
+                "UPDATE resources SET views = MAX(views, ?), likes = MAX(likes, ?), hearts = MAX(hearts, ?) WHERE id = ?",
+                (resource.views, resource.likes, resource.hearts, res_id),
+            )
+        else:
+            # R22: Robust insert with IGNORE fallback
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO resources (scan_job_id, page_id, title, url, cover_url, views, likes, hearts, category, content_fingerprint, content_dna, origin_sites, raw_data) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    resource.scan_job_id,
+                    resource.page_id,
+                    resource.title,
+                    resource.url,
+                    resource.cover_url,
+                    resource.views,
+                    resource.likes,
+                    resource.hearts,
+                    resource.category,
+                    resource.content_fingerprint,
+                    resource.content_dna,
+                    resource.origin_sites,
+                    resource.raw_data,
+                ),
+            )
+            res_id = cursor.lastrowid
+            # If IGNORE happened, lastrowid might be None, fetch it
+            if res_id is None:
+                row = conn.execute("SELECT id FROM resources WHERE scan_job_id=? AND url=?", (resource.scan_job_id, resource.url)).fetchone()
+                res_id = row["id"] if row else None
+
+        for t in resource.tags:
+            t = t.strip()
+            if not t:
+                continue
+            tag_row = conn.execute(
+                "SELECT id FROM tags WHERE scan_job_id = ? AND name = ?",
+                (resource.scan_job_id, t),
+            ).fetchone()
+            tid = (
+                tag_row["id"]
+                if tag_row
+                else conn.execute(
+                    "INSERT INTO tags (scan_job_id, name) VALUES (?,?)",
+                    (resource.scan_job_id, t),
+                ).lastrowid
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO resource_tags (resource_id, tag_id) VALUES (?,?)",
+                (res_id, tid),
+            )
+
+        return res_id
+    except Exception:
+        raise
+
+
+def insert_resource(db_path, resource):
+    """Backward-compatible alias for save_resource_with_tags."""
+    with get_connection(db_path) as conn:
+        existing = conn.execute(
+            "SELECT id FROM resources WHERE scan_job_id = ? AND url = ?",
+            (resource.scan_job_id, resource.url),
+        ).fetchone()
+        if existing:
+            return None
+    return save_resource_with_tags(db_path, resource)
+
+
+def get_resources(db_path, job_id):
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT r.*, GROUP_CONCAT(t.name, '|') as tag_names FROM resources r LEFT JOIN resource_tags rt ON rt.resource_id = r.id LEFT JOIN tags t ON t.id = rt.tag_id WHERE r.scan_job_id = ? GROUP BY r.id ORDER BY r.popularity_score DESC",
+            (job_id,),
+        ).fetchall()
+        res = []
+        for r in rows:
+            d = dict(r)
+            tags = d.pop("tag_names")
+            resource = Resource(**d)
+            resource.tags = tags.split("|") if tags else []
+            res.append(resource)
+        return res
+
+
+def get_resources_by_tag(db_path, tag_id):
+    """Return resources associated with a given tag id."""
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT r.*, GROUP_CONCAT(t.name, '|') as tag_names
+            FROM resources r
+            JOIN resource_tags rt ON rt.resource_id = r.id
+            LEFT JOIN tags t ON t.id = rt.tag_id
+            WHERE rt.tag_id = ?
+            GROUP BY r.id
+            ORDER BY r.popularity_score DESC
+            """,
+            (tag_id,),
+        ).fetchall()
+        res = []
+        for r in rows:
+            d = dict(r)
+            tags = d.pop("tag_names")
+            resource = Resource(**d)
+            resource.tags = tags.split("|") if tags else []
+            res.append(resource)
+        return res
+
+def update_resource_scores(db_path, scores: dict[int, float]):
+    """Batch-update popularity_score for resources."""
+    with get_connection(db_path) as conn:
+        conn.executemany(
+            "UPDATE resources SET popularity_score = ? WHERE id = ?",
+            ((score, rid) for rid, score in scores.items()),
         )
-        return cursor.lastrowid
 
 
-def link_resource_tag(db_path: str, resource_id: int, tag_id: int):
+def update_tag_counts(db_path, scan_job_id):
+    """Refresh resource_count on tags for a scan job."""
     with get_connection(db_path) as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO resource_tags (resource_id, tag_id) VALUES (?, ?)",
-            (resource_id, tag_id),
-        )
-
-
-def update_tag_counts(db_path: str, scan_job_id: int):
-    """Recount resource_count for all tags in a scan job."""
-    with get_connection(db_path) as conn:
-        conn.execute(
-            """UPDATE tags SET resource_count = (
-                SELECT COUNT(*) FROM resource_tags rt
-                JOIN resources r ON rt.resource_id = r.id
+            """
+            UPDATE tags
+            SET resource_count = (
+                SELECT COUNT(*)
+                FROM resource_tags rt
+                JOIN resources r ON r.id = rt.resource_id
                 WHERE rt.tag_id = tags.id AND r.scan_job_id = ?
-            ) WHERE scan_job_id = ?""",
+            )
+            WHERE scan_job_id = ?
+            """,
             (scan_job_id, scan_job_id),
         )
 
 
-def get_tags(db_path: str, scan_job_id: int) -> list[Tag]:
+def insert_page(db_path, scan_job_id, url, page_type="other", depth=0) -> int | None:
+    if isinstance(page_type, int) and depth == 0:
+        depth = page_type
+        page_type = "other"
+    with get_connection(db_path) as conn:
+        existing = conn.execute(
+            "SELECT id FROM pages WHERE scan_job_id = ? AND url = ?",
+            (scan_job_id, url),
+        ).fetchone()
+        if existing:
+            return None
+        cursor = conn.execute(
+            "INSERT INTO pages (scan_job_id, url, page_type, depth) VALUES (?, ?, ?, ?)",
+            (scan_job_id, url, page_type, depth),
+        )
+        return cursor.lastrowid
+
+
+def update_page(db_path, page_id, **kwargs):
+    sets = ", ".join(f"{k} = ?" for k in kwargs)
+    vals = list(kwargs.values()) + [page_id]
+    with get_connection(db_path) as conn:
+        conn.execute(f"UPDATE pages SET {sets} WHERE id = ?", vals)
+
+
+def list_pages(db_path, job_id):
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM pages WHERE scan_job_id = ? ORDER BY id", (job_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_pending_pages(db_path, job_id):
+    with get_connection(db_path) as conn:
+        return [
+            (r["url"], r["depth"], r["id"])
+            for r in conn.execute(
+                "SELECT id, url, depth FROM pages WHERE scan_job_id = ? AND status = 'pending'",
+                (job_id,),
+            ).fetchall()
+        ]
+
+
+def get_all_page_urls(db_path, job_id):
+    with get_connection(db_path) as conn:
+        return [
+            r["url"]
+            for r in conn.execute(
+                "SELECT url FROM pages WHERE scan_job_id = ?", (job_id,)
+            ).fetchall()
+        ]
+
+
+def _row_to_resource(row: sqlite3.Row) -> Resource:
+    """Helper to convert a database row to a Resource object."""
+    data = dict(row)
+    # Tags are handled separately by the caller usually, 
+    # but we ensure the object can be instantiated.
+    if "tags" in data and isinstance(data["tags"], str):
+        # Handle cases where tags might be stored as a string
+        data["tags"] = data["tags"].split(",") if data["tags"] else []
+    
+    # Remove keys that aren't in the Resource dataclass constructor
+    valid_fields = {f.name for f in Resource.__dataclass_fields__.values()}
+    filtered_data = {k: v for k, v in data.items() if k in valid_fields}
+    
+    return Resource(**filtered_data)
+
+
+def get_tags(db_path, scan_job_id):
+    """Return all tags for a scan job with their resource counts."""
     with get_connection(db_path) as conn:
         rows = conn.execute(
             "SELECT * FROM tags WHERE scan_job_id = ? ORDER BY resource_count DESC",
@@ -455,135 +542,136 @@ def get_tags(db_path: str, scan_job_id: int) -> list[Tag]:
         return [Tag(**dict(r)) for r in rows]
 
 
-def get_resources_by_tag(db_path: str, tag_id: int, limit: int = 10) -> list[Resource]:
+def get_cache_metrics(conn):
+    row = conn.execute("SELECT COUNT(*), SUM(size_bytes) FROM http_cache").fetchone()
+    return {"entry_count": row[0], "total_bytes": row[1] or 0}
+
+
+def clear_http_cache(conn):
+    conn.execute("DELETE FROM http_cache")
+
+
+def perform_housekeeping(db_path: str):
+    """Automated maintenance task for database and assets."""
     with get_connection(db_path) as conn:
-        rows = conn.execute(
-            """SELECT r.* FROM resources r
-               JOIN resource_tags rt ON r.id = rt.resource_id
-               WHERE rt.tag_id = ?
-               ORDER BY r.popularity_score DESC LIMIT ?""",
-            (tag_id, limit),
-        ).fetchall()
-        return [Resource(**dict(r)) for r in rows]
+        # 1. Cleanup old HTTP cache (> 7 days)
+        cleanup_expired_http_cache(conn, days=7)
+        # 2. Re-index for speed
+        conn.execute("VACUUM")
+    logger.info("Housekeeping completed.")
 
 
-def save_resource_with_tags(db_path: str, resource: Resource, conn: sqlite3.Connection | None = None) -> int | None:
-    """Insert resource and link its tags. Returns resource_id or None if duplicate.
-
-    If conn is provided, reuses it (batch mode); otherwise opens its own connection.
-    Batch mode is more efficient when called in a loop.
-    """
-    close_conn = False
-    if conn is None:
-        conn = sqlite3.connect(db_path)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.row_factory = sqlite3.Row
-        close_conn = True
-
-    try:
-        # Insert resource
-        cursor = conn.execute(
-            """INSERT OR IGNORE INTO resources
-               (scan_job_id, page_id, title, url, cover_url, views, likes, hearts,
-                category, published_at, raw_data)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (resource.scan_job_id, resource.page_id, resource.title,
-             resource.url, resource.cover_url, resource.views, resource.likes,
-             resource.hearts, resource.category, resource.published_at, resource.raw_data),
-        )
-        resource_id = cursor.lastrowid if cursor.rowcount > 0 else None
-
-        if resource_id is None:
-            return None
-
-        # Collect (resource_id, tag_id) pairs via single-tag get-or-create,
-        # then batch the resource_tags inserts via executemany.
-        tag_link_pairs: list[tuple[int, int]] = []
-        for tag_name in resource.tags:
-            tag_name = tag_name.strip()
-            if not tag_name:
-                continue
-            row = conn.execute(
-                "SELECT id FROM tags WHERE scan_job_id = ? AND name = ?",
-                (resource.scan_job_id, tag_name),
-            ).fetchone()
-            if row:
-                tag_id = row["id"]
-            else:
-                cursor = conn.execute(
-                    "INSERT INTO tags (scan_job_id, name) VALUES (?, ?)",
-                    (resource.scan_job_id, tag_name),
-                )
-                tag_id = cursor.lastrowid
-            tag_link_pairs.append((resource_id, tag_id))
-
-        # Batch all resource-tag links in a single executemany.
-        if tag_link_pairs:
-            conn.executemany(
-                "INSERT OR IGNORE INTO resource_tags (resource_id, tag_id) VALUES (?, ?)",
-                tag_link_pairs,
-            )
-
-        if close_conn:
-            conn.commit()
-        return resource_id
-
-    finally:
-        if close_conn:
-            conn.close()
+def cleanup_expired_http_cache(conn, days=7):
+    return conn.execute(
+        "DELETE FROM http_cache WHERE cached_at < datetime('now', '-' || ? || ' days')",
+        (str(days),),
+    ).rowcount
 
 
-# --- HTTP Cache CRUD ---
-
-def get_cached_response(conn: sqlite3.Connection, url: str) -> dict | None:
-    """Fetch cached response metadata + body for URL. Returns dict or None if not cached."""
-    row = conn.execute(
-        "SELECT etag, last_modified, cache_control, cached_at, response_body, size_bytes "
-        "FROM http_cache WHERE url = ?",
-        (url,),
-    ).fetchone()
-    if row is None:
+def get_cached_response(conn, url):
+    row = conn.execute("SELECT * FROM http_cache WHERE url = ?", (url,)).fetchone()
+    if not row:
         return None
+    body = row["response_body"]
+    if body:
+        try:
+            body = zlib.decompress(body)
+        except:
+            pass
     return {
         "etag": row["etag"],
         "last_modified": row["last_modified"],
         "cache_control": row["cache_control"],
-        "cached_at": row["cached_at"],
-        "response_body": row["response_body"],
+        "response_body": body,
         "size_bytes": row["size_bytes"],
     }
 
 
-def save_cached_response(conn: sqlite3.Connection, url: str, etag: str | None,
-                        last_modified: str | None, cache_control: str | None,
-                        response_body: bytes) -> None:
-    """Store or update cached response (UPSERT)."""
+def save_cached_response(conn, url, etag, last_modified, cache_control, body):
+    comp = zlib.compress(body)
     conn.execute(
-        """INSERT INTO http_cache (url, etag, last_modified, cache_control, response_body, size_bytes, cached_at)
-           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-           ON CONFLICT(url) DO UPDATE SET
-               etag = excluded.etag,
-               last_modified = excluded.last_modified,
-               cache_control = excluded.cache_control,
-               response_body = excluded.response_body,
-               size_bytes = excluded.size_bytes,
-               cached_at = CURRENT_TIMESTAMP""",
-        (url, etag, last_modified, cache_control, response_body, len(response_body)),
+        "INSERT INTO http_cache (url, etag, last_modified, cache_control, response_body, size_bytes) VALUES (?,?,?,?,?,?) ON CONFLICT(url) DO UPDATE SET etag=excluded.etag, last_modified=excluded.last_modified, cache_control=excluded.cache_control, response_body=excluded.response_body, size_bytes=excluded.size_bytes",
+        (url, etag, last_modified, cache_control, comp, len(body)),
     )
 
 
-def clear_http_cache(conn: sqlite3.Connection) -> None:
-    """Delete all cached responses."""
-    conn.execute("DELETE FROM http_cache")
+def delete_scan_job(db_path, job_id):
+    """Delete a scan job and all related data, including assets and FTS indexes."""
+    import shutil
+    
+    with get_connection(db_path, write=True) as conn:
+        # 1. Clear FTS index for this job
+        conn.execute(
+            "DELETE FROM resources_fts WHERE rowid IN (SELECT id FROM resources WHERE scan_job_id = ?)",
+            (job_id,)
+        )
+        
+        # 2. Traditional cleanup
+        resource_ids = [
+            row["id"]
+            for row in conn.execute(
+                "SELECT id FROM resources WHERE scan_job_id = ?",
+                (job_id,),
+            ).fetchall()
+        ]
+        if resource_ids:
+            placeholders = ",".join("?" for _ in resource_ids)
+            conn.execute(
+                f"DELETE FROM resource_tags WHERE resource_id IN ({placeholders})",
+                resource_ids,
+            )
+        conn.execute("DELETE FROM tags WHERE scan_job_id = ?", (job_id,))
+        conn.execute("DELETE FROM resources WHERE scan_job_id = ?", (job_id,))
+        conn.execute("DELETE FROM pages WHERE scan_job_id = ?", (job_id,))
+        conn.execute("DELETE FROM events WHERE scan_job_id = ?", (job_id,))
+        conn.execute("DELETE FROM scan_jobs WHERE id = ?", (job_id,))
+        
+    # 3. Physical Asset Removal
+    asset_dir = f"data/assets/{job_id}"
+    if os.path.exists(asset_dir):
+        try:
+            shutil.rmtree(asset_dir)
+        except Exception as e:
+            logger.error(f"Failed to delete asset directory {asset_dir}: {e}")
 
 
-def get_cache_metrics(conn: sqlite3.Connection) -> dict:
-    """Return cache statistics: total size, hit count, per-domain breakdown."""
-    cache_size = conn.execute("SELECT SUM(size_bytes) as total FROM http_cache").fetchone()
-    total_bytes = cache_size["total"] or 0
-    entry_count = conn.execute("SELECT COUNT(*) as count FROM http_cache").fetchone()["count"]
-    return {
-        "total_bytes": total_bytes,
-        "entry_count": entry_count,
-    }
+def search_resources(db_path: str, query: str, limit: int = 50) -> list[dict]:
+    """Search resources using FTS5 and return enriched results with snippets."""
+    if not query:
+        return []
+
+    # R30: Sanitize query to prevent FTS5 syntax errors (like 'no such column: https')
+    # Wrap in double quotes and handle existing quotes
+    clean_query = query.replace('"', '""')
+    # Add prefix wildcard if needed
+    match_expr = f'"{clean_query}"'
+    if not clean_query.endswith("*"):
+        match_expr = f'"{clean_query}"*'
+
+    with get_connection(db_path) as conn:
+        # R24: Snippets for semantic search context
+        rows = conn.execute(
+            "SELECT r.*, snippet(resources_fts, 0, '<b>', '</b>', '...', 15) as snippet "
+            "FROM resources r "
+            "JOIN resources_fts f ON r.id = f.rowid "
+            "WHERE resources_fts MATCH ? "
+            "ORDER BY rank LIMIT ?",
+            (match_expr, limit),
+        ).fetchall()
+        
+        results = []
+        for r in rows:
+            res = _row_to_resource(r)
+            # Re-fetch tags
+            tag_rows = conn.execute(
+                "SELECT name FROM tags t JOIN resource_tags rt ON t.id = rt.tag_id WHERE rt.resource_id = ?",
+                (res.id,),
+            ).fetchall()
+            res.tags = [tr["name"] for tr in tag_rows]
+            
+            # Enrich with snippet info
+            data = res.__dict__
+            data["search_snippet"] = r["snippet"]
+            results.append(data)
+            
+        return results

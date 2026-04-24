@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Canonical URL normalization for deterministic dedup across runs."""
 
 import ipaddress
@@ -7,9 +9,14 @@ from urllib.parse import urlparse, urlunparse
 # Hostnames we treat as private even before doing DNS / IP lookup. Saves
 # the resolver round-trip on the obvious cases. ``localhost.localdomain``
 # matches some legacy /etc/hosts entries.
-_PRIVATE_HOSTNAMES = frozenset({
-    "localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback",
-})
+_PRIVATE_HOSTNAMES = frozenset(
+    {
+        "localhost",
+        "localhost.localdomain",
+        "ip6-localhost",
+        "ip6-loopback",
+    }
+)
 
 
 def is_private_host(hostname: str | None) -> bool:
@@ -53,13 +60,17 @@ def is_private_host(hostname: str | None) -> bool:
 
 def _ip_is_private(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return (
-        ip.is_private or ip.is_loopback or ip.is_link_local
-        or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
     )
 
 
 def normalize(url: str) -> str:
-    """Normalize URL for deduplication.
+    """Normalize URL for deduplication. Thread-safe (pure function, no shared state).
 
     Rules:
     - Lowercase scheme and netloc

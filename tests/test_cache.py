@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 """Tests for CacheService abstraction."""
 
 import os
 import tempfile
-import pytest
 
+import pytest
 from crawler.cache import CacheService
 from crawler.storage import init_db
 
@@ -36,8 +38,9 @@ class TestCacheService:
         """save_cache and get_cache round-trip."""
         url = "https://example.com/page1"
         body = b"<html>test</html>"
-        cache_service.save_cache(url, "abc123", "Wed, 21 Oct 2025 07:28:00 GMT",
-                                "max-age=3600", body)
+        cache_service.save_cache(
+            url, "abc123", "Wed, 21 Oct 2025 07:28:00 GMT", "max-age=3600", body
+        )
 
         result = cache_service.get_cache(url)
         assert result is not None

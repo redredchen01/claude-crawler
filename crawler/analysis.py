@@ -1,11 +1,13 @@
+from __future__ import annotations
+
 """Popularity scoring and tag analysis."""
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime
 
-from crawler import config
+from crawler import config, storage
 from crawler.models import Resource, Tag
-from crawler import storage
+from crawler.classifier import predict_category
 
 
 def compute_scores(db_path: str, scan_job_id: int):
@@ -37,9 +39,24 @@ def compute_scores(db_path: str, scan_job_id: int):
         scores[r.id] = round(score, 2)
 
     storage.update_resource_scores(db_path, scores)
+
+    # Phase 4: Automated Classification for resources without category
+    updated_resources = storage.get_resources(db_path, scan_job_id)
+    class_updates = []
+    for r in updated_resources:
+        if not r.category or r.category.lower() in ("other", "unknown", ""):
+            predicted = predict_category(r.title, r.tags)
+            if predicted != "Other":
+                class_updates.append((predicted, r.id))
+
+    if class_updates:
+        with storage.get_connection(db_path) as conn:
+            conn.executemany("UPDATE resources SET category = ? WHERE id = ?", class_updates)
+
     storage.update_tag_counts(db_path, scan_job_id)
     storage.update_scan_job(
-        db_path, scan_job_id,
+        db_path,
+        scan_job_id,
         resources_found=len(resources),
     )
 
@@ -100,3 +117,141 @@ def get_tag_overview(db_path: str, scan_job_id: int) -> dict:
         "total_resources": total_resources,
         "avg_tags_per_resource": round(avg_tags, 1),
     }
+
+
+def get_tag_cooccurrence(db_path: str, scan_job_id: int, top_n: int = 20) -> list[dict]:
+    """Calculate tag co-occurrence matrix to find related topics."""
+    resources = storage.get_resources(db_path, scan_job_id)
+    if not resources:
+        return []
+
+    from collections import Counter
+    from itertools import combinations
+    
+    pairs = Counter()
+    for res in resources:
+        if len(res.tags) >= 2:
+            # Sort tags to ensure (A, B) is same as (B, A)
+            for pair in combinations(sorted(res.tags), 2):
+                pairs[pair] += 1
+                
+    return [
+        {"pair": list(pair), "count": count}
+        for pair, count in pairs.most_common(top_n)
+    ]
+
+
+def hamming_distance(h1_hex: str, h2_hex: str) -> int:
+    """Compute Hamming distance between two hex fingerprints."""
+    try:
+        n1 = int(h1_hex, 16)
+        n2 = int(h2_hex, 16)
+        x = n1 ^ n2
+        dist = 0
+        while x:
+            dist += 1
+            x &= x - 1
+        return dist
+    except (ValueError, TypeError):
+        return 64
+
+
+def cluster_resources(db_path: str, scan_job_id: int, threshold: int = 15) -> list[list[Resource]]:
+    """Group resources in a scan job by content similarity (SimHash distance).
+    
+    Returns a list of clusters, where each cluster is a list of Resources.
+    """
+    resources = storage.get_resources(db_path, scan_job_id)
+    if not resources:
+        return []
+
+    clusters: list[list[Resource]] = []
+    
+    for res in resources:
+        if not res.content_fingerprint or res.content_fingerprint == "0" * 16:
+            # Skip resources without valid fingerprint
+            clusters.append([res])
+            continue
+            
+        found_cluster = False
+        for cluster in clusters:
+            # Compare with the first member of each cluster
+            rep = cluster[0]
+            if not rep.content_fingerprint:
+                continue
+                
+            dist = hamming_distance(res.content_fingerprint, rep.content_fingerprint)
+            if dist <= threshold:
+                cluster.append(res)
+                found_cluster = True
+                break
+        
+        if not found_cluster:
+            clusters.append([res])
+            
+    return clusters
+
+
+def get_cluster_report(db_path: str, scan_job_id: int, threshold: int = 15) -> list[dict]:
+    """Generate a high-level similarity report for the UI.
+    
+    Identifies groups of resources with highly similar content fingerprints.
+    """
+    clusters = cluster_resources(db_path, scan_job_id, threshold)
+    report = []
+    
+    for cluster in clusters:
+        if len(cluster) <= 1:
+            continue
+            
+        # Group traits
+        titles = [r.title for r in cluster]
+        urls = [r.url for r in cluster]
+        common_tags = set(cluster[0].tags)
+        for r in cluster[1:]:
+            common_tags &= set(r.tags)
+            
+        report.append({
+            "size": len(cluster),
+            "representative_title": cluster[0].title,
+            "similar_titles": titles[1:],
+            "urls": urls,
+            "common_tags": list(common_tags),
+            "avg_popularity": round(sum(r.popularity_score for r in cluster) / len(cluster), 1)
+        })
+        
+    # Sort by cluster size
+    report.sort(key=lambda x: x["size"], reverse=True)
+    return report
+
+
+def get_similar_items(db_path: str, resource_id: int, limit: int = 5) -> list[Resource]:
+    """Find resources with similar content fingerprints to the given resource."""
+    with storage.get_connection(db_path) as conn:
+        target = conn.execute(
+            "SELECT content_fingerprint, scan_job_id FROM resources WHERE id = ?",
+            (resource_id,),
+        ).fetchone()
+        
+        if not target or not target["content_fingerprint"]:
+            return []
+            
+        # Get all other resources in the same job (or across jobs if preferred)
+        # For performance, we limit to the same scan_job or recent scans
+        others = storage.get_resources(db_path, target["scan_job_id"])
+        
+    recommendations = []
+    for res in others:
+        if res.id == resource_id:
+            continue
+        if not res.content_fingerprint:
+            continue
+            
+        dist = hamming_distance(target["content_fingerprint"], res.content_fingerprint)
+        # Standard SimHash similarity threshold (dist <= 15)
+        if dist <= 15:
+            recommendations.append((dist, res))
+            
+    # Sort by distance (closest first)
+    recommendations.sort(key=lambda x: x[0])
+    return [r[1] for r in recommendations[:limit]]

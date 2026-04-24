@@ -1,9 +1,12 @@
+
 """Tests for crawler.raw_data — v1 JSON schema for Resource.raw_data."""
+
+from __future__ import annotations
+
 
 import json
 
 import pytest
-
 from crawler.raw_data import (
     PROVENANCE_DOM,
     PROVENANCE_FIELDS,
@@ -31,19 +34,26 @@ class TestProvenanceConstants:
         assert PROVENANCE_MISSING == "missing"
 
     def test_valid_sources_set(self):
-        assert VALID_PROVENANCE_SOURCES == frozenset({
-            "jsonld", "opengraph", "twitter", "microdata", "dom", "missing"
-        })
+        assert VALID_PROVENANCE_SOURCES == frozenset(
+            {"jsonld", "opengraph", "twitter", "microdata", "dom", "missing"}
+        )
 
     def test_provenance_fields_whitelist(self):
         # 8 Resource fields that get tracked. `description` is NOT in
         # here — it's a sibling of the provenance map in raw_data, not
         # a tracked provenance entry.
-        assert PROVENANCE_FIELDS == frozenset({
-            "title", "cover_url",
-            "views", "likes", "hearts",
-            "tags", "category", "published_at",
-        })
+        assert PROVENANCE_FIELDS == frozenset(
+            {
+                "title",
+                "cover_url",
+                "views",
+                "likes",
+                "hearts",
+                "tags",
+                "category",
+                "published_at",
+            }
+        )
 
 
 class TestBuildRawDataHappyPath:
@@ -121,11 +131,13 @@ class TestParseRawDataTolerance:
 
     def test_unknown_future_keys_ignored(self):
         # Forward-compat: unknown top-level keys silently dropped
-        raw = json.dumps({
-            "provenance": {"title": "jsonld"},
-            "description": "x",
-            "some_future_field": {"nested": "value"},
-        })
+        raw = json.dumps(
+            {
+                "provenance": {"title": "jsonld"},
+                "description": "x",
+                "some_future_field": {"nested": "value"},
+            }
+        )
         parsed = parse_raw_data(raw)
         assert parsed == {
             "provenance": {"title": "jsonld"},

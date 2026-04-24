@@ -1,10 +1,17 @@
+
 """Tests for fetch_page_with_cache and conditional request logic."""
 
-import pytest
-from unittest.mock import Mock, patch, MagicMock
+from __future__ import annotations
+
+
+from unittest.mock import Mock, patch
+
 from crawler.cache import CacheService
-from crawler.core.fetcher import fetch_page_with_cache, _attempt_fetch, _follow_redirects_safely
-import requests
+from crawler.core.fetcher import (
+    _attempt_fetch,
+    _follow_redirects_safely,
+    fetch_page_with_cache,
+)
 
 
 class TestConditionalRequests:
@@ -12,7 +19,7 @@ class TestConditionalRequests:
 
     def test_etag_header_sent_on_first_request(self):
         """If-None-Match header is sent when etag is provided."""
-        with patch('crawler.core.fetcher._SESSION.get') as mock_get:
+        with patch("crawler.core.fetcher._SESSION.get") as mock_get:
             resp = Mock()
             resp.is_redirect = False
             mock_get.return_value = resp
@@ -26,28 +33,35 @@ class TestConditionalRequests:
 
     def test_last_modified_header_sent_on_first_request(self):
         """If-Modified-Since header is sent when last_modified is provided."""
-        with patch('crawler.core.fetcher._SESSION.get') as mock_get:
+        with patch("crawler.core.fetcher._SESSION.get") as mock_get:
             resp = Mock()
             resp.is_redirect = False
             mock_get.return_value = resp
 
-            _follow_redirects_safely("https://example.com",
-                                    cached_last_modified="Wed, 21 Oct 2025 07:28:00 GMT")
+            _follow_redirects_safely(
+                "https://example.com",
+                cached_last_modified="Wed, 21 Oct 2025 07:28:00 GMT",
+            )
 
             call_args = mock_get.call_args
             assert "headers" in call_args.kwargs
-            assert call_args.kwargs["headers"]["If-Modified-Since"] == "Wed, 21 Oct 2025 07:28:00 GMT"
+            assert (
+                call_args.kwargs["headers"]["If-Modified-Since"]
+                == "Wed, 21 Oct 2025 07:28:00 GMT"
+            )
 
     def test_both_conditional_headers_sent(self):
         """Both If-None-Match and If-Modified-Since are sent together."""
-        with patch('crawler.core.fetcher._SESSION.get') as mock_get:
+        with patch("crawler.core.fetcher._SESSION.get") as mock_get:
             resp = Mock()
             resp.is_redirect = False
             mock_get.return_value = resp
 
-            _follow_redirects_safely("https://example.com",
-                                    cached_etag="abc123",
-                                    cached_last_modified="Wed, 21 Oct 2025 07:28:00 GMT")
+            _follow_redirects_safely(
+                "https://example.com",
+                cached_etag="abc123",
+                cached_last_modified="Wed, 21 Oct 2025 07:28:00 GMT",
+            )
 
             call_args = mock_get.call_args
             headers = call_args.kwargs["headers"]
@@ -56,7 +70,7 @@ class TestConditionalRequests:
 
     def test_conditional_headers_only_on_first_request(self):
         """Conditional headers are NOT sent on redirect hops."""
-        with patch('crawler.core.fetcher._SESSION.get') as mock_get:
+        with patch("crawler.core.fetcher._SESSION.get") as mock_get:
             # First request: redirect response
             resp1 = Mock()
             resp1.is_redirect = True
@@ -70,8 +84,7 @@ class TestConditionalRequests:
 
             mock_get.side_effect = [resp1, resp2]
 
-            _follow_redirects_safely("https://example.com",
-                                    cached_etag="abc123")
+            _follow_redirects_safely("https://example.com", cached_etag="abc123")
 
             # Check both calls
             calls = mock_get.call_args_list
@@ -89,7 +102,7 @@ class TestAttemptFetchWithCache:
 
     def test_304_with_valid_cached_body(self):
         """304 response with valid cached body returns cached content and is_cached=True."""
-        with patch('crawler.core.fetcher._follow_redirects_safely') as mock_fetch:
+        with patch("crawler.core.fetcher._follow_redirects_safely") as mock_fetch:
             resp = Mock()
             resp.status_code = 304
             resp.headers = {
@@ -116,7 +129,7 @@ class TestAttemptFetchWithCache:
 
     def test_304_with_empty_cached_body(self):
         """304 response with empty cached body returns None."""
-        with patch('crawler.core.fetcher._follow_redirects_safely') as mock_fetch:
+        with patch("crawler.core.fetcher._follow_redirects_safely") as mock_fetch:
             resp = Mock()
             resp.status_code = 304
             resp.headers = {}
@@ -135,8 +148,8 @@ class TestAttemptFetchWithCache:
 
     def test_200_response_extracts_headers(self):
         """200 response extracts ETag and Last-Modified headers."""
-        with patch('crawler.core.fetcher._follow_redirects_safely') as mock_fetch:
-            with patch('crawler.core.fetcher._read_capped_body') as mock_body:
+        with patch("crawler.core.fetcher._follow_redirects_safely") as mock_fetch:
+            with patch("crawler.core.fetcher._read_capped_body") as mock_body:
                 resp = Mock()
                 resp.status_code = 200
                 resp.headers = {
@@ -163,8 +176,8 @@ class TestAttemptFetchWithCache:
 
     def test_200_response_without_cache_headers(self):
         """200 response without ETag/Last-Modified returns None for those fields."""
-        with patch('crawler.core.fetcher._follow_redirects_safely') as mock_fetch:
-            with patch('crawler.core.fetcher._read_capped_body') as mock_body:
+        with patch("crawler.core.fetcher._follow_redirects_safely") as mock_fetch:
+            with patch("crawler.core.fetcher._read_capped_body") as mock_body:
                 resp = Mock()
                 resp.status_code = 200
                 resp.headers = {"Content-Type": "text/html"}  # No ETag/Last-Modified
@@ -192,12 +205,18 @@ class TestFetchPageWithCache:
         """On cache miss (200 response), new content is saved to cache."""
         db_path = tmp_path / "test.db"
         from crawler.storage import init_db
+
         init_db(str(db_path))
         cache_service = CacheService(str(db_path))
 
-        with patch('crawler.core.fetcher._attempt_fetch') as mock_attempt:
+        with patch("crawler.core.fetcher._attempt_fetch") as mock_attempt:
             html_content = "<html>test page</html>"
-            mock_attempt.return_value = (html_content, False, "etag123", "Wed, 21 Oct 2025 07:28:00 GMT")
+            mock_attempt.return_value = (
+                html_content,
+                False,
+                "etag123",
+                "Wed, 21 Oct 2025 07:28:00 GMT",
+            )
 
             result = fetch_page_with_cache("https://example.com/page", cache_service)
 
@@ -214,18 +233,27 @@ class TestFetchPageWithCache:
         """On cache hit, conditional headers from cache are passed to _attempt_fetch."""
         db_path = tmp_path / "test.db"
         from crawler.storage import init_db
+
         init_db(str(db_path))
         cache_service = CacheService(str(db_path))
 
         # Pre-populate cache
-        cache_service.save_cache("https://example.com/page", "etag123",
-                                "Wed, 21 Oct 2025 07:28:00 GMT", None,
-                                b"<html>cached</html>")
+        cache_service.save_cache(
+            "https://example.com/page",
+            "etag123",
+            "Wed, 21 Oct 2025 07:28:00 GMT",
+            None,
+            b"<html>cached</html>",
+        )
 
-        with patch('crawler.core.fetcher._attempt_fetch') as mock_attempt:
+        with patch("crawler.core.fetcher._attempt_fetch") as mock_attempt:
             # Simulate 304 response (cache still valid)
-            mock_attempt.return_value = ("<html>cached</html>", True, "etag123",
-                                        "Wed, 21 Oct 2025 07:28:00 GMT")
+            mock_attempt.return_value = (
+                "<html>cached</html>",
+                True,
+                "etag123",
+                "Wed, 21 Oct 2025 07:28:00 GMT",
+            )
 
             result = fetch_page_with_cache("https://example.com/page", cache_service)
 
@@ -243,10 +271,11 @@ class TestFetchPageWithCache:
         """On fetch failure, function returns None."""
         db_path = tmp_path / "test.db"
         from crawler.storage import init_db
+
         init_db(str(db_path))
         cache_service = CacheService(str(db_path))
 
-        with patch('crawler.core.fetcher._attempt_fetch') as mock_attempt:
+        with patch("crawler.core.fetcher._attempt_fetch") as mock_attempt:
             mock_attempt.side_effect = Exception("Network error")
 
             result = fetch_page_with_cache("https://example.com/page", cache_service)
@@ -257,10 +286,11 @@ class TestFetchPageWithCache:
         """When response has no ETag/Last-Modified, nothing is saved to cache."""
         db_path = tmp_path / "test.db"
         from crawler.storage import init_db
+
         init_db(str(db_path))
         cache_service = CacheService(str(db_path))
 
-        with patch('crawler.core.fetcher._attempt_fetch') as mock_attempt:
+        with patch("crawler.core.fetcher._attempt_fetch") as mock_attempt:
             html_content = "<html>test</html>"
             # Response has no cache headers
             mock_attempt.return_value = (html_content, False, None, None)
@@ -277,10 +307,11 @@ class TestFetchPageWithCache:
         """First request to uncached URL passes None values for cache parameters."""
         db_path = tmp_path / "test.db"
         from crawler.storage import init_db
+
         init_db(str(db_path))
         cache_service = CacheService(str(db_path))
 
-        with patch('crawler.core.fetcher._attempt_fetch') as mock_attempt:
+        with patch("crawler.core.fetcher._attempt_fetch") as mock_attempt:
             mock_attempt.return_value = ("<html>new</html>", False, "etag1", "date1")
 
             fetch_page_with_cache("https://example.com/page", cache_service)

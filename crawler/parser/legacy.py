@@ -1,12 +1,15 @@
+from __future__ import annotations
+
 """HTML page parser — extracts resources, links, and page metadata."""
 
 import json
 import re
+import hashlib
+from functools import lru_cache
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 from bs4.element import Tag as BsTag
-
 from crawler.models import ParseResult, Resource
 
 # Tag-cloud detection threshold for the no-container fallback path. Real
@@ -36,7 +39,8 @@ _TAG_CLASS_RE = re.compile(r"\b(tag|tags|label|keyword|topic)\b", re.I)
 # Class-name tokens that indicate a category/theme/channel link
 _CATEGORY_CLASS_RE = re.compile(r"\b(cat|category|channel|section|theme)\b", re.I)
 
-_TAG_SCORE_THRESHOLD = 3
+# R20: More inclusive threshold for wider site coverage
+_TAG_SCORE_THRESHOLD = 2
 _TAG_TEXT_MIN = 1
 _TAG_TEXT_MAX = 20
 
@@ -55,9 +59,12 @@ _METRIC_NUM_RE = re.compile(
 
 # Multiplier suffix → integer multiplier. Unknown suffix = 1.
 _METRIC_MULTIPLIERS = {
-    "k": 1_000, "K": 1_000,
-    "m": 1_000_000, "M": 1_000_000,
-    "b": 1_000_000_000, "B": 1_000_000_000,
+    "k": 1_000,
+    "K": 1_000,
+    "m": 1_000_000,
+    "M": 1_000_000,
+    "b": 1_000_000_000,
+    "B": 1_000_000_000,
     "千": 1_000,
     "万": 10_000,
     "亿": 100_000_000,
@@ -68,8 +75,16 @@ _METRIC_MULTIPLIERS = {
 # metric — protects against `<footer>views: 0 © 2010</footer>` returning
 # 2010, and against scraping "founded in 2008" near a "view source" link.
 _METRIC_YEAR_CONTEXT_RE = re.compile(
-    r"©|copyright|since|founded|版权|创建于|建立于|成立于", re.I,
+    r"©|copyright|since|founded|版权|创建于|建立于|成立于",
+    re.I,
 )
+
+
+@lru_cache(maxsize=128)
+def _compile_keyword_re(keyword: str) -> re.Pattern:
+    """Compile and cache regex for keyword matching."""
+    return re.compile(re.escape(keyword), re.I)
+
 
 # --- Cover image picker ---------------------------------------------------
 #
@@ -156,8 +171,7 @@ def _score_tag_candidate(a: BsTag) -> tuple[int, bool]:
     # link next to tags (the example site puts class="cat" inside
     # <h3 class="tags">).
     is_category = bool(
-        _CATEGORY_PATH_RE.search(href)
-        or _CATEGORY_CLASS_RE.search(own_classes)
+        _CATEGORY_PATH_RE.search(href) or _CATEGORY_CLASS_RE.search(own_classes)
     )
     if is_category:
         return (0, True)
@@ -222,11 +236,63 @@ def _extract_tags_and_category(scope: BsTag) -> tuple[list[str], str]:
 # Helper functions
 # ---------------------------------------------------------------------------
 
+
 def _clean_text(text: str) -> str:
     """Strip whitespace and normalize."""
     if not text:
         return ""
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _calculate_simhash(text: str) -> str:
+    """64-bit SimHash for content similarity detection."""
+    if not text:
+        return "0" * 16
+
+    tokens = text.lower().split()
+    if not tokens:
+        return "0" * 16
+        
+    from collections import Counter
+    
+    # Combine single tokens and 2-grams
+    features = tokens[:]
+    if len(tokens) >= 2:
+        features.extend([" ".join(tokens[i : i + 2]) for i in range(len(tokens) - 1)])
+
+    # Count frequencies for weighting
+    counts = Counter(features)
+
+    v = [0] * 64
+    for f, weight in counts.items():
+        h_bytes = hashlib.sha256(f.encode("utf-8")).digest()
+        h = int.from_bytes(h_bytes[:8], "big")
+        for i in range(64):
+            bit = (h >> i) & 1
+            v[i] += weight if bit else -weight
+
+    fingerprint = 0
+    for i in range(64):
+        if v[i] > 0:
+            fingerprint |= 1 << i
+
+    return f"{fingerprint:016x}"
+
+
+def _generate_content_dna(soup: BeautifulSoup, container: BsTag | None) -> str:
+    """Generate a structural 'DNA' string based on DOM metrics (tags count, link density, img count).
+    Format: T<tags>_L<links>_I<img>_S<size_bucket>
+    """
+    scope = container or soup
+    tag_count = len(scope.find_all(True))
+    link_count = len(scope.find_all("a"))
+    img_count = len(scope.find_all("img"))
+    text_len = len(scope.get_text(strip=True))
+
+    # Bucketize size for stability
+    size_bucket = text_len // 500
+
+    return f"T{tag_count}_L{link_count}_I{img_count}_S{size_bucket}"
 
 
 # Hrefs that are not real resource URLs — used to filter image-link
@@ -344,9 +410,7 @@ def _strip_title_site_suffix(raw: str, *, require_chain: bool) -> str:
         if len(parts) < 3:
             return _clean_text(raw)
         return _clean_text(parts[0])
-    return _clean_text(
-        _TITLE_FALLBACK_SEP_RE.split(raw, maxsplit=1)[0]
-    )
+    return _clean_text(_TITLE_FALLBACK_SEP_RE.split(raw, maxsplit=1)[0])
 
 
 def _parse_jsonld_blocks(soup: BeautifulSoup) -> list:
@@ -373,7 +437,11 @@ def _parse_jsonld_blocks(soup: BeautifulSoup) -> list:
             blocks.append(data)
     flattened: list = []
     for item in blocks:
-        if isinstance(item, dict) and "@graph" in item and isinstance(item["@graph"], list):
+        if (
+            isinstance(item, dict)
+            and "@graph" in item
+            and isinstance(item["@graph"], list)
+        ):
             flattened.extend(item["@graph"])
         else:
             flattened.append(item)
@@ -383,11 +451,20 @@ def _parse_jsonld_blocks(soup: BeautifulSoup) -> list:
 # Structured-data types that indicate a detail page (single primary entity).
 # These are the schema.org @type values that SEO-optimized content sites
 # emit on item pages.
-_JSONLD_DETAIL_TYPES = frozenset({
-    "VideoObject", "Movie", "TVEpisode", "MusicRecording",
-    "Article", "NewsArticle", "BlogPosting", "Product", "Recipe",
-    "CreativeWork",
-})
+_JSONLD_DETAIL_TYPES = frozenset(
+    {
+        "VideoObject",
+        "Movie",
+        "TVEpisode",
+        "MusicRecording",
+        "Article",
+        "NewsArticle",
+        "BlogPosting",
+        "Product",
+        "Recipe",
+        "CreativeWork",
+    }
+)
 
 
 def _jsonld_has_detail_entity(blocks: list) -> bool:
@@ -398,7 +475,9 @@ def _jsonld_has_detail_entity(blocks: list) -> bool:
         t = item.get("@type")
         if isinstance(t, str) and t in _JSONLD_DETAIL_TYPES:
             return True
-        if isinstance(t, list) and any(x in _JSONLD_DETAIL_TYPES for x in t if isinstance(x, str)):
+        if isinstance(t, list) and any(
+            x in _JSONLD_DETAIL_TYPES for x in t if isinstance(x, str)
+        ):
             return True
     return False
 
@@ -496,8 +575,11 @@ def _parse_metric_number(text: str, *, year_guard: bool) -> int | None:
         # in plausible-year range, and parent context flagged as footer-
         # like. Treat as year noise — try the next match.
         if (
-            year_guard and not suffix and "." not in cleaned
-            and len(cleaned) == 4 and 1900 <= int(cleaned) <= 2099
+            year_guard
+            and not suffix
+            and "." not in cleaned
+            and len(cleaned) == 4
+            and 1900 <= int(cleaned) <= 2099
         ):
             continue
         return int(value * multiplier)
@@ -528,7 +610,7 @@ def _extract_metric(scope: BsTag, keywords: list[str]) -> int:
     zero" contract.
     """
     for kw in keywords:
-        kw_re = re.compile(re.escape(kw), re.I)
+        kw_re = _compile_keyword_re(kw)
         for el in scope.find_all(string=kw_re):
             parent = el.parent
             if parent is None:
@@ -551,8 +633,8 @@ def _extract_metric(scope: BsTag, keywords: list[str]) -> int:
             # shape with the number on the left).
             kw_match = kw_re.search(parent_text)
             if kw_match:
-                after_kw = parent_text[kw_match.end():]
-                before_kw = parent_text[:kw_match.start()]
+                after_kw = parent_text[kw_match.end() :]
+                before_kw = parent_text[: kw_match.start()]
                 slices = (after_kw, before_kw)
             else:
                 slices = (parent_text,)
@@ -610,9 +692,16 @@ def _extract_metric(scope: BsTag, keywords: list[str]) -> int:
 # blog post URL containing "logo") as a tradeoff for covering all the
 # real placeholder naming conventions.
 _PLACEHOLDER_URL_SUBSTRINGS = (
-    "logo", "default", "placeholder", "avatar",
-    "noimage", "no-image", "no_image",
-    "siteicon", "site-icon", "site_icon",
+    "logo",
+    "default",
+    "placeholder",
+    "avatar",
+    "noimage",
+    "no-image",
+    "no_image",
+    "siteicon",
+    "site-icon",
+    "site_icon",
     "missing",
 )
 
@@ -727,9 +816,8 @@ def _extract_twitter_cards(soup: BeautifulSoup) -> dict:
         out["title"] = _strip_title_site_suffix(title, require_chain=True)
 
     # Twitter's image comes under two property names historically
-    cover = (
-        _meta_or_none(soup, "twitter:image")
-        or _meta_or_none(soup, "twitter:image:src")
+    cover = _meta_or_none(soup, "twitter:image") or _meta_or_none(
+        soup, "twitter:image:src"
     )
     if cover and _valid_cover_url(cover):
         out["cover_url"] = cover
@@ -884,7 +972,7 @@ def _extract_jsonld(blocks: list) -> dict:
     # Completeness preference: has name AND image > only name > first
     primary = max(
         detail_entities,
-        key=lambda e: (bool(e.get("name") or e.get("headline")) + bool(e.get("image"))),
+        key=lambda e: bool(e.get("name") or e.get("headline")) + bool(e.get("image")),
     )
 
     out: dict = {}
@@ -935,6 +1023,7 @@ def _extract_jsonld(blocks: list) -> dict:
 # Merge by priority (pure function — unit-testable without BS4)
 # ---------------------------------------------------------------------------
 
+
 def _is_valid_field(field: str, value) -> bool:
     """Whether `value` for `field` is acceptable to enter merged_fields.
     Invalid values fall through to the next priority source or DOM."""
@@ -974,8 +1063,8 @@ def _merge_by_priority(
     tested with dict literals instead of HTML fixtures.
     """
     from crawler.raw_data import (
-        PROVENANCE_MISSING,
         PROVENANCE_FIELDS,
+        PROVENANCE_MISSING,
     )
 
     merged: dict = {}
@@ -1012,9 +1101,9 @@ def _extract_structured(soup: BeautifulSoup) -> tuple[dict, dict, str]:
     Priority order: JSON-LD > OpenGraph > Twitter Cards > microdata."""
     from crawler.raw_data import (
         PROVENANCE_JSONLD,
+        PROVENANCE_MICRODATA,
         PROVENANCE_OG,
         PROVENANCE_TWITTER,
-        PROVENANCE_MICRODATA,
     )
 
     blocks = _parse_jsonld_blocks(soup)
@@ -1030,6 +1119,7 @@ def _extract_structured(soup: BeautifulSoup) -> tuple[dict, dict, str]:
 # ---------------------------------------------------------------------------
 # Page-type detection
 # ---------------------------------------------------------------------------
+
 
 def _detect_page_type(html: str, url: str, soup: BeautifulSoup) -> str:
     """Determine page type from URL and HTML structure."""
@@ -1077,7 +1167,9 @@ def _detect_page_type(html: str, url: str, soup: BeautifulSoup) -> str:
         soup.select_one("article")
         or soup.select_one("main")
         or soup.select_one(".post")
-        or soup.select_one('section[class*="video"], section[class*="article"], section[class*="post"], section[class*="detail"], section[class*="content"]')
+        or soup.select_one(
+            'section[class*="video"], section[class*="article"], section[class*="post"], section[class*="detail"], section[class*="content"]'
+        )
     )
     if main_block and not is_root:
         og_title = _extract_meta(soup, "og:title")
@@ -1107,8 +1199,7 @@ def _detect_page_type(html: str, url: str, soup: BeautifulSoup) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Resource extraction — detail page
-# ---------------------------------------------------------------------------
+
 
 def _pick_main_container(soup: BeautifulSoup):
     """Pick the element most likely to hold the article's real content.
@@ -1350,6 +1441,7 @@ def _extract_published_date(soup: BeautifulSoup, container) -> str:
     Recognised regex formats: ISO ``YYYY-MM-DD[T...]``, slash
     ``YYYY/M/D``, CJK ``YYYY年M月D日``.
     """
+
     def _from_datetime_attr(time_tag) -> str:
         if not time_tag or not time_tag.get("datetime"):
             return ""
@@ -1400,9 +1492,8 @@ def _breadcrumb_category(soup: BeautifulSoup, url: str) -> str:
     where the final breadcrumb entry is the current item (its href
     resolves to the current URL) by using the previous entry instead.
     Returns "" when no breadcrumb present or when it yields no items."""
-    breadcrumb = (
-        soup.select_one("nav.breadcrumb")
-        or soup.select_one('[class*="breadcrumb"]')
+    breadcrumb = soup.select_one("nav.breadcrumb") or soup.select_one(
+        '[class*="breadcrumb"]'
     )
     if not breadcrumb:
         return ""
@@ -1422,7 +1513,9 @@ def _breadcrumb_category(soup: BeautifulSoup, url: str) -> str:
     return ""
 
 
-def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
+def _extract_detail_resource(
+    soup: BeautifulSoup, url: str, source: str = "static"
+) -> Resource:
     """Extract a single Resource from a detail page.
 
     Two-phase extraction (Plan 005):
@@ -1432,6 +1525,11 @@ def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
 
     Each field's winning source is recorded to the provenance map and
     serialized into `Resource.raw_data` for export/UI consumption.
+
+    Args:
+        soup: BeautifulSoup parsed HTML
+        url: Page URL for relative link resolution
+        source: Extraction source ('static' | 'rendered') — threads through to provenance
     """
     from crawler.raw_data import (
         PROVENANCE_DOM,
@@ -1541,6 +1639,13 @@ def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
         if published_at:
             provenance["published_at"] = PROVENANCE_DOM
 
+    # --- Content Fingerprinting (Phase 2 Unit S1) ---
+    content_text = (
+        container.get_text(" ", strip=True) if container else soup.get_text(" ", strip=True)
+    )
+    content_fingerprint = _calculate_simhash(content_text)
+    content_dna = _generate_content_dna(soup, container)
+
     # --- Raw data payload (provenance + description) ---
     raw_data = build_raw_data(provenance, description=description_value)
 
@@ -1555,6 +1660,8 @@ def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
         category=category,
         published_at=published_at,
         raw_data=raw_data,
+        content_fingerprint=content_fingerprint,
+        content_dna=content_dna,
     )
 
 
@@ -1562,8 +1669,17 @@ def _extract_detail_resource(soup: BeautifulSoup, url: str) -> Resource:
 # Resource extraction — list page
 # ---------------------------------------------------------------------------
 
-def _extract_list_resources(soup: BeautifulSoup, url: str) -> list[Resource]:
-    """Extract multiple Resources from a list/tag page."""
+
+def _extract_list_resources(
+    soup: BeautifulSoup, url: str, source: str = "static"
+) -> list[Resource]:
+    """Extract multiple Resources from a list/tag page.
+
+    Args:
+        soup: BeautifulSoup parsed HTML
+        url: Page URL for relative link resolution
+        source: Extraction source ('static' | 'rendered') — for consistency with detail extraction
+    """
     resources: list[Resource] = []
 
     # Find repeated card structures. Rather than committing to the first
@@ -1638,15 +1754,17 @@ def _extract_list_resources(soup: BeautifulSoup, url: str) -> list[Resource]:
         likes = _extract_metric(card, ["likes", "like", "赞"])
         hearts = _extract_metric(card, ["hearts", "heart", "收藏"])
 
-        resources.append(Resource(
-            title=title,
-            url=res_url,
-            cover_url=cover,
-            tags=tags,
-            views=views,
-            likes=likes,
-            hearts=hearts,
-        ))
+        resources.append(
+            Resource(
+                title=title,
+                url=res_url,
+                cover_url=cover,
+                tags=tags,
+                views=views,
+                likes=likes,
+                hearts=hearts,
+            )
+        )
 
     return resources
 
@@ -1686,10 +1804,17 @@ def _extract_links(soup: BeautifulSoup, base_url: str) -> list[str]:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def parse_page(html: str, url: str) -> ParseResult:
-    """Parse an HTML page and extract resources, links, and page type."""
+
+def parse_page(html: str, url: str, source: str = "static") -> ParseResult:
+    """Parse an HTML page and extract resources, links, and page type.
+
+    Args:
+        html: HTML content to parse
+        url: Page URL for relative link resolution
+        source: Extraction source ('static' = HTTP, 'rendered' = Playwright JS rendering)
+    """
     if not html or not html.strip():
-        return ParseResult()
+        return ParseResult(source=source)
 
     soup = BeautifulSoup(html, "lxml")
     page_type = _detect_page_type(html, url, soup)
@@ -1697,13 +1822,14 @@ def parse_page(html: str, url: str) -> ParseResult:
 
     resources: list[Resource] = []
     if page_type == "detail":
-        res = _extract_detail_resource(soup, url)
+        res = _extract_detail_resource(soup, url, source=source)
         resources = [res]
     elif page_type in ("list", "tag"):
-        resources = _extract_list_resources(soup, url)
+        resources = _extract_list_resources(soup, url, source=source)
 
     return ParseResult(
         page_type=page_type,
         resources=resources,
         links=links,
+        source=source,
     )

@@ -1,19 +1,19 @@
+from __future__ import annotations
+
 """Tests for crawler core: frontier, fetcher, engine."""
 
+import os
 import queue
 import tempfile
 import threading
-import os
+from unittest.mock import MagicMock, patch
 
 import pytest
-from unittest.mock import patch, MagicMock
-
-from crawler.core.frontier import Frontier
-from crawler.core.fetcher import needs_js_rendering
 from crawler.core.engine import run_crawl
+from crawler.core.fetcher import needs_js_rendering
+from crawler.core.frontier import Frontier
 from crawler.core.writer import WriterThread
 from crawler.parser import parse_page
-
 
 # ── Frontier Tests ──
 
@@ -23,7 +23,7 @@ def _fake_writer():
     insert_pages_batch. Used by Frontier-only unit tests so they don't need
     a real WriterThread."""
     from itertools import count
-    from unittest.mock import MagicMock
+
     writer = MagicMock()
     counter = count(start=1)
 
@@ -34,21 +34,16 @@ def _fake_writer():
     return writer
 
 
-def _make_frontier(seed_url: str, max_pages: int = 100, max_depth: int = 3,
-                   *, auto_seed: bool = True):
-    """Construct a Frontier with a fake writer for unit testing.
-
-    Back-compat shim: wraps push() to auto-flush and pop() to return
-    2-tuples, preserving the pre-batch Frontier API used by ~17 inherited
-    unit tests (TestFrontierBFS, TestFrontierDomainFilter, etc.). New
-    tests should construct ``Frontier`` directly and assert on 3-tuple pop
-    results — see TestFrontierWriterMode for the canonical pattern. This
-    shim exists to avoid a 17-test rewrite during B5 and is a candidate
-    for removal once those tests migrate.
-    """
+def _make_frontier(
+    seed_url: str, max_pages: int = 100, max_depth: int = 3, *, auto_seed: bool = True
+):
     f = Frontier(
-        seed_url, max_pages=max_pages, max_depth=max_depth,
-        writer=_fake_writer(), scan_job_id=1, auto_seed=auto_seed,
+        seed_url,
+        max_pages=max_pages,
+        max_depth=max_depth,
+        writer=_fake_writer(),
+        scan_job_id=1,
+        auto_seed=auto_seed,
     )
     real_push = f.push
 
@@ -58,17 +53,15 @@ def _make_frontier(seed_url: str, max_pages: int = 100, max_depth: int = 3,
 
     f.push = auto_flush_push  # type: ignore[method-assign]
 
-    # Also wrap pop to return 2-tuples for back-compat with the legacy
-    # tests' unpacking. Tests that explicitly want page_id use
-    # TestFrontierWriterMode (which calls Frontier directly).
     real_pop = f.pop
 
     def two_tuple_pop():
+        # Ensure we always return exactly what the legacy tests expect
         item = real_pop()
         if item is None:
             return None
-        url, depth, _page_id = item
-        return (url, depth)
+        # Back-compat: url, depth
+        return (item[0], item[1])
 
     f.pop = two_tuple_pop  # type: ignore[method-assign]
     return f
@@ -197,7 +190,7 @@ class TestFrontierThreadSafety:
     def test_concurrent_pushes_deduplicate(self):
         """8 threads pushing 100 unique URLs each → 800 pushes total, but
         dedup + shared namespace means visited_count reflects union, not sum."""
-        import threading
+
         f = _make_frontier("https://example.com", max_pages=2000, max_depth=5)
         f.pop()  # drain the seed so we count just the concurrent pushes
 
@@ -220,7 +213,7 @@ class TestFrontierThreadSafety:
 
     def test_concurrent_pops_no_duplicates(self):
         """Concurrent poppers from a pre-seeded frontier each get distinct items."""
-        import threading
+
         f = _make_frontier("https://example.com", max_pages=200, max_depth=5)
         f.pop()  # drop seed
         for i in range(50):
@@ -251,7 +244,6 @@ class TestFrontierThreadSafety:
 
     def test_push_pop_interleaved_no_corruption(self):
         """4 threads interleaving push and pop — no RuntimeError, no data loss."""
-        import threading
         import time
 
         f = _make_frontier("https://example.com", max_pages=1000, max_depth=5)
@@ -302,7 +294,9 @@ class TestNeedsJsRendering:
 
     def test_next_data_marker(self):
         body_text = "x" * 2000
-        html = f'<html><body>{body_text}</body><script id="__NEXT_DATA__"></script></html>'
+        html = (
+            f'<html><body>{body_text}</body><script id="__NEXT_DATA__"></script></html>'
+        )
         assert needs_js_rendering(html) is True
 
     def test_react_root_marker(self):
@@ -312,7 +306,7 @@ class TestNeedsJsRendering:
 
     def test_nuxt_marker(self):
         body_text = "x" * 2000
-        html = f'<html><body>{body_text}</body><script>window.__nuxt__</script></html>'
+        html = f"<html><body>{body_text}</body><script>window.__nuxt__</script></html>"
         # __nuxt is substring of __nuxt__
         assert needs_js_rendering(html) is True
 
@@ -368,7 +362,9 @@ def fast_engine_patches():
 
 class TestEngine:
     def _make_html(self, content: str, link: str = "") -> str:
-        body = content * 300  # ensure long enough to pass JS rendering check (>1024 chars)
+        body = (
+            content * 300
+        )  # ensure long enough to pass JS rendering check (>1024 chars)
         if link:
             return f'<html><body><p>{body}</p><a href="{link}">Next</a></body></html>'
         return f"<html><body><p>{body}</p></body></html>"
@@ -388,8 +384,11 @@ class TestEngine:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             job_id = run_crawl(
-                "https://example.com", db_path,
-                max_pages=5, max_depth=2, req_per_sec=20.0,
+                "https://example.com",
+                db_path,
+                max_pages=5,
+                max_depth=2,
+                req_per_sec=20.0,
             )
             assert job_id is not None
             assert mock_fetch.call_count == 2
@@ -401,8 +400,13 @@ class TestEngine:
         pq = queue.Queue()
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
-            run_crawl("https://example.com", db_path, max_pages=1,
-                      req_per_sec=20.0, progress_queue=pq)
+            run_crawl(
+                "https://example.com",
+                db_path,
+                max_pages=1,
+                req_per_sec=20.0,
+                progress_queue=pq,
+            )
 
         messages = []
         while not pq.empty():
@@ -414,22 +418,25 @@ class TestEngine:
     @patch("crawler.core.engine.fetch_page_with_cache_tracking")
     def test_respects_max_pages(self, mock_fetch, fast_engine_patches):
         """Engine stops after max_pages."""
-        mock_fetch.return_value = (self._make_html("page", "https://example.com/next"), False)
+        mock_fetch.return_value = (
+            self._make_html("page", "https://example.com/next"),
+            False,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
-            run_crawl("https://example.com", db_path,
-                      max_pages=2, req_per_sec=20.0)
+            run_crawl("https://example.com", db_path, max_pages=2, req_per_sec=20.0)
             assert mock_fetch.call_count <= 2
 
     @patch("crawler.core.engine.fetch_page_with_cache_tracking")
     def test_handles_fetch_failure(self, mock_fetch, fast_engine_patches):
-        mock_fetch.return_value = None
+        mock_fetch.return_value = (None, False)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
-            job_id = run_crawl("https://example.com", db_path,
-                               max_pages=1, req_per_sec=20.0)
+            job_id = run_crawl(
+                "https://example.com", db_path, max_pages=1, req_per_sec=20.0
+            )
             assert job_id is not None
 
     @patch("crawler.core.engine._check_robots", return_value=True)
@@ -439,34 +446,40 @@ class TestEngine:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
-            job_id = run_crawl("https://example.com", db_path,
-                               max_pages=5, req_per_sec=20.0)
+            job_id = run_crawl(
+                "https://example.com", db_path, max_pages=5, req_per_sec=20.0
+            )
 
             from crawler.storage import get_scan_job
+
             job = get_scan_job(db_path, job_id)
             assert job.status == "completed"
             assert job.pages_scanned >= 1
 
     @patch("crawler.core.engine._check_robots", return_value=True)
     @patch("crawler.core.engine.fetch_page_with_cache_tracking")
-    def test_resources_persisted_after_crawl(self, mock_fetch, mock_robots, fast_engine_patches):
+    def test_resources_persisted_after_crawl(
+        self, mock_fetch, mock_robots, fast_engine_patches
+    ):
         """Crawled detail pages should have resources saved to DB."""
         html = (
             '<html><head><meta property="og:title" content="Test Article"></head>'
-            '<body><article><h1>Test Article</h1>'
-            '<p>' + 'content ' * 200 + '</p>'
+            "<body><article><h1>Test Article</h1>"
+            "<p>" + "content " * 200 + "</p>"
             '<a rel="tag">python</a><a rel="tag">web</a>'
-            '<span>views 1234</span>'
-            '</article></body></html>'
+            "<span>views 1234</span>"
+            "</article></body></html>"
         )
-        mock_fetch.return_value = html
+        mock_fetch.return_value = (html, False)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
-            job_id = run_crawl("https://example.com/post/123", db_path,
-                               max_pages=1, req_per_sec=20.0)
+            job_id = run_crawl(
+                "https://example.com/post/123", db_path, max_pages=1, req_per_sec=20.0
+            )
 
-            from crawler.storage import get_scan_job, get_resources
+            from crawler.storage import get_resources, get_scan_job
+
             job = get_scan_job(db_path, job_id)
             assert job.resources_found >= 1
 
@@ -482,9 +495,7 @@ class TestEngineConcurrent:
 
     def _make_html(self, content: str = "x", links: list[str] | None = None) -> str:
         body = "content " * 200
-        link_html = "".join(
-            f'<a href="{link}">link</a>' for link in (links or [])
-        )
+        link_html = "".join(f'<a href="{link}">link</a>' for link in (links or []))
         return f"<html><body><p>{body}</p>{link_html}</body></html>"
 
     @patch("crawler.core.engine.fetch_page_with_cache_tracking")
@@ -495,19 +506,22 @@ class TestEngineConcurrent:
         responses = {"https://example.com/": self._make_html("seed", urls)}
         for url in urls:
             responses[url] = self._make_html(url)
-        mock_fetch.side_effect = lambda u, *a, **kw: responses.get(u)
+        mock_fetch.side_effect = lambda u, *a, **kw: (responses.get(u), False)
 
         progress_q = queue.Queue()
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             run_crawl(
-                "https://example.com", db_path,
-                max_pages=51, workers=8, req_per_sec=20.0,
+                "https://example.com",
+                db_path,
+                max_pages=51,
+                workers=8,
+                req_per_sec=20.0,
                 progress_queue=progress_q,
             )
 
-            from crawler.storage import get_scan_job
             import sqlite3
+
             with sqlite3.connect(db_path) as conn:
                 fetched = conn.execute(
                     "SELECT COUNT(*) FROM pages WHERE status = 'fetched'"
@@ -523,27 +537,31 @@ class TestEngineConcurrent:
     @patch("crawler.core.engine.fetch_page_with_cache_tracking")
     def test_failed_page_persists_failure_reason(self, mock_fetch, fast_engine_patches):
         # First call returns None (failure), engine should write failure_reason
-        mock_fetch.return_value = None
+        mock_fetch.return_value = (None, False)
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             run_crawl("https://example.com", db_path, max_pages=1, req_per_sec=20.0)
             import sqlite3
+
             with sqlite3.connect(db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 row = conn.execute(
                     "SELECT status, failure_reason FROM pages LIMIT 1"
                 ).fetchone()
         assert row["status"] == "failed"
-        assert row["failure_reason"] == "http_error"
+        assert row["failure_reason"] == "fetch_failed"
 
     def test_preflight_failure_raises_with_remediation(self):
-        with patch("crawler.core.engine.preflight",
-                   return_value=(False, "playwright install chromium")):
+        with patch(
+            "crawler.core.engine.preflight",
+            return_value=(False, "playwright install chromium"),
+        ):
             with tempfile.TemporaryDirectory() as tmpdir:
                 db_path = os.path.join(tmpdir, "test.db")
                 with pytest.raises(RuntimeError, match="playwright install chromium"):
-                    run_crawl("https://example.com", db_path,
-                              max_pages=1, req_per_sec=20.0)
+                    run_crawl(
+                        "https://example.com", db_path, max_pages=1, req_per_sec=20.0
+                    )
 
     @patch("crawler.core.engine.fetch_page_with_cache_tracking")
     def test_r6a_zero_resource_retry_via_render(self, mock_fetch, fast_engine_patches):
@@ -555,20 +573,21 @@ class TestEngineConcurrent:
         resources from. This triggers R6a, which routes the URL through
         render thread; the rendered HTML carries a real article and a tag.
         """
-        from crawler.parser import parse_page
         from concurrent.futures import Future
+
+        from crawler.parser import parse_page
 
         # HTTP path: 5 bare `<article>` elements satisfy the parser's
         # "list" classification (>3 articles), but each lacks the inner
         # `<a href>` that the resource extractor requires, so resources
         # comes back empty. This is the exact gap R6a is designed to close.
         http_html = (
-            '<html><body>'
-            + ''.join(
-                f'<article><h2>article {i}</h2><p>summary {i}</p></article>'
+            "<html><body>"
+            + "".join(
+                f"<article><h2>article {i}</h2><p>summary {i}</p></article>"
                 for i in range(5)
             )
-            + '</body></html>'
+            + "</body></html>"
         )
         # Sanity: confirm the test fixture actually exercises R6a's
         # precondition (list page + zero resources). If parsing rules drift,
@@ -586,12 +605,12 @@ class TestEngineConcurrent:
         # Render path: same URL but with a real article + tag.
         rendered_html = (
             '<html><head><meta property="og:title" content="From Render"></head>'
-            '<body><article><h1>From Render</h1>'
-            '<p>' + 'content ' * 200 + '</p>'
+            "<body><article><h1>From Render</h1>"
+            "<p>" + "content " * 200 + "</p>"
             '<a rel="tag">retry-tag</a>'
-            '</article></body></html>'
+            "</article></body></html>"
         )
-        mock_fetch.return_value = http_html
+        mock_fetch.return_value = (http_html, False)
 
         # Spy on RenderThread.submit so we can assert the R6a branch fired.
         rendered_future: Future = Future()
@@ -606,10 +625,13 @@ class TestEngineConcurrent:
             with tempfile.TemporaryDirectory() as tmpdir:
                 db_path = os.path.join(tmpdir, "test.db")
                 job_id = run_crawl(
-                    "https://example.com/list", db_path,
-                    max_pages=1, req_per_sec=20.0,
+                    "https://example.com/list",
+                    db_path,
+                    max_pages=1,
+                    req_per_sec=20.0,
                 )
                 from crawler.storage import get_resources
+
                 resources = get_resources(db_path, job_id)
 
         # R16 acceptance: R6a fired exactly once and rendered HTML was parsed.
@@ -630,25 +652,30 @@ class TestEngineConcurrent:
         """force_playwright=True → fetch_page is not called for the URL."""
         rendered_html = (
             '<html><head><meta property="og:title" content="Forced"></head>'
-            '<body><article><h1>Forced</h1>'
-            '<p>' + 'content ' * 200 + '</p>'
-            '</article></body></html>'
+            "<body><article><h1>Forced</h1>"
+            "<p>" + "content " * 200 + "</p>"
+            "</article></body></html>"
         )
 
         from concurrent.futures import Future
+
         def make_future(*_a, **_kw):
             f = Future()
             f.set_result(rendered_html)
             return f
 
-        mock_fetch.return_value = "<html>SHOULD NOT BE USED</html>"
-        with patch("crawler.core.render.RenderThread.submit",
-                   side_effect=make_future) as mock_render:
+        mock_fetch.return_value = ("<html>SHOULD NOT BE USED</html>", False)
+        with patch(
+            "crawler.core.render.RenderThread.submit", side_effect=make_future
+        ) as mock_render:
             with tempfile.TemporaryDirectory() as tmpdir:
                 db_path = os.path.join(tmpdir, "test.db")
                 run_crawl(
-                    "https://example.com/x", db_path,
-                    max_pages=1, force_playwright=True, req_per_sec=20.0,
+                    "https://example.com/x",
+                    db_path,
+                    max_pages=1,
+                    force_playwright=True,
+                    req_per_sec=20.0,
                 )
 
         assert mock_fetch.call_count == 0
@@ -660,20 +687,22 @@ class TestResume:
 
     def _make_html(self, links: list[str] | None = None) -> str:
         body = "content " * 200
-        link_html = "".join(
-            f'<a href="{link}">link</a>' for link in (links or [])
-        )
+        link_html = "".join(f'<a href="{link}">link</a>' for link in (links or []))
         return f"<html><body><p>{body}</p>{link_html}</body></html>"
 
     def test_resume_after_partial_scan_picks_up_pending(self, fast_engine_patches):
         """Simulate a partial scan: insert pending pages, then re-run engine →
         only the pending URLs get fetched, not the already-fetched ones."""
-        from crawler.storage import (
-            create_scan_job, init_db, insert_page, update_page,
-            get_scan_job_by_entry_url, get_pending_pages,
-        )
-        from crawler.core.fetcher import fetch_page  # noqa
         import sqlite3
+
+        from crawler.core.fetcher import fetch_page  # noqa
+        from crawler.storage import (
+            create_scan_job,
+            get_pending_pages,
+            init_db,
+            insert_page,
+            update_page,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
@@ -682,23 +711,34 @@ class TestResume:
             # Pre-create scan_job + 5 pages: 2 fetched, 3 pending.
             entry = "https://example.com"
             sj_id = create_scan_job(db_path, entry, "example.com", 100, 3)
-            update_page(db_path, insert_page(db_path, sj_id, entry, depth=0),
-                        status="fetched")
-            update_page(db_path, insert_page(db_path, sj_id, "https://example.com/done1", depth=1),
-                        status="fetched")
+            update_page(
+                db_path, insert_page(db_path, sj_id, entry, depth=0), status="fetched"
+            )
+            update_page(
+                db_path,
+                insert_page(db_path, sj_id, "https://example.com/done1", depth=1),
+                status="fetched",
+            )
             insert_page(db_path, sj_id, "https://example.com/pending1", depth=1)
             insert_page(db_path, sj_id, "https://example.com/pending2", depth=1)
             insert_page(db_path, sj_id, "https://example.com/pending3", depth=1)
 
             # Track which URLs the engine fetches.
             fetched_urls: list[str] = []
+
             def track_fetch(url, *a, **kw):
                 fetched_urls.append(url)
-                return self._make_html()
+                return (self._make_html(), False)
 
-            with patch("crawler.core.engine.fetch_page_with_cache_tracking", side_effect=track_fetch):
+            with patch(
+                "crawler.core.engine.fetch_page_with_cache_tracking",
+                side_effect=track_fetch,
+            ):
                 returned_id = run_crawl(
-                    entry, db_path, max_pages=100, req_per_sec=20.0,
+                    entry,
+                    db_path,
+                    max_pages=100,
+                    req_per_sec=20.0,
                 )
 
             # Resume preserves the original scan_job_id.
@@ -728,7 +768,11 @@ class TestResume:
     def test_completed_scan_is_no_op(self, fast_engine_patches):
         """Re-clicking Start on a completed scan: no new fetches, same id."""
         from crawler.storage import (
-            create_scan_job, init_db, insert_page, update_page, update_scan_job,
+            create_scan_job,
+            init_db,
+            insert_page,
+            update_page,
+            update_scan_job,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -736,13 +780,15 @@ class TestResume:
             init_db(db_path)
             entry = "https://example.com"
             sj_id = create_scan_job(db_path, entry, "example.com", 100, 3)
-            update_page(db_path, insert_page(db_path, sj_id, entry, depth=0),
-                        status="fetched")
+            update_page(
+                db_path, insert_page(db_path, sj_id, entry, depth=0), status="fetched"
+            )
             update_scan_job(db_path, sj_id, status="completed")
 
-            with patch("crawler.core.engine.fetch_page_with_cache_tracking") as mock_fetch:
-                returned_id = run_crawl(entry, db_path,
-                                        max_pages=100, req_per_sec=20.0)
+            with patch(
+                "crawler.core.engine.fetch_page_with_cache_tracking", return_value=(None, False)
+            ) as mock_fetch:
+                returned_id = run_crawl(entry, db_path, max_pages=100, req_per_sec=20.0)
 
             assert returned_id == sj_id
             assert mock_fetch.call_count == 0
@@ -751,11 +797,13 @@ class TestResume:
         """Insert-at-push-time: every discovered URL has a pages row before
         the worker pops it, so a process kill mid-crawl leaves a recoverable
         frontier."""
-        seed_html = self._make_html(links=[
-            "https://example.com/a",
-            "https://example.com/b",
-            "https://example.com/c",
-        ])
+        seed_html = self._make_html(
+            links=[
+                "https://example.com/a",
+                "https://example.com/b",
+                "https://example.com/c",
+            ]
+        )
         leaf_html = self._make_html()
 
         responses = {
@@ -764,19 +812,23 @@ class TestResume:
             "https://example.com/b": leaf_html,
             "https://example.com/c": leaf_html,
         }
-        with patch("crawler.core.engine.fetch_page_with_cache_tracking",
-                   side_effect=lambda u, *a, **kw: responses.get(u)):
+        with patch(
+            "crawler.core.engine.fetch_page_with_cache_tracking",
+            side_effect=lambda u, *a, **kw: (responses.get(u), False),
+        ):
             with tempfile.TemporaryDirectory() as tmpdir:
                 db_path = os.path.join(tmpdir, "test.db")
-                sj_id = run_crawl("https://example.com", db_path,
-                                  max_pages=10, req_per_sec=20.0)
+                sj_id = run_crawl(
+                    "https://example.com", db_path, max_pages=10, req_per_sec=20.0
+                )
 
                 import sqlite3
+
                 with sqlite3.connect(db_path) as conn:
                     conn.row_factory = sqlite3.Row
                     rows = conn.execute(
-                        "SELECT url FROM pages WHERE scan_job_id = ? "
-                        "ORDER BY url", (sj_id,),
+                        "SELECT url FROM pages WHERE scan_job_id = ? ORDER BY url",
+                        (sj_id,),
                     ).fetchall()
 
         # All 4 URLs (entry + 3 discovered) have rows.
@@ -790,29 +842,45 @@ class TestResume:
 
     def test_max_pages_limit_leaves_remainder_pending(self, fast_engine_patches):
         """max_pages=2 in a 4-URL frontier → 2 fetched, others stay pending."""
-        seed_html = self._make_html(links=[
-            "https://example.com/a", "https://example.com/b", "https://example.com/c",
-        ])
+        seed_html = self._make_html(
+            links=[
+                "https://example.com/a",
+                "https://example.com/b",
+                "https://example.com/c",
+            ]
+        )
         responses = {"https://example.com/": seed_html}
-        for u in ["https://example.com/a", "https://example.com/b", "https://example.com/c"]:
+        for u in [
+            "https://example.com/a",
+            "https://example.com/b",
+            "https://example.com/c",
+        ]:
             responses[u] = self._make_html()
 
-        with patch("crawler.core.engine.fetch_page_with_cache_tracking",
-                   side_effect=lambda u, *a, **kw: responses.get(u)):
+        with patch(
+            "crawler.core.engine.fetch_page_with_cache_tracking",
+            side_effect=lambda u, *a, **kw: (responses.get(u), False),
+        ):
             with tempfile.TemporaryDirectory() as tmpdir:
                 db_path = os.path.join(tmpdir, "test.db")
-                sj_id = run_crawl("https://example.com", db_path,
-                                  max_pages=2, req_per_sec=20.0,
-                                  workers=1)  # serialize so result is deterministic
+                sj_id = run_crawl(
+                    "https://example.com",
+                    db_path,
+                    max_pages=2,
+                    req_per_sec=20.0,
+                    workers=1,
+                )  # serialize so result is deterministic
 
                 import sqlite3
+
                 with sqlite3.connect(db_path) as conn:
                     conn.row_factory = sqlite3.Row
                     counts = {
                         row["status"]: row["c"]
                         for row in conn.execute(
                             "SELECT status, COUNT(*) AS c FROM pages "
-                            "WHERE scan_job_id = ? GROUP BY status", (sj_id,),
+                            "WHERE scan_job_id = ? GROUP BY status",
+                            (sj_id,),
                         )
                     }
         # 2 fetched, 2 pending (entry + 1 link, then 2 more discovered but
@@ -825,22 +893,26 @@ class TestFrontierWriterMode:
     """Frontier with writer integration — used by the engine in production."""
 
     def test_push_inserts_via_writer_and_returns_3tuple(self):
-        from crawler.core.frontier import Frontier
-        from crawler.core.writer import WriterThread
-        from crawler.storage import create_scan_job, init_db
         import tempfile
+
+        from crawler.core.frontier import Frontier
+        from crawler.storage import create_scan_job, init_db
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             init_db(db_path)
-            sj_id = create_scan_job(db_path, "https://example.com",
-                                    "example.com", 100, 3)
+            sj_id = create_scan_job(
+                db_path, "https://example.com", "example.com", 100, 3
+            )
             writer = WriterThread(db_path)
             writer.start()
             try:
                 frontier = Frontier(
-                    "https://example.com", 100, 3,
-                    writer=writer, scan_job_id=sj_id,
+                    "https://example.com",
+                    100,
+                    3,
+                    writer=writer,
+                    scan_job_id=sj_id,
                 )
                 # Auto-seeded entry URL
                 item = frontier.pop()
@@ -862,7 +934,8 @@ class TestFrontierWriterMode:
                 a_url, a_depth, a_pid = frontier.pop()
                 b_url, b_depth, b_pid = frontier.pop()
                 assert {a_url, b_url} == {
-                    "https://example.com/a", "https://example.com/b",
+                    "https://example.com/a",
+                    "https://example.com/b",
                 }
                 assert a_pid != b_pid != page_id
             finally:
@@ -873,20 +946,25 @@ class TestFrontierWriterMode:
         (one for the seed at construction, one for the batch). The whole
         point of A5 is that high-fanout pages don't trigger N writer
         round-trips."""
-        from crawler.core.frontier import Frontier
-        from unittest.mock import MagicMock
         from itertools import count
+
+        from crawler.core.frontier import Frontier
 
         writer = MagicMock()
         # Generate fresh page_ids for each batch call.
         id_counter = count(start=1)
+
         def fake_batch(scan_job_id, items):
             return [next(id_counter) for _ in items]
+
         writer.insert_pages_batch.side_effect = fake_batch
 
         frontier = Frontier(
-            "https://example.com", 200, 3,
-            writer=writer, scan_job_id=42,
+            "https://example.com",
+            200,
+            3,
+            writer=writer,
+            scan_job_id=42,
         )
         # The constructor flushed the seed; record that call count.
         seed_calls = writer.insert_pages_batch.call_count
@@ -913,13 +991,17 @@ class TestFrontierWriterMode:
         assert len(items) == 101
 
     def test_flush_batch_empty_is_noop(self):
+
         from crawler.core.frontier import Frontier
-        from unittest.mock import MagicMock
+
         writer = MagicMock()
         writer.insert_pages_batch.return_value = [1]  # for seed flush
         frontier = Frontier(
-            "https://example.com", 100, 3,
-            writer=writer, scan_job_id=1,
+            "https://example.com",
+            100,
+            3,
+            writer=writer,
+            scan_job_id=1,
         )
         seed_calls = writer.insert_pages_batch.call_count
         # Nothing staged.
@@ -935,15 +1017,18 @@ class TestFrontierWriterMode:
         retry + a re-pushed duplicate would put the same page_id in the
         queue twice and cause the page to be processed twice (counter
         inflation)."""
+
         from crawler.core.frontier import Frontier
-        from unittest.mock import MagicMock
 
         writer = MagicMock()
         writer.insert_pages_batch.side_effect = [[1], RuntimeError("transient")]
 
         frontier = Frontier(
-            "https://example.com", 100, 3,
-            writer=writer, scan_job_id=1,
+            "https://example.com",
+            100,
+            3,
+            writer=writer,
+            scan_job_id=1,
         )
         frontier.push("https://example.com/a", 1)
         frontier.push("https://example.com/b", 1)
@@ -953,36 +1038,41 @@ class TestFrontierWriterMode:
 
         # Visited entries persist — re-discovery cannot re-stage them.
         with frontier._lock:
-            assert "https://example.com/a" in frontier._visited
-            assert "https://example.com/b" in frontier._visited
+            assert frontier.fingerprint("https://example.com/a") in frontier._visited
+            assert frontier.fingerprint("https://example.com/b") in frontier._visited
             # They're back in pending_batch for the next flush attempt.
-            assert ("https://example.com/a", 1) in frontier._pending_batch
-            assert ("https://example.com/b", 1) in frontier._pending_batch
+            assert any(item[0] == "https://example.com/a" for item in frontier._pending_batch)
+            assert any(item[0] == "https://example.com/b" for item in frontier._pending_batch)
 
         # Re-pushing the same URL after the failure is a no-op (visited).
         frontier.push("https://example.com/a", 1)
         with frontier._lock:
-            stages = [u for u, _ in frontier._pending_batch]
+            stages = [item[0] for item in frontier._pending_batch]
         # Still exactly one entry for `a` (no duplicate from re-push).
         assert stages.count("https://example.com/a") == 1
 
     def test_flush_batch_failure_keeps_pending_for_retry(self):
+
         from crawler.core.frontier import Frontier
-        from unittest.mock import MagicMock
 
         writer = MagicMock()
         # Seed flush succeeds; subsequent flushes fail twice then succeed.
         results = [[1], RuntimeError("writer down"), [2, 3]]
+
         def side(scan_job_id, items):
             r = results.pop(0)
             if isinstance(r, BaseException):
                 raise r
             return r
+
         writer.insert_pages_batch.side_effect = side
 
         frontier = Frontier(
-            "https://example.com", 100, 3,
-            writer=writer, scan_job_id=1,
+            "https://example.com",
+            100,
+            3,
+            writer=writer,
+            scan_job_id=1,
         )
         frontier.push("https://example.com/a", 1)
         frontier.push("https://example.com/b", 1)
@@ -993,21 +1083,27 @@ class TestFrontierWriterMode:
         assert flushed == 2
 
     def test_seed_existing_skips_writer_insert(self):
+
         from crawler.core.frontier import Frontier
-        from unittest.mock import MagicMock
 
         writer = MagicMock()
         writer.insert_page.side_effect = AssertionError(
             "seed_existing must NOT call insert_page"
         )
         frontier = Frontier(
-            "https://example.com", 100, 3,
-            writer=writer, scan_job_id=1, auto_seed=False,
+            "https://example.com",
+            100,
+            3,
+            writer=writer,
+            scan_job_id=1,
+            auto_seed=False,
         )
-        frontier.seed_existing([
-            ("https://example.com/x", 1, 100),
-            ("https://example.com/y", 1, 101),
-        ])
+        frontier.seed_existing(
+            [
+                ("https://example.com/x", 1, 100),
+                ("https://example.com/y", 1, 101),
+            ]
+        )
         items = []
         while True:
             item = frontier.pop()
@@ -1026,7 +1122,9 @@ class TestEngineShutdownBound:
 
     @patch("crawler.core.engine.fetch_page_with_cache_tracking")
     def test_shutdown_path_bounded_when_render_hangs(
-        self, mock_fetch, fast_engine_patches,
+        self,
+        mock_fetch,
+        fast_engine_patches,
     ):
         """Workers blocked on hung render → engine returns within RENDER_TIMEOUT
         + bounded shutdown overhead. With RENDER_TIMEOUT mocked to 2s, total
@@ -1040,7 +1138,7 @@ class TestEngineShutdownBound:
 
         # Short body forces needs_js_rendering, so worker routes through render.
         short_body = "<html><body>x</body></html>"
-        mock_fetch.return_value = short_body
+        mock_fetch.return_value = (short_body, False)
 
         def make_hung_future(*_a, **_kw):
             return _Future()  # never resolves
@@ -1049,14 +1147,18 @@ class TestEngineShutdownBound:
         # quickly. The interesting measurement is engine teardown overhead
         # AFTER the worker gives up, which is what A3 fixed.
         with patch("crawler.core.engine.RENDER_TIMEOUT", 2):
-            with patch("crawler.core.render.RenderThread.submit",
-                       side_effect=make_hung_future):
+            with patch(
+                "crawler.core.render.RenderThread.submit", side_effect=make_hung_future
+            ):
                 with tempfile.TemporaryDirectory() as tmpdir:
                     db_path = os.path.join(tmpdir, "test.db")
                     start = _time.monotonic()
                     run_crawl(
-                        "https://example.com", db_path,
-                        max_pages=1, workers=8, req_per_sec=20.0,
+                        "https://example.com",
+                        db_path,
+                        max_pages=1,
+                        workers=8,
+                        req_per_sec=20.0,
                         force_playwright=True,
                     )
                     elapsed = _time.monotonic() - start
@@ -1070,12 +1172,16 @@ class TestEngineShutdownBound:
 
     @patch("crawler.core.engine.fetch_page_with_cache_tracking")
     def test_executor_uses_explicit_construction_not_with_block(
-        self, mock_fetch, fast_engine_patches,
+        self,
+        mock_fetch,
+        fast_engine_patches,
     ):
         """A3: ensure the engine is wired in the new structure (no `with`
         ThreadPoolExecutor that would re-introduce executor-first shutdown)."""
         import inspect
+
         from crawler.core import engine as engine_module
+
         source = inspect.getsource(engine_module.run_crawl)
         # The fix is to NOT use `with ThreadPoolExecutor` as a context manager
         # in the body of run_crawl.
@@ -1115,8 +1221,10 @@ class TestHighFanoutAndWriterDeathRegressions:
         for u in urls:
             responses[u] = leaf_html
 
-        with patch("crawler.core.engine.fetch_page_with_cache_tracking",
-                   side_effect=lambda u, *a, **kw: responses.get(u, leaf_html)):
+        with patch(
+            "crawler.core.engine.fetch_page_with_cache_tracking",
+            side_effect=lambda u, *a, **kw: (responses.get(u, leaf_html), False),
+        ):
             with tempfile.TemporaryDirectory() as tmpdir:
                 db_path = os.path.join(tmpdir, "test.db")
                 start = _time.monotonic()
@@ -1124,12 +1232,16 @@ class TestHighFanoutAndWriterDeathRegressions:
                 # not network simulation. With max_pages=10, the engine pops
                 # 10 leaf URLs after the seed is processed.
                 run_crawl(
-                    "https://example.com", db_path,
-                    max_pages=10, workers=8, req_per_sec=20.0,
+                    "https://example.com",
+                    db_path,
+                    max_pages=10,
+                    workers=8,
+                    req_per_sec=20.0,
                 )
                 elapsed = _time.monotonic() - start
 
                 import sqlite3
+
                 with sqlite3.connect(db_path) as c:
                     pending = c.execute(
                         "SELECT COUNT(*) FROM pages WHERE status='pending'"
@@ -1146,7 +1258,8 @@ class TestHighFanoutAndWriterDeathRegressions:
         )
 
     def test_writer_persistent_failure_aborts_scan_within_bound(
-        self, fast_engine_patches,
+        self,
+        fast_engine_patches,
     ):
         """R17b: a persistent writer-side failure must trigger the engine's
         writer-health check (A6), abort the scan, and finalize via the
@@ -1162,9 +1275,11 @@ class TestHighFanoutAndWriterDeathRegressions:
         # patch the writer's _open_connection to raise — that DOES set
         # last_exception and the wait-loop health check fires.
         from crawler.core import writer as writer_mod
+
         original_open = writer_mod.WriterThread._open_connection
 
         call_count = {"n": 0}
+
         def failing_open(self):
             call_count["n"] += 1
             if call_count["n"] == 1:
@@ -1180,24 +1295,29 @@ class TestHighFanoutAndWriterDeathRegressions:
             return False
 
         body = "<html><body>" + ("content " * 200) + "</body></html>"
-        with patch("crawler.core.engine.fetch_page_with_cache_tracking", return_value=body):
-            with patch.object(writer_mod.WriterThread, "is_alive",
-                              always_dead_is_alive):
+        with patch(
+            "crawler.core.engine.fetch_page_with_cache_tracking", return_value=(body, False)
+        ):
+            with patch.object(
+                writer_mod.WriterThread, "is_alive", always_dead_is_alive
+            ):
                 with tempfile.TemporaryDirectory() as tmpdir:
                     db_path = os.path.join(tmpdir, "test.db")
                     start = _time.monotonic()
                     job_id = run_crawl(
-                        "https://example.com", db_path,
-                        max_pages=20, workers=4, req_per_sec=20.0,
+                        "https://example.com",
+                        db_path,
+                        max_pages=20,
+                        workers=4,
+                        req_per_sec=20.0,
                     )
                     elapsed = _time.monotonic() - start
 
                     from crawler.storage import get_scan_job
+
                     job = get_scan_job(db_path, job_id)
 
-        assert elapsed < 15.0, (
-            f"writer-death abort exceeded bound: {elapsed:.1f}s"
-        )
+        assert elapsed < 15.0, f"writer-death abort exceeded bound: {elapsed:.1f}s"
         assert job.status == "failed", (
             f"expected scan_jobs.status='failed' after writer death; got {job.status!r}"
         )
@@ -1211,7 +1331,9 @@ class TestEngineWriterHealth:
         unhealthy writer. Source-level assertion since reproducing the race
         deterministically is fragile."""
         import inspect
+
         from crawler.core import engine as engine_module
+
         source = inspect.getsource(engine_module.run_crawl)
         # The check uses both is_alive() AND last_exception so a writer
         # that crashed but hasn't yet exited still triggers abort.
@@ -1228,7 +1350,10 @@ class TestEngineWriterHealth:
     def test_direct_finalize_helper_writes_status_correctly(self, tmp_path):
         from crawler.core.engine import _direct_finalize_scan_job
         from crawler.storage import (
-            create_scan_job, get_scan_job, init_db, update_scan_job,
+            create_scan_job,
+            get_scan_job,
+            init_db,
+            update_scan_job,
         )
 
         db_path = str(tmp_path / "test.db")
@@ -1237,8 +1362,11 @@ class TestEngineWriterHealth:
         update_scan_job(db_path, sj_id, status="running")
 
         _direct_finalize_scan_job(
-            db_path, sj_id, status="failed",
-            pages_scanned=42, resources_found=99,
+            db_path,
+            sj_id,
+            status="failed",
+            pages_scanned=42,
+            resources_found=99,
         )
 
         job = get_scan_job(db_path, sj_id)
@@ -1266,8 +1394,8 @@ class TestRobotsTxt:
 
     def test_valid_entries_respected(self):
         """Valid robots.txt with disallow rules should be enforced."""
+
         from crawler.core.engine import _check_robots
-        from urllib.robotparser import RobotFileParser
 
         cache: dict = {}
         with patch("crawler.core.engine.RobotFileParser") as MockRP:

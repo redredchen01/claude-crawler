@@ -1,13 +1,20 @@
 """Tests for crawler.parser module."""
 
+from __future__ import annotations
+
 import os
 
 import pytest
+from typing import TYPE_CHECKING
 
 from bs4 import BeautifulSoup
 
+if TYPE_CHECKING:
+    from bs4 import Tag as BsTag
+
+# Constants imported separately so test boundary assertions track config drift.
 from crawler.parser import (
-    parse_page,
+    _METRIC_SIBLING_CAP,
     _extract_detail_resource,
     _extract_metric,
     _extract_published_date,
@@ -17,14 +24,8 @@ from crawler.parser import (
     _pick_cover_image,
     _pick_main_container,
     _resolve_img_src,
+    parse_page,
 )
-# Constants imported separately so test boundary assertions track config drift.
-from crawler.parser import (
-    _FALLBACK_TAG_CLOUD_CAP,
-    _METRIC_SIBLING_CAP,
-    _MIN_COVER_DIMENSION,
-)
-
 
 # ---------------------------------------------------------------------------
 # Fixtures — crafted HTML strings
@@ -118,6 +119,7 @@ LINK_HTML = """\
 # Tests
 # ---------------------------------------------------------------------------
 
+
 class TestDetailPage:
     def test_page_type(self):
         result = parse_page(DETAIL_HTML, "https://example.com/blog/tech/article-1")
@@ -141,28 +143,27 @@ class TestDetailPage:
         ~50-tag sidebar that appeared on every article page; pre-fix the
         parser scanned the whole DOM and assigned all 50 tags to every
         article, drowning out the 1-3 article-specific tags."""
-        sidebar_tags = "".join(
-            f'<a rel="tag">sidebar-tag-{i}</a>' for i in range(40)
-        )
+        sidebar_tags = "".join(f'<a rel="tag">sidebar-tag-{i}</a>' for i in range(40))
         html = (
             '<html><head><meta property="og:title" content="Real Article"></head>'
-            '<body>'
-            '<article>'
-            '<h1>Real Article</h1>'
-            '<p>body</p>'
+            "<body>"
+            "<article>"
+            "<h1>Real Article</h1>"
+            "<p>body</p>"
             '<div class="post-tags">'
             '<a rel="tag">article-tag-1</a>'
             '<a rel="tag">article-tag-2</a>'
-            '</div>'
-            '</article>'
+            "</div>"
+            "</article>"
             f'<aside class="sidebar"><h3>Hot Tags</h3>{sidebar_tags}</aside>'
-            '</body></html>'
+            "</body></html>"
         )
         result = parse_page(html, "https://example.com/post/1")
         tags = result.resources[0].tags
-        assert tags == ["article-tag-1", "article-tag-2"], (
-            f"Expected only the article-scoped tags; got {tags}"
-        )
+        assert tags == [
+            "article-tag-1",
+            "article-tag-2",
+        ], f"Expected only the article-scoped tags; got {tags}"
 
     def test_tags_no_container_falls_back_with_size_cap(self):
         """When the page has neither <article> nor <main>, we fall back to
@@ -170,10 +171,8 @@ class TestDetailPage:
         spam. Tested via the internal helper because pages without
         article/main classify as page_type='other' and don't reach
         _extract_detail_resource through parse_page."""
-        cloud_tags = "".join(
-            f'<a rel="tag">cloud-tag-{i}</a>' for i in range(50)
-        )
-        html = f'<html><body><h1>Some Title</h1>{cloud_tags}</body></html>'
+        cloud_tags = "".join(f'<a rel="tag">cloud-tag-{i}</a>' for i in range(50))
+        html = f"<html><body><h1>Some Title</h1>{cloud_tags}</body></html>"
         soup = BeautifulSoup(html, "lxml")
         resource = _extract_detail_resource(soup, "https://example.com/post/1")
         # Whole-doc scan saw 50 tags → cap kicked in → tags dropped.
@@ -184,10 +183,8 @@ class TestDetailPage:
     def test_tags_no_container_under_cap_keeps_results(self):
         """When no container exists but tag count is reasonable (<=30),
         whole-doc fallback is allowed."""
-        few_tags = "".join(
-            f'<a rel="tag">small-tag-{i}</a>' for i in range(5)
-        )
-        html = f'<html><body><h1>Some Title</h1>{few_tags}</body></html>'
+        few_tags = "".join(f'<a rel="tag">small-tag-{i}</a>' for i in range(5))
+        html = f"<html><body><h1>Some Title</h1>{few_tags}</body></html>"
         soup = BeautifulSoup(html, "lxml")
         resource = _extract_detail_resource(soup, "https://example.com/post/1")
         assert len(resource.tags) == 5
@@ -283,9 +280,13 @@ class TestMultiSignalTagScoring:
         """5 真标签入 tags，category link 不污染。"""
         result = parse_page(self.EXAMPLE_SITE_HTML, "https://example.com/av/123")
         tags = result.resources[0].tags
-        assert tags == ["偶像", "巨乳", "独角戏", "痴女", "纪录片"], (
-            f"Expected 5 real tags without category; got {tags}"
-        )
+        assert tags == [
+            "偶像",
+            "巨乳",
+            "独角戏",
+            "痴女",
+            "纪录片",
+        ], f"Expected 5 real tags without category; got {tags}"
 
     def test_example_site_category_detected(self):
         """class="cat" + /theme/ 归类为 category，填入 Resource.category。"""
@@ -302,9 +303,11 @@ class TestMultiSignalTagScoring:
         """class 名不含 'tag' 的容器也能抓到 tag（靠 href path 信号）。"""
         result = parse_page(self.POST_META_HTML, "https://example.com/post/42")
         tags = result.resources[0].tags
-        assert tags == ["Python", "Web", "Performance"], (
-            f"Expected tag extraction via href signals; got {tags}"
-        )
+        assert tags == [
+            "Python",
+            "Web",
+            "Performance",
+        ], f"Expected tag extraction via href signals; got {tags}"
 
     def test_breadcrumb_overrides_detected_category(self):
         """优先级: breadcrumb > detected category link > URL 首段。"""
@@ -379,7 +382,13 @@ class TestListPage:
     def test_resource_titles(self):
         result = parse_page(LIST_HTML, "https://example.com/blog")
         titles = [r.title for r in result.resources]
-        assert titles == ["Post One", "Post Two", "Post Three", "Post Four", "Post Five"]
+        assert titles == [
+            "Post One",
+            "Post Two",
+            "Post Three",
+            "Post Four",
+            "Post Five",
+        ]
 
     def test_resource_urls(self):
         result = parse_page(LIST_HTML, "https://example.com/blog")
@@ -409,12 +418,12 @@ class TestMissingFields:
 
     def test_title_fallback_to_title_tag(self):
         """When only <title> is present, title is extracted (suffix stripped)."""
-        html = '<html><head><title>My Page | MySite</title></head><body><article><h1>My Page</h1><p>Content</p></article></body></html>'
+        html = "<html><head><title>My Page | MySite</title></head><body><article><h1>My Page</h1><p>Content</p></article></body></html>"
         result = parse_page(html, "https://example.com/my-page")
         assert result.resources[0].title == "My Page"
 
     def test_default_metrics(self):
-        html = '<html><head><title>No Metrics</title></head><body><article><h1>No Metrics</h1></article></body></html>'
+        html = "<html><head><title>No Metrics</title></head><body><article><h1>No Metrics</h1></article></body></html>"
         result = parse_page(html, "https://example.com/no-metrics")
         r = result.resources[0]
         assert r.views == 0
@@ -422,7 +431,7 @@ class TestMissingFields:
         assert r.hearts == 0
 
     def test_empty_tags(self):
-        html = '<html><head><title>No Tags</title></head><body><article><h1>No Tags</h1></article></body></html>'
+        html = "<html><head><title>No Tags</title></head><body><article><h1>No Tags</h1></article></body></html>"
         result = parse_page(html, "https://example.com/no-tags")
         assert result.resources[0].tags == []
 
@@ -458,7 +467,9 @@ class TestLinkExtraction:
 
     def test_no_anchors(self):
         result = parse_page(LINK_HTML, "https://example.com")
-        assert not any("#" in link and link.endswith("#section") for link in result.links)
+        assert not any(
+            "#" in link and link.endswith("#section") for link in result.links
+        )
 
     def test_no_javascript(self):
         result = parse_page(LINK_HTML, "https://example.com")
@@ -475,6 +486,7 @@ class TestLinkExtraction:
 # pages that have a "Related articles" sidebar block before the real
 # content (or list pages misclassified as detail).
 # ---------------------------------------------------------------------------
+
 
 class TestPickMainContainer:
     def _pick(self, html: str):
@@ -602,9 +614,10 @@ class TestDetailResourceMultiArticleRegression:
         assert result.page_type == "detail"
         assert len(result.resources) == 1
         r = result.resources[0]
-        assert r.tags == ["real-tag-1", "real-tag-2"], (
-            f"Expected only real-article tags, got {r.tags}"
-        )
+        assert r.tags == [
+            "real-tag-1",
+            "real-tag-2",
+        ], f"Expected only real-article tags, got {r.tags}"
         # og:image takes priority over container <img>, so cover_url
         # is not a meaningful regression marker here. The tag scoping
         # is the load-bearing assertion.
@@ -663,9 +676,13 @@ class TestParseMetricNumber:
 
     def test_year_guard_takes_next_match_when_year_skipped(self):
         # First number is a year; second is the real metric.
-        assert _parse_metric_number(
-            "© 2010 — likes 42", year_guard=True,
-        ) == 42
+        assert (
+            _parse_metric_number(
+                "© 2010 — likes 42",
+                year_guard=True,
+            )
+            == 42
+        )
 
     def test_no_match_returns_none(self):
         assert _parse_metric_number("no numbers here", year_guard=False) is None
@@ -693,9 +710,7 @@ class TestExtractMetric:
 
     def test_year_guard_in_footer_context(self):
         # Footer with copyright AND a "view" keyword — bare 2010 is rejected.
-        s = self._scope(
-            '<footer>page views 0 © 2010 by example</footer>'
-        )
+        s = self._scope("<footer>page views 0 © 2010 by example</footer>")
         # The "0" is the real (zero) metric; year guard prevents 2010 from
         # being returned as a fallback when 0 already matched.
         assert _extract_metric(s, ["views"]) == 0
@@ -704,9 +719,7 @@ class TestExtractMetric:
         """When the keyword's parent text starts with a copyright year
         followed by a real metric, we should skip the year and return
         the real metric."""
-        s = self._scope(
-            '<footer>views since © 2010: 4096</footer>'
-        )
+        s = self._scope("<footer>views since © 2010: 4096</footer>")
         assert _extract_metric(s, ["views"]) == 4096
 
     def test_scoping_prevents_sidebar_leak(self):
@@ -726,9 +739,7 @@ class TestExtractMetric:
         assert _extract_metric(article, ["views"]) == 0
 
     def test_sibling_traversal_still_works(self):
-        s = self._scope(
-            "<div><span>views</span><span>42</span></div>"
-        )
+        s = self._scope("<div><span>views</span><span>42</span></div>")
         assert _extract_metric(s, ["views"]) == 42
 
     def test_skips_script_and_style(self):
@@ -786,7 +797,8 @@ class TestListPageDetectionGeneralization:
       - rejects javascript:/# anchors as card candidates.
     """
 
-    GRID_HTML = """\
+    GRID_HTML = (
+        """\
 <html><head><meta property="og:title" content="Grid Page">
 <title>Grid</title></head>
 <body>
@@ -795,15 +807,19 @@ class TestListPageDetectionGeneralization:
 <div class="card-widget-b"><img src="/logo.png"/> Recent</div>
 <!-- Widget .card count is 2; grid below is the real content. -->
 <div class="grid">
-"""+ "".join(
-        f'<div class="item"><a href="/video/v{i}/"><img src="/p/{i}.jpg" alt="Video {i} — full title"/></a></div>'
-        for i in range(15)
-    ) + """
+"""
+        + "".join(
+            f'<div class="item"><a href="/video/v{i}/"><img src="/p/{i}.jpg" alt="Video {i} — full title"/></a></div>'
+            for i in range(15)
+        )
+        + """
 </div>
 </body></html>
 """
+    )
 
-    LISTING_PATH_HTML = """\
+    LISTING_PATH_HTML = (
+        """\
 <html><head>
 <meta property="og:title" content="Latest Updates | Site">
 <title>Updates</title>
@@ -811,15 +827,19 @@ class TestListPageDetectionGeneralization:
 <body>
 <section class="content-header"><h1>Latest Updates</h1></section>
 <div class="grid">
-""" + "".join(
-        f'<div class="item"><a href="/video/u{i}/"><img src="/p/{i}.jpg" alt="Update {i}"/></a></div>'
-        for i in range(8)
-    ) + """
+"""
+        + "".join(
+            f'<div class="item"><a href="/video/u{i}/"><img src="/p/{i}.jpg" alt="Update {i}"/></a></div>'
+            for i in range(8)
+        )
+        + """
 </div>
 </body></html>
 """
+    )
 
-    LOGIN_POLLUTION_HTML = """\
+    LOGIN_POLLUTION_HTML = (
+        """\
 <html><head><title>Grid</title></head>
 <body>
 <header>
@@ -829,13 +849,16 @@ class TestListPageDetectionGeneralization:
   </a>
 </header>
 <div class="grid">
-""" + "".join(
-        f'<div class="item"><a href="/video/g{i}/"><img src="/p/{i}.jpg" alt="Video {i}"/></a></div>'
-        for i in range(13)
-    ) + """
+"""
+        + "".join(
+            f'<div class="item"><a href="/video/g{i}/"><img src="/p/{i}.jpg" alt="Video {i}"/></a></div>'
+            for i in range(13)
+        )
+        + """
 </div>
 </body></html>
 """
+    )
 
     def test_rich_link_cards_beat_sparse_dotcards(self):
         """`.card` count of 2 must not eclipse 15 link-cards."""
@@ -864,15 +887,19 @@ class TestListPageDetectionGeneralization:
         """Banner-carousel cards where the only visible text is a short
         promo ribbon (e.g. '精選') should recover the real title from
         img[alt]."""
-        html = """\
+        html = (
+            """\
 <html><head><title>Banner</title></head>
 <body>
-""" + "".join(
-            f'<div class="item"><div class="img-box"><a href="/video/b{i}/">'
-            f'<img src="/p/{i}.jpg" alt="Banner {i} — Long Real Title Here"/>'
-            f'<div class="ribbon">精選</div></a></div></div>'
-            for i in range(10)
-        ) + "</body></html>"
+"""
+            + "".join(
+                f'<div class="item"><div class="img-box"><a href="/video/b{i}/">'
+                f'<img src="/p/{i}.jpg" alt="Banner {i} — Long Real Title Here"/>'
+                f'<div class="ribbon">精選</div></a></div></div>'
+                for i in range(10)
+            )
+            + "</body></html>"
+        )
         r = parse_page(html, "https://example.com/")
         titles = [res.title for res in r.resources]
         assert "精選" not in titles
@@ -952,6 +979,7 @@ class TestListCardDurationTitleRescue:
     def test_no_duration_titles_remain(self):
         """Sanity check across all cards."""
         import re
+
         dur = re.compile(r"^\d{1,2}(?::\d{2}){1,2}$")
         r = parse_page(self.HTML, "https://example.com/")
         assert not [res.title for res in r.resources if dur.fullmatch(res.title)]
@@ -1068,6 +1096,7 @@ class TestKissavsStyleStructuredSite:
 # Unit 2 — Cover image picker (og → twitter → largest qualifying)
 # ---------------------------------------------------------------------------
 
+
 def _img(html: str):
     return BeautifulSoup(html, "lxml").find("img")
 
@@ -1094,9 +1123,7 @@ class TestResolveImgSrc:
         assert _resolve_img_src(i) == "real.jpg"
 
     def test_srcset_picks_largest(self):
-        i = _img(
-            '<img srcset="small.jpg 320w, medium.jpg 640w, large.jpg 1024w">'
-        )
+        i = _img('<img srcset="small.jpg 320w, medium.jpg 640w, large.jpg 1024w">')
         assert _resolve_img_src(i) == "large.jpg"
 
     def test_srcset_no_w_descriptors_picks_first(self):
@@ -1104,7 +1131,7 @@ class TestResolveImgSrc:
         assert _resolve_img_src(i) in ("a.jpg", "b.jpg")
 
     def test_no_src_returns_empty(self):
-        i = _img('<img>')
+        i = _img("<img>")
         assert _resolve_img_src(i) == ""
 
     def test_whitespace_only_src_returns_empty(self):
@@ -1113,36 +1140,45 @@ class TestResolveImgSrc:
 
 
 class TestImgQualifies:
-    @pytest.mark.parametrize("src", [
-        "data:image/png;base64,iVBOR...",
-        "data:image/gif;base64,R0lGODlh...",
-    ])
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "data:image/png;base64,iVBOR...",
+            "data:image/gif;base64,R0lGODlh...",
+        ],
+    )
     def test_data_uri_disqualifies(self, src):
-        i = _img('<img>')
+        i = _img("<img>")
         assert _img_qualifies(i, src) is False
 
-    @pytest.mark.parametrize("src", [
-        "/static/logo.png",
-        "/img/avatar/u123.jpg",
-        "/static/icon-fb.svg",
-        "/spacer.gif",
-        "/assets/placeholder/default.png",
-    ])
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "/static/logo.png",
+            "/img/avatar/u123.jpg",
+            "/static/icon-fb.svg",
+            "/spacer.gif",
+            "/assets/placeholder/default.png",
+        ],
+    )
     def test_icon_url_patterns_disqualify(self, src):
-        i = _img('<img>')
+        i = _img("<img>")
         assert _img_qualifies(i, src) is False
 
-    @pytest.mark.parametrize("src", [
-        # ce:review autofix: tightened icon regex must NOT reject these
-        # legitimate cover slugs that contain the icon-tokens as substrings.
-        "/uploads/iconic-art.jpg",
-        "/cover/hero-blank-canvas.jpg",  # "blank" no longer in icon list
-        "/uploads/pixel-art-cover.png",  # "pixel" no longer in icon list
-        "/cover-iconic-photo.jpg",
-        "/products/2024-spacers-tutorial-thumb.jpg",  # "spacer" needs token isolation
-    ])
+    @pytest.mark.parametrize(
+        "src",
+        [
+            # ce:review autofix: tightened icon regex must NOT reject these
+            # legitimate cover slugs that contain the icon-tokens as substrings.
+            "/uploads/iconic-art.jpg",
+            "/cover/hero-blank-canvas.jpg",  # "blank" no longer in icon list
+            "/uploads/pixel-art-cover.png",  # "pixel" no longer in icon list
+            "/cover-iconic-photo.jpg",
+            "/products/2024-spacers-tutorial-thumb.jpg",  # "spacer" needs token isolation
+        ],
+    )
     def test_legitimate_cover_slugs_pass(self, src):
-        i = _img('<img>')
+        i = _img("<img>")
         assert _img_qualifies(i, src) is True, (
             f"{src} should qualify — icon regex too aggressive"
         )
@@ -1158,7 +1194,7 @@ class TestImgQualifies:
         assert _img_qualifies(i, "/real.jpg") is True
 
     def test_no_dimensions_qualifies(self):
-        i = _img('<img>')
+        i = _img("<img>")
         assert _img_qualifies(i, "/real.jpg") is True
 
     def test_normal_image_qualifies(self):
@@ -1166,7 +1202,7 @@ class TestImgQualifies:
         assert _img_qualifies(i, "/real.jpg") is True
 
     def test_empty_src_disqualifies(self):
-        assert _img_qualifies(_img('<img>'), "") is False
+        assert _img_qualifies(_img("<img>"), "") is False
 
 
 class TestPickCoverImage:
@@ -1182,8 +1218,10 @@ class TestPickCoverImage:
         </body></html>
         """)
         article = soup.find("article")
-        assert _pick_cover_image(soup, article, "https://example.com/post") \
+        assert (
+            _pick_cover_image(soup, article, "https://example.com/post")
             == "https://example.com/cover.jpg"
+        )
 
     def test_og_image_data_uri_falls_through(self):
         soup = self._parse("""
@@ -1206,8 +1244,10 @@ class TestPickCoverImage:
         </body></html>
         """)
         article = soup.find("article")
-        assert _pick_cover_image(soup, article, "https://example.com/") \
+        assert (
+            _pick_cover_image(soup, article, "https://example.com/")
             == "https://cdn.example.com/tw.jpg"
+        )
 
     def test_lazy_load_in_container(self):
         soup = self._parse("""
@@ -1219,8 +1259,10 @@ class TestPickCoverImage:
         </body></html>
         """)
         article = soup.find("article")
-        assert _pick_cover_image(soup, article, "https://example.com/") \
+        assert (
+            _pick_cover_image(soup, article, "https://example.com/")
             == "https://cdn.example.com/real.jpg"
+        )
 
     def test_skips_logo_picks_real(self):
         soup = self._parse("""
@@ -1288,8 +1330,10 @@ class TestPickCoverImage:
         </body></html>
         """)
         article = soup.find("article")
-        assert _pick_cover_image(soup, article, "https://example.com/") \
+        assert (
+            _pick_cover_image(soup, article, "https://example.com/")
             == "https://example.com/path/cover.jpg"
+        )
 
 
 class TestDetailCoverIntegration:
@@ -1309,8 +1353,7 @@ class TestDetailCoverIntegration:
         </body></html>
         """
         result = parse_page(html, "https://example.com/post/1")
-        assert result.resources[0].cover_url == \
-            "https://cdn.example.com/real-cover.jpg"
+        assert result.resources[0].cover_url == "https://cdn.example.com/real-cover.jpg"
 
     def test_detail_skips_logo_picks_real(self):
         """Detail page with logo as first <img> picks the real cover."""
@@ -1333,6 +1376,7 @@ class TestDetailCoverIntegration:
 # ---------------------------------------------------------------------------
 # Unit 3 — Published date precision (CJK + container-scoped + year-guard)
 # ---------------------------------------------------------------------------
+
 
 class TestNormalizeDateTriple:
     def test_pads_single_digit_month_day(self):
@@ -1567,6 +1611,7 @@ class TestDetailDateRegression:
 # ce:review autofix — bugs caught by reviewer pass on Units 1–3
 # ---------------------------------------------------------------------------
 
+
 class TestExtractMetricSharedParentBug:
     """F1 (P0): when multiple metric keywords share a parent, each keyword
     must anchor its OWN number — not collapse to the first match."""
@@ -1590,7 +1635,8 @@ class TestExtractMetricSharedParentBug:
         # The canonical "label: value" reading order has number after the
         # keyword, so it should beat a stray number to the left.
         s = BeautifulSoup(
-            "<div><span>1234 — views 9999</span></div>", "lxml",
+            "<div><span>1234 — views 9999</span></div>",
+            "lxml",
         )
         assert _extract_metric(s, ["views"]) == 9999
 
@@ -1601,7 +1647,7 @@ class TestExtractMetricSiblingYearLeak:
 
     def test_sibling_with_copyright_does_not_leak_year(self):
         s = BeautifulSoup(
-            '<div><span>views</span><span>© 2010 Example</span></div>',
+            "<div><span>views</span><span>© 2010 Example</span></div>",
             "lxml",
         )
         assert _extract_metric(s, ["views"]) == 0
@@ -1610,9 +1656,9 @@ class TestExtractMetricSiblingYearLeak:
         # Far-downstream siblings should not be considered. Build a parent
         # with > _METRIC_SIBLING_CAP empty siblings and one number at the end.
         siblings = "".join(
-            f'<span>noise{i}</span>' for i in range(_METRIC_SIBLING_CAP + 2)
+            f"<span>noise{i}</span>" for i in range(_METRIC_SIBLING_CAP + 2)
         )
-        html = f'<div><span>views</span>{siblings}<span>9999</span></div>'
+        html = f"<div><span>views</span>{siblings}<span>9999</span></div>"
         s = BeautifulSoup(html, "lxml")
         # Far-end 9999 is past the cap → returns 0.
         assert _extract_metric(s, ["views"]) == 0
@@ -1654,16 +1700,21 @@ class TestPickCoverZeroAreaTiebreaker:
     cover; first = often byline avatar / decorative top image)."""
 
     def test_zero_area_tie_picks_last(self):
-        soup = BeautifulSoup("""
+        soup = BeautifulSoup(
+            """
         <html><body><article>
             <img src="byline-avatar-no-size.jpg">
             <img src="decorative-divider.jpg">
             <img src="real-cover.jpg">
         </article></body></html>
-        """, "lxml")
+        """,
+            "lxml",
+        )
         article = soup.find("article")
-        assert _pick_cover_image(soup, article, "https://example.com/") == \
-            "https://example.com/real-cover.jpg"
+        assert (
+            _pick_cover_image(soup, article, "https://example.com/")
+            == "https://example.com/real-cover.jpg"
+        )
 
 
 class TestJsonLdZeroNotOverridden:
@@ -1707,9 +1758,9 @@ class TestIsoDateRegexNoTrailingBoundary:
 
     def test_iso_followed_by_unexpected_char_still_matches_date(self):
         soup = BeautifulSoup(
-            '<html><body><article>'
+            "<html><body><article>"
             '<time datetime="2025-03-15Tweird-suffix">x</time>'
-            '</article></body></html>',
+            "</article></body></html>",
             "lxml",
         )
         article = soup.find("article")
@@ -1723,10 +1774,8 @@ class TestMetricSiblingCapBoundary:
 
     def test_traversal_uses_constant(self):
         # Cap+1 inline siblings; the metric in the (cap+2)-th is unreachable.
-        sibs = "".join(
-            f'<span>x{i}</span>' for i in range(_METRIC_SIBLING_CAP)
-        )
-        html = f'<div><span>views</span>{sibs}<span>9999</span></div>'
+        sibs = "".join(f"<span>x{i}</span>" for i in range(_METRIC_SIBLING_CAP))
+        html = f"<div><span>views</span>{sibs}<span>9999</span></div>"
         s = BeautifulSoup(html, "lxml")
         assert _extract_metric(s, ["views"]) == 0
 
@@ -1734,6 +1783,7 @@ class TestMetricSiblingCapBoundary:
 # ---------------------------------------------------------------------------
 # Plan 005 Unit 2 — OpenGraph + Twitter Cards source extractors
 # ---------------------------------------------------------------------------
+
 
 class TestOpenGraphExtractor:
     """`_extract_opengraph(soup) -> dict` returns omit-from-dict for
@@ -1745,6 +1795,7 @@ class TestOpenGraphExtractor:
 
     def test_full_og_returns_all_fields(self):
         from crawler.parser import _extract_opengraph
+
         soup = self._soup("""
             <meta property="og:title" content="Real Title">
             <meta property="og:image" content="https://cdn.example.com/p/1.jpg">
@@ -1764,6 +1815,7 @@ class TestOpenGraphExtractor:
 
     def test_empty_og_returns_empty_dict(self):
         from crawler.parser import _extract_opengraph
+
         out = _extract_opengraph(self._soup("<p>body</p>"))
         assert out == {}
 
@@ -1772,9 +1824,9 @@ class TestOpenGraphExtractor:
         _strip_title_site_suffix. Without this, kissavs-class sites
         ship the SEO chain into Resource.title."""
         from crawler.parser import _extract_opengraph
+
         soup = self._soup(
-            '<meta property="og:title" '
-            'content="GRACE-029｜角色剧情｜KISSAVS">'
+            '<meta property="og:title" content="GRACE-029｜角色剧情｜KISSAVS">'
         )
         out = _extract_opengraph(soup)
         assert out["title"] == "GRACE-029"
@@ -1783,12 +1835,14 @@ class TestOpenGraphExtractor:
         """Single pipe is often legitimate punctuation (e.g. "X: Y | Z"
         in article titles). Suffix strip only fires on 2+ pipes."""
         from crawler.parser import _extract_opengraph
+
         soup = self._soup('<meta property="og:title" content="Item | Site">')
         out = _extract_opengraph(soup)
         assert out["title"] == "Item | Site"
 
     def test_product_code_hyphen_preserved(self):
         from crawler.parser import _extract_opengraph
+
         soup = self._soup('<meta property="og:title" content="GRACE-029 Title">')
         out = _extract_opengraph(soup)
         assert "GRACE-029" in out["title"]
@@ -1797,6 +1851,7 @@ class TestOpenGraphExtractor:
         """og:image pointing at a site logo / default image is rejected
         so downstream sees 'source didn't provide cover_url'."""
         from crawler.parser import _extract_opengraph
+
         for placeholder in [
             "https://site.example/static/default.png",
             "https://site.example/images/site-logo.svg",
@@ -1804,14 +1859,13 @@ class TestOpenGraphExtractor:
             "https://x.com/no-image.png",
             "https://x.com/placeholder.webp",
         ]:
-            soup = self._soup(
-                f'<meta property="og:image" content="{placeholder}">'
-            )
+            soup = self._soup(f'<meta property="og:image" content="{placeholder}">')
             out = _extract_opengraph(soup)
             assert "cover_url" not in out, f"placeholder not filtered: {placeholder}"
 
     def test_real_image_accepted(self):
         from crawler.parser import _extract_opengraph
+
         soup = self._soup(
             '<meta property="og:image" '
             'content="https://cdn.example/uploads/2026/item-042.jpg">'
@@ -1823,12 +1877,14 @@ class TestOpenGraphExtractor:
         """`<meta property="og:title" content="">` is 'source gave up' —
         we omit from dict, letting next priority source try."""
         from crawler.parser import _extract_opengraph
+
         soup = self._soup('<meta property="og:title" content="">')
         out = _extract_opengraph(soup)
         assert "title" not in out
 
     def test_article_tags_deduped_in_order(self):
         from crawler.parser import _extract_opengraph
+
         soup = self._soup("""
             <meta property="article:tag" content="python">
             <meta property="article:tag" content="web">
@@ -1841,6 +1897,7 @@ class TestOpenGraphExtractor:
     def test_tags_rejected_when_stuffing(self):
         """20 one-char tags = SEO soup; filter out so DOM scorer wins."""
         from crawler.parser import _extract_opengraph
+
         metas = "\n".join(
             f'<meta property="article:tag" content="w{i}">' for i in range(25)
         )
@@ -1854,6 +1911,7 @@ class TestTwitterCardsExtractor:
 
     def test_full_twitter(self):
         from crawler.parser import _extract_twitter_cards
+
         soup = self._soup("""
             <meta name="twitter:title" content="Tweet Title">
             <meta name="twitter:image" content="https://x.com/p/1.jpg">
@@ -1870,6 +1928,7 @@ class TestTwitterCardsExtractor:
         """Older Twitter Card spec used `twitter:image:src` instead of
         `twitter:image`. Accept both with image-first priority."""
         from crawler.parser import _extract_twitter_cards
+
         soup = self._soup(
             '<meta name="twitter:image:src" content="https://x.com/legacy.jpg">'
         )
@@ -1878,6 +1937,7 @@ class TestTwitterCardsExtractor:
 
     def test_twitter_image_preferred_over_src(self):
         from crawler.parser import _extract_twitter_cards
+
         soup = self._soup("""
             <meta name="twitter:image" content="https://x.com/new.jpg">
             <meta name="twitter:image:src" content="https://x.com/old.jpg">
@@ -1887,11 +1947,13 @@ class TestTwitterCardsExtractor:
 
     def test_empty_twitter(self):
         from crawler.parser import _extract_twitter_cards
+
         out = _extract_twitter_cards(self._soup("<p>body</p>"))
         assert out == {}
 
     def test_twitter_placeholder_image_rejected(self):
         from crawler.parser import _extract_twitter_cards
+
         soup = self._soup(
             '<meta name="twitter:image" content="https://site/default.png">'
         )
@@ -1904,60 +1966,76 @@ class TestTagKeywordsParsing:
 
     def test_python_list(self):
         from crawler.parser import _parse_tags_keywords
+
         assert _parse_tags_keywords(["a", "b", "c"]) == ["a", "b", "c"]
 
     def test_comma_delimited_string(self):
         from crawler.parser import _parse_tags_keywords
+
         assert _parse_tags_keywords("python, web, perf") == ["python", "web", "perf"]
 
     def test_cjk_delimiters(self):
         from crawler.parser import _parse_tags_keywords
+
         assert _parse_tags_keywords("偶像，巨乳、痴女;纪录片") == [
-            "偶像", "巨乳", "痴女", "纪录片"
+            "偶像",
+            "巨乳",
+            "痴女",
+            "纪录片",
         ]
 
     def test_empty_string(self):
         from crawler.parser import _parse_tags_keywords
+
         assert _parse_tags_keywords("") == []
 
     def test_none(self):
         from crawler.parser import _parse_tags_keywords
+
         assert _parse_tags_keywords(None) == []
 
     def test_dedup_preserves_order(self):
         from crawler.parser import _parse_tags_keywords
+
         assert _parse_tags_keywords(["a", "b", "a", "c"]) == ["a", "b", "c"]
 
     def test_unsupported_type_returns_empty(self):
         from crawler.parser import _parse_tags_keywords
+
         assert _parse_tags_keywords({"unexpected": "dict"}) == []
 
 
 class TestStuffingGate:
     def test_normal_tag_list_passes(self):
         from crawler.parser import _tags_pass_stuffing_gate
+
         assert _tags_pass_stuffing_gate(["python", "web", "performance"]) is True
 
     def test_too_many_tags_rejected(self):
         from crawler.parser import _tags_pass_stuffing_gate
+
         assert _tags_pass_stuffing_gate([f"t{i}" for i in range(20)]) is False
 
     def test_too_short_average_rejected(self):
         from crawler.parser import _tags_pass_stuffing_gate
+
         # 5 one-char tags → avg 1 < 2
         assert _tags_pass_stuffing_gate(["a", "b", "c", "d", "e"]) is False
 
     def test_empty_list_rejected(self):
         from crawler.parser import _tags_pass_stuffing_gate
+
         assert _tags_pass_stuffing_gate([]) is False
 
     def test_boundary_15_passes(self):
         from crawler.parser import _tags_pass_stuffing_gate
+
         # 15 tags each 4 chars → at the edge but valid
         assert _tags_pass_stuffing_gate([f"tag{i:02d}" for i in range(15)]) is True
 
     def test_boundary_16_rejected(self):
         from crawler.parser import _tags_pass_stuffing_gate
+
         assert _tags_pass_stuffing_gate([f"tag{i:02d}" for i in range(16)]) is False
 
 
@@ -1970,6 +2048,7 @@ class TestMicrodataExtractor:
 
     def test_happy_path_article(self):
         from crawler.parser import _extract_microdata
+
         soup = self._soup("""
             <article itemscope itemtype="https://schema.org/Article">
                 <h1 itemprop="name">Microdata Title</h1>
@@ -1992,11 +2071,13 @@ class TestMicrodataExtractor:
 
     def test_no_itemscope_returns_empty(self):
         from crawler.parser import _extract_microdata
+
         out = _extract_microdata(self._soup("<p>no microdata here</p>"))
         assert out == {}
 
     def test_image_src_from_img_tag(self):
         from crawler.parser import _extract_microdata
+
         soup = self._soup(
             '<article itemscope itemtype="https://schema.org/Article">'
             '<img itemprop="image" src="https://cdn/item.jpg"></article>'
@@ -2006,6 +2087,7 @@ class TestMicrodataExtractor:
 
     def test_published_date_from_meta_content(self):
         from crawler.parser import _extract_microdata
+
         soup = self._soup(
             '<article itemscope itemtype="https://schema.org/Article">'
             '<meta itemprop="datePublished" content="2026-04-17T10:00:00Z"></article>'
@@ -2015,10 +2097,11 @@ class TestMicrodataExtractor:
 
     def test_time_datetime_attribute(self):
         from crawler.parser import _extract_microdata
+
         soup = self._soup(
             '<article itemscope itemtype="https://schema.org/Article">'
             '<time itemprop="datePublished" datetime="2026-04-17">Apr 17</time>'
-            '</article>'
+            "</article>"
         )
         out = _extract_microdata(soup)
         assert out["published_at"] == "2026-04-17"
@@ -2026,6 +2109,7 @@ class TestMicrodataExtractor:
     def test_multiple_top_scopes_picks_largest(self):
         """Page has BreadcrumbList (small) + Article (large). Article wins."""
         from crawler.parser import _extract_microdata
+
         soup = self._soup("""
             <nav itemscope itemtype="https://schema.org/BreadcrumbList">
                 <span itemprop="name">Home</span>
@@ -2041,6 +2125,7 @@ class TestMicrodataExtractor:
     def test_nested_itemscope_does_not_pollute(self):
         """A nested entity's itemprop must not leak into the parent."""
         from crawler.parser import _extract_microdata
+
         soup = self._soup("""
             <article itemscope itemtype="https://schema.org/Article">
                 <h1 itemprop="name">Outer Title</h1>
@@ -2054,16 +2139,18 @@ class TestMicrodataExtractor:
 
     def test_placeholder_image_rejected(self):
         from crawler.parser import _extract_microdata
+
         soup = self._soup(
             '<article itemscope itemtype="https://schema.org/Article">'
             '<img itemprop="image" src="https://site/static/default.png">'
-            '</article>'
+            "</article>"
         )
         out = _extract_microdata(soup)
         assert "cover_url" not in out
 
     def test_stuffed_keywords_rejected(self):
         from crawler.parser import _extract_microdata
+
         stuffed = ",".join(f"w{i}" for i in range(25))
         soup = self._soup(
             f'<article itemscope itemtype="https://schema.org/Article">'
@@ -2076,15 +2163,17 @@ class TestMicrodataExtractor:
         """`itemscope` without `itemtype` fails the selector; graceful
         empty return. (Our selector requires both.)"""
         from crawler.parser import _extract_microdata
-        out = _extract_microdata(self._soup(
-            '<div itemscope><span itemprop="name">X</span></div>'
-        ))
+
+        out = _extract_microdata(
+            self._soup('<div itemscope><span itemprop="name">X</span></div>')
+        )
         assert out == {}
 
 
 # ---------------------------------------------------------------------------
 # Plan 005 Unit 4 — JSON-LD extractor (full field coverage)
 # ---------------------------------------------------------------------------
+
 
 class TestJsonLdExtractorFieldCoverage:
     """_extract_jsonld(blocks) consolidates metrics + all structured
@@ -2093,23 +2182,30 @@ class TestJsonLdExtractorFieldCoverage:
 
     def test_video_object_full(self):
         from crawler.parser import _extract_jsonld
-        blocks = [{
-            "@type": "VideoObject",
-            "name": "Grace 029",
-            "image": "https://cdn/p.jpg",
-            "description": "A video description.",
-            "datePublished": "2026-04-17",
-            "articleSection": "Roleplay",
-            "keywords": "python, web, perf",
-            "interactionStatistic": [
-                {"@type": "InteractionCounter",
-                 "interactionType": {"@type": "WatchAction"},
-                 "userInteractionCount": 14143},
-                {"@type": "InteractionCounter",
-                 "interactionType": {"@type": "LikeAction"},
-                 "userInteractionCount": 3096},
-            ],
-        }]
+
+        blocks = [
+            {
+                "@type": "VideoObject",
+                "name": "Grace 029",
+                "image": "https://cdn/p.jpg",
+                "description": "A video description.",
+                "datePublished": "2026-04-17",
+                "articleSection": "Roleplay",
+                "keywords": "python, web, perf",
+                "interactionStatistic": [
+                    {
+                        "@type": "InteractionCounter",
+                        "interactionType": {"@type": "WatchAction"},
+                        "userInteractionCount": 14143,
+                    },
+                    {
+                        "@type": "InteractionCounter",
+                        "interactionType": {"@type": "LikeAction"},
+                        "userInteractionCount": 3096,
+                    },
+                ],
+            }
+        ]
         out = _extract_jsonld(blocks)
         assert out == {
             "title": "Grace 029",
@@ -2124,19 +2220,21 @@ class TestJsonLdExtractorFieldCoverage:
 
     def test_no_detail_type_returns_empty(self):
         from crawler.parser import _extract_jsonld
+
         blocks = [{"@type": "BreadcrumbList", "itemListElement": []}]
         assert _extract_jsonld(blocks) == {}
 
     def test_empty_blocks(self):
         from crawler.parser import _extract_jsonld
+
         assert _extract_jsonld([]) == {}
 
     def test_article_plus_breadcrumb_picks_article(self):
         from crawler.parser import _extract_jsonld
+
         blocks = [
             {"@type": "BreadcrumbList", "itemListElement": [{"name": "Home"}]},
-            {"@type": "Article", "name": "Article Title",
-             "image": "https://cdn/a.jpg"},
+            {"@type": "Article", "name": "Article Title", "image": "https://cdn/a.jpg"},
         ]
         out = _extract_jsonld(blocks)
         assert out["title"] == "Article Title"
@@ -2144,78 +2242,104 @@ class TestJsonLdExtractorFieldCoverage:
 
     def test_image_as_dict(self):
         from crawler.parser import _extract_jsonld
-        blocks = [{
-            "@type": "Article",
-            "name": "X",
-            "image": {"@type": "ImageObject", "url": "https://cdn/i.jpg"},
-        }]
+
+        blocks = [
+            {
+                "@type": "Article",
+                "name": "X",
+                "image": {"@type": "ImageObject", "url": "https://cdn/i.jpg"},
+            }
+        ]
         assert _extract_jsonld(blocks)["cover_url"] == "https://cdn/i.jpg"
 
     def test_image_as_list(self):
         from crawler.parser import _extract_jsonld
-        blocks = [{
-            "@type": "Article",
-            "name": "X",
-            "image": ["https://cdn/first.jpg", "https://cdn/second.jpg"],
-        }]
+
+        blocks = [
+            {
+                "@type": "Article",
+                "name": "X",
+                "image": ["https://cdn/first.jpg", "https://cdn/second.jpg"],
+            }
+        ]
         assert _extract_jsonld(blocks)["cover_url"] == "https://cdn/first.jpg"
 
     def test_thumbnail_url_fallback(self):
         from crawler.parser import _extract_jsonld
-        blocks = [{
-            "@type": "Article",
-            "name": "X",
-            "thumbnailUrl": "https://cdn/thumb.jpg",
-        }]
+
+        blocks = [
+            {
+                "@type": "Article",
+                "name": "X",
+                "thumbnailUrl": "https://cdn/thumb.jpg",
+            }
+        ]
         assert _extract_jsonld(blocks)["cover_url"] == "https://cdn/thumb.jpg"
 
     def test_keywords_as_list(self):
         from crawler.parser import _extract_jsonld
-        blocks = [{"@type": "Article", "name": "X",
-                   "keywords": ["python", "web", "perf"]}]
+
+        blocks = [
+            {"@type": "Article", "name": "X", "keywords": ["python", "web", "perf"]}
+        ]
         assert _extract_jsonld(blocks)["tags"] == ["python", "web", "perf"]
 
     def test_keywords_cjk_delimiters(self):
         from crawler.parser import _extract_jsonld
-        blocks = [{"@type": "Article", "name": "X",
-                   "keywords": "偶像，巨乳、痴女;纪录片"}]
+
+        blocks = [
+            {"@type": "Article", "name": "X", "keywords": "偶像，巨乳、痴女;纪录片"}
+        ]
         assert _extract_jsonld(blocks)["tags"] == ["偶像", "巨乳", "痴女", "纪录片"]
 
     def test_keywords_stuffed_dropped(self):
         from crawler.parser import _extract_jsonld
-        blocks = [{"@type": "Article", "name": "X",
-                   "keywords": ",".join(f"w{i}" for i in range(25))}]
+
+        blocks = [
+            {
+                "@type": "Article",
+                "name": "X",
+                "keywords": ",".join(f"w{i}" for i in range(25)),
+            }
+        ]
         assert "tags" not in _extract_jsonld(blocks)
 
     def test_at_type_as_list(self):
         """schema.org allows multiple types on one entity."""
         from crawler.parser import _extract_jsonld
+
         blocks = [{"@type": ["CreativeWork", "VideoObject"], "name": "X"}]
         assert _extract_jsonld(blocks)["title"] == "X"
 
     def test_uploaddate_fallback(self):
         from crawler.parser import _extract_jsonld
-        blocks = [{"@type": "VideoObject", "name": "X",
-                   "uploadDate": "2026-01-15"}]
+
+        blocks = [{"@type": "VideoObject", "name": "X", "uploadDate": "2026-01-15"}]
         assert _extract_jsonld(blocks)["published_at"] == "2026-01-15"
 
     def test_metrics_schema_url_form(self):
         """Some sites write http://schema.org/WatchAction — must be parsed."""
         from crawler.parser import _extract_jsonld
-        blocks = [{
-            "@type": "VideoObject",
-            "name": "X",
-            "interactionStatistic": [{
-                "@type": "InteractionCounter",
-                "interactionType": "http://schema.org/WatchAction",
-                "userInteractionCount": 42,
-            }],
-        }]
+
+        blocks = [
+            {
+                "@type": "VideoObject",
+                "name": "X",
+                "interactionStatistic": [
+                    {
+                        "@type": "InteractionCounter",
+                        "interactionType": "http://schema.org/WatchAction",
+                        "userInteractionCount": 42,
+                    }
+                ],
+            }
+        ]
         assert _extract_jsonld(blocks)["views"] == 42
 
     def test_picks_more_complete_entity(self):
         """When multiple detail entities exist, prefer name+image."""
         from crawler.parser import _extract_jsonld
+
         blocks = [
             {"@type": "Article", "name": "Poor"},
             {"@type": "Article", "name": "Rich", "image": "https://cdn/i.jpg"},
@@ -2224,8 +2348,10 @@ class TestJsonLdExtractorFieldCoverage:
 
     def test_placeholder_image_rejected(self):
         from crawler.parser import _extract_jsonld
-        blocks = [{"@type": "Article", "name": "X",
-                   "image": "https://cdn/default-cover.png"}]
+
+        blocks = [
+            {"@type": "Article", "name": "X", "image": "https://cdn/default-cover.png"}
+        ]
         assert "cover_url" not in _extract_jsonld(blocks)
 
 
@@ -2233,14 +2359,18 @@ class TestJsonLdExtractorFieldCoverage:
 # Plan 005 Unit 5 — merge_by_priority (pure) + _extract_structured (wrapper)
 # ---------------------------------------------------------------------------
 
+
 class TestMergeByPriority:
     """Pure-dict tests for priority/validation/omit semantics — no BS4."""
 
     def test_single_source(self):
         from crawler.parser import _merge_by_priority
-        merged, prov, desc = _merge_by_priority([
-            ("jsonld", {"title": "T", "views": 10}),
-        ])
+
+        merged, prov, desc = _merge_by_priority(
+            [
+                ("jsonld", {"title": "T", "views": 10}),
+            ]
+        )
         assert merged == {"title": "T", "views": 10}
         assert prov["title"] == "jsonld"
         assert prov["views"] == "jsonld"
@@ -2249,28 +2379,37 @@ class TestMergeByPriority:
 
     def test_higher_priority_wins(self):
         from crawler.parser import _merge_by_priority
-        merged, prov, _ = _merge_by_priority([
-            ("jsonld", {"title": "From JSON-LD"}),
-            ("opengraph", {"title": "From OG"}),
-        ])
+
+        merged, prov, _ = _merge_by_priority(
+            [
+                ("jsonld", {"title": "From JSON-LD"}),
+                ("opengraph", {"title": "From OG"}),
+            ]
+        )
         assert merged["title"] == "From JSON-LD"
         assert prov["title"] == "jsonld"
 
     def test_fills_missing_from_lower(self):
         from crawler.parser import _merge_by_priority
-        merged, prov, _ = _merge_by_priority([
-            ("jsonld", {"views": 100}),
-            ("opengraph", {"title": "OG Title"}),
-        ])
+
+        merged, prov, _ = _merge_by_priority(
+            [
+                ("jsonld", {"views": 100}),
+                ("opengraph", {"title": "OG Title"}),
+            ]
+        )
         assert merged == {"views": 100, "title": "OG Title"}
         assert prov["views"] == "jsonld"
         assert prov["title"] == "opengraph"
 
     def test_description_propagates_separately(self):
         from crawler.parser import _merge_by_priority
-        merged, prov, desc = _merge_by_priority([
-            ("jsonld", {"title": "T", "description": "desc from jl"}),
-        ])
+
+        merged, prov, desc = _merge_by_priority(
+            [
+                ("jsonld", {"title": "T", "description": "desc from jl"}),
+            ]
+        )
         assert desc == "desc from jl"
         # description is NOT in merged_fields or provenance
         assert "description" not in merged
@@ -2278,44 +2417,59 @@ class TestMergeByPriority:
 
     def test_description_first_source_wins(self):
         from crawler.parser import _merge_by_priority
-        _, _, desc = _merge_by_priority([
-            ("jsonld", {"description": "jl"}),
-            ("opengraph", {"description": "og"}),
-        ])
+
+        _, _, desc = _merge_by_priority(
+            [
+                ("jsonld", {"description": "jl"}),
+                ("opengraph", {"description": "og"}),
+            ]
+        )
         assert desc == "jl"
 
     def test_description_falls_through_to_lower_priority(self):
         from crawler.parser import _merge_by_priority
-        _, _, desc = _merge_by_priority([
-            ("jsonld", {"title": "T"}),
-            ("opengraph", {"description": "og desc"}),
-        ])
+
+        _, _, desc = _merge_by_priority(
+            [
+                ("jsonld", {"title": "T"}),
+                ("opengraph", {"description": "og desc"}),
+            ]
+        )
         assert desc == "og desc"
 
     def test_invalid_views_falls_through(self):
         """JSON-LD returns views as string → invalid, OG doesn't have
         views, so field stays missing (DOM will fill later in Unit 6)."""
         from crawler.parser import _merge_by_priority
-        merged, prov, _ = _merge_by_priority([
-            ("jsonld", {"views": "not-an-int"}),
-        ])
+
+        merged, prov, _ = _merge_by_priority(
+            [
+                ("jsonld", {"views": "not-an-int"}),
+            ]
+        )
         assert "views" not in merged
         assert prov["views"] == "missing"
 
     def test_views_zero_is_valid(self):
         """Correctness #2: JSON-LD-declared 0 is a real signal."""
         from crawler.parser import _merge_by_priority
-        merged, prov, _ = _merge_by_priority([
-            ("jsonld", {"views": 0}),
-        ])
+
+        merged, prov, _ = _merge_by_priority(
+            [
+                ("jsonld", {"views": 0}),
+            ]
+        )
         assert merged["views"] == 0
         assert prov["views"] == "jsonld"
 
     def test_views_negative_rejected(self):
         from crawler.parser import _merge_by_priority
-        merged, prov, _ = _merge_by_priority([
-            ("jsonld", {"views": -5}),
-        ])
+
+        merged, prov, _ = _merge_by_priority(
+            [
+                ("jsonld", {"views": -5}),
+            ]
+        )
         assert "views" not in merged
         assert prov["views"] == "missing"
 
@@ -2323,43 +2477,56 @@ class TestMergeByPriority:
         """bool is a subclass of int in Python — explicit reject to
         prevent `{"views": True}` from becoming views=1."""
         from crawler.parser import _merge_by_priority
+
         merged, _, _ = _merge_by_priority([("jsonld", {"views": True})])
         assert "views" not in merged
 
     def test_empty_tags_list_rejected(self):
         from crawler.parser import _merge_by_priority
+
         merged, _, _ = _merge_by_priority([("jsonld", {"tags": []})])
         assert "tags" not in merged
 
     def test_placeholder_cover_rejected(self):
         from crawler.parser import _merge_by_priority
-        merged, _, _ = _merge_by_priority([
-            ("jsonld", {"cover_url": "https://site/static/default.png"}),
-        ])
+
+        merged, _, _ = _merge_by_priority(
+            [
+                ("jsonld", {"cover_url": "https://site/static/default.png"}),
+            ]
+        )
         assert "cover_url" not in merged
 
     def test_non_http_cover_rejected(self):
         from crawler.parser import _merge_by_priority
-        merged, _, _ = _merge_by_priority([
-            ("jsonld", {"cover_url": "not a url"}),
-        ])
+
+        merged, _, _ = _merge_by_priority(
+            [
+                ("jsonld", {"cover_url": "not a url"}),
+            ]
+        )
         assert "cover_url" not in merged
 
     def test_fields_outside_whitelist_ignored(self):
         """Defense: unknown fields silently dropped (don't let a future
         extractor typo pollute merged_fields)."""
         from crawler.parser import _merge_by_priority
-        merged, _, _ = _merge_by_priority([
-            ("jsonld", {"title": "T", "unknown_field": "x"}),
-        ])
+
+        merged, _, _ = _merge_by_priority(
+            [
+                ("jsonld", {"title": "T", "unknown_field": "x"}),
+            ]
+        )
         assert "unknown_field" not in merged
 
     def test_all_sources_empty_produces_all_missing(self):
         from crawler.parser import _merge_by_priority
+
         merged, prov, desc = _merge_by_priority([])
         assert merged == {}
         assert desc == ""
         from crawler.raw_data import PROVENANCE_FIELDS, PROVENANCE_MISSING
+
         for field in PROVENANCE_FIELDS:
             assert prov[field] == PROVENANCE_MISSING
 
@@ -2371,6 +2538,7 @@ class TestExtractStructuredIntegration:
 
     def test_kissavs_style_jsonld_video_wins(self):
         from crawler.parser import _extract_structured
+
         html = """
             <meta property="og:title" content="OG Title">
             <script type="application/ld+json">
@@ -2390,6 +2558,7 @@ class TestExtractStructuredIntegration:
 
     def test_og_only_when_no_jsonld(self):
         from crawler.parser import _extract_structured
+
         html = '<meta property="og:title" content="Only OG">'
         soup = BeautifulSoup(html, "lxml")
         merged, prov, _ = _extract_structured(soup)
@@ -2398,17 +2567,20 @@ class TestExtractStructuredIntegration:
 
     def test_completely_empty_page(self):
         from crawler.parser import _extract_structured
+
         soup = BeautifulSoup("<p>nothing</p>", "lxml")
         merged, prov, desc = _extract_structured(soup)
         assert merged == {}
         assert desc == ""
         from crawler.raw_data import PROVENANCE_MISSING
+
         assert prov["title"] == PROVENANCE_MISSING
 
 
 # ---------------------------------------------------------------------------
 # Plan 005 Unit 6 — _extract_detail_resource with structured-first path
 # ---------------------------------------------------------------------------
+
 
 class TestDetailResourceStructuredFirst:
     """Unit 6 — Resource.raw_data carries provenance + description;
@@ -2446,6 +2618,7 @@ class TestDetailResourceStructuredFirst:
         assert res.cover_url == "https://cdn/j.jpg"
 
         from crawler.raw_data import parse_raw_data
+
         raw = parse_raw_data(res.raw_data)
         assert raw["provenance"]["title"] == "jsonld"
         assert raw["provenance"]["views"] == "jsonld"
@@ -2467,6 +2640,7 @@ class TestDetailResourceStructuredFirst:
         assert res.likes == 7
 
         from crawler.raw_data import parse_raw_data
+
         raw = parse_raw_data(res.raw_data)
         assert raw["provenance"]["title"] == "dom"
         assert raw["provenance"]["views"] == "dom"
@@ -2487,6 +2661,7 @@ class TestDetailResourceStructuredFirst:
         """
         res = self._parse(html)
         from crawler.raw_data import parse_raw_data
+
         raw = parse_raw_data(res.raw_data)
         assert res.title == "OG Title"
         assert res.views == 100
@@ -2503,6 +2678,7 @@ class TestDetailResourceStructuredFirst:
         """
         res = self._parse(html)
         from crawler.raw_data import parse_raw_data
+
         raw = parse_raw_data(res.raw_data)
         assert raw["provenance"]["tags"] == "missing"
         assert raw["provenance"]["views"] == "missing"
@@ -2525,6 +2701,7 @@ class TestDetailResourceStructuredFirst:
         """
         res = self._parse(html, "https://example.com/drama/korean/item-1")
         from crawler.raw_data import parse_raw_data
+
         raw = parse_raw_data(res.raw_data)
         assert res.category == "Korean"
         assert raw["provenance"]["category"] == "dom"
@@ -2538,6 +2715,7 @@ class TestDetailResourceStructuredFirst:
         """
         res = self._parse(html)
         from crawler.raw_data import parse_raw_data
+
         raw = parse_raw_data(res.raw_data)
         assert res.category == "Tech"
         assert raw["provenance"]["category"] == "opengraph"
@@ -2558,6 +2736,7 @@ class TestDetailResourceStructuredFirst:
         """
         res = self._parse(html)
         from crawler.raw_data import parse_raw_data
+
         raw = parse_raw_data(res.raw_data)
         assert res.views == 200
         assert raw["provenance"]["views"] == "dom"
@@ -2565,7 +2744,7 @@ class TestDetailResourceStructuredFirst:
     def test_raw_data_always_valid_json(self):
         """raw_data is always parseable JSON even when every field misses."""
         import json
-        html = "<html><body></body></html>"
+
         # This produces page_type=other, no resources; skip to detail
         # via a minimal article
         html2 = "<html><body><article><h1>x</h1></article></body></html>"
@@ -2580,17 +2759,17 @@ class TestDetailResourceStructuredFirst:
 # Plan 005 Unit 7 — Real-site fixtures (per-source regression baselines)
 # ---------------------------------------------------------------------------
 
+
 class TestStructuredExtractionFixtures:
     """Each fixture exercises one source in isolation (or one known
     priority/reject case) so regressions in a single source-extractor
     surface as a single-fixture failure."""
 
-    FIXTURE_DIR = os.path.join(
-        os.path.dirname(__file__), "fixtures", "structured"
-    )
+    FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "structured")
 
     def _parse(self, fixture_name, url):
         import os
+
         path = os.path.join(self.FIXTURE_DIR, fixture_name)
         with open(path, encoding="utf-8") as f:
             html = f.read()
@@ -2598,6 +2777,7 @@ class TestStructuredExtractionFixtures:
 
     def test_og_only_fixture(self):
         from crawler.raw_data import parse_raw_data
+
         r = self._parse("og_only.html", "https://example.com/articles/og-article")
         assert r.page_type == "detail"
         res = r.resources[0]
@@ -2616,6 +2796,7 @@ class TestStructuredExtractionFixtures:
 
     def test_jsonld_article_fixture(self):
         from crawler.raw_data import parse_raw_data
+
         r = self._parse(
             "jsonld_article.html",
             "https://example.com/analysis/jsonld-article",
@@ -2636,6 +2817,7 @@ class TestStructuredExtractionFixtures:
 
     def test_jsonld_video_full_fixture(self):
         from crawler.raw_data import parse_raw_data
+
         r = self._parse(
             "jsonld_video_full.html",
             "https://example.com/video/v1",
@@ -2654,6 +2836,7 @@ class TestStructuredExtractionFixtures:
 
     def test_twitter_only_fixture(self):
         from crawler.raw_data import parse_raw_data
+
         r = self._parse(
             "twitter_only.html",
             "https://example.com/posts/twitter-post",
@@ -2669,6 +2852,7 @@ class TestStructuredExtractionFixtures:
 
     def test_microdata_article_fixture(self):
         from crawler.raw_data import parse_raw_data
+
         r = self._parse(
             "microdata_article.html",
             "https://example.com/opinion/microdata-piece",
@@ -2690,6 +2874,7 @@ class TestStructuredExtractionFixtures:
         """24 generic SEO keywords in JSON-LD should be rejected;
         DOM's 3 real tags should fill in."""
         from crawler.raw_data import parse_raw_data
+
         r = self._parse(
             "seo_stuffed_keywords.html",
             "https://example.com/posts/stuffed",
@@ -2703,6 +2888,7 @@ class TestStructuredExtractionFixtures:
         """og:image pointing at site-logo.png should be rejected;
         DOM <img> should fill cover_url."""
         from crawler.raw_data import parse_raw_data
+
         r = self._parse(
             "og_placeholder_image.html",
             "https://example.com/posts/placeholder",

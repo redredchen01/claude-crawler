@@ -1,23 +1,28 @@
+from __future__ import annotations
+
 """Tests for crawler.core.fetcher — connection pooling, content-type filter,
 size cap, retry behavior."""
 
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from crawler import config
 from crawler.core import fetcher
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _mk_response(*, status: int = 200, content_type: str = "text/html",
-                 body: bytes = b"<html><body>hi</body></html>",
-                 content_length: str | None = None,
-                 encoding: str | None = "utf-8",
-                 apparent_encoding: str | None = "utf-8") -> MagicMock:
+
+def _mk_response(
+    *,
+    status: int = 200,
+    content_type: str = "text/html",
+    body: bytes = b"<html><body>hi</body></html>",
+    content_length: str | None = None,
+    encoding: str | None = "utf-8",
+    apparent_encoding: str | None = "utf-8",
+) -> MagicMock:
     """Build a MagicMock that quacks like a streaming requests.Response."""
     resp = MagicMock()
     resp.status_code = status
@@ -48,6 +53,7 @@ def _mk_response(*, status: int = 200, content_type: str = "text/html",
 # Session reuse — connection pooling guarantee
 # ---------------------------------------------------------------------------
 
+
 class TestSessionReuse:
     def test_module_session_is_singleton(self):
         s1 = fetcher._SESSION
@@ -75,32 +81,40 @@ class TestSessionReuse:
 # Content-Type filter — non-HTML must be dropped
 # ---------------------------------------------------------------------------
 
+
 class TestContentTypeFilter:
-    @pytest.mark.parametrize("ctype", [
-        "image/jpeg",
-        "image/png",
-        "video/mp4",
-        "application/pdf",
-        "application/zip",
-        "application/octet-stream",
-    ])
+    @pytest.mark.parametrize(
+        "ctype",
+        [
+            "image/jpeg",
+            "image/png",
+            "video/mp4",
+            "application/pdf",
+            "application/zip",
+            "application/octet-stream",
+        ],
+    )
     def test_drops_binary_content_types(self, ctype):
         with patch.object(fetcher._SESSION, "get") as mock_get:
             mock_get.return_value = _mk_response(content_type=ctype)
             assert fetcher.fetch_page("https://example.com/x") is None
 
-    @pytest.mark.parametrize("ctype", [
-        "text/html",
-        "text/html; charset=utf-8",
-        "application/xhtml+xml",
-        "application/xml",
-        "text/plain",
-    ])
+    @pytest.mark.parametrize(
+        "ctype",
+        [
+            "text/html",
+            "text/html; charset=utf-8",
+            "application/xhtml+xml",
+            "application/xml",
+            "text/plain",
+        ],
+    )
     def test_accepts_html_xml_plaintext(self, ctype):
         body = b"<html><body>ok</body></html>"
         with patch.object(fetcher._SESSION, "get") as mock_get:
             mock_get.return_value = _mk_response(
-                content_type=ctype, body=body,
+                content_type=ctype,
+                body=body,
             )
             assert fetcher.fetch_page("https://example.com/x") is not None
 
@@ -114,6 +128,7 @@ class TestContentTypeFilter:
 # ---------------------------------------------------------------------------
 # Response size cap — defends against megabyte responses
 # ---------------------------------------------------------------------------
+
 
 class TestResponseSizeCap:
     def test_drops_via_content_length_header(self):
@@ -159,6 +174,7 @@ class TestResponseSizeCap:
 # Encoding handling
 # ---------------------------------------------------------------------------
 
+
 class TestEncoding:
     def test_uses_header_charset_when_present(self):
         """Content-Type with explicit charset wins over apparent_encoding."""
@@ -189,8 +205,7 @@ class TestEncoding:
 
     def test_falls_back_to_utf8_when_everything_missing(self):
         with patch.object(fetcher._SESSION, "get") as mock_get:
-            resp = _mk_response(body=b"hello", encoding=None,
-                                apparent_encoding=None)
+            resp = _mk_response(body=b"hello", encoding=None, apparent_encoding=None)
             mock_get.return_value = resp
             assert fetcher.fetch_page("https://example.com/x") == "hello"
 
@@ -209,11 +224,15 @@ class TestEncoding:
 # Retry / failure behavior
 # ---------------------------------------------------------------------------
 
+
 class TestRetry:
     def test_retries_then_returns_none(self):
-        with patch.object(fetcher._SESSION, "get",
-                          side_effect=Exception("net down")) as mock_get, \
-             patch("crawler.core.fetcher.time.sleep"):  # don't actually sleep
+        with (
+            patch.object(
+                fetcher._SESSION, "get", side_effect=Exception("net down")
+            ) as mock_get,
+            patch("crawler.core.fetcher.time.sleep"),
+        ):  # don't actually sleep
             result = fetcher.fetch_page("https://example.com/x")
         assert result is None
         assert mock_get.call_count == config.RETRY_COUNT
@@ -227,14 +246,17 @@ class TestRetry:
                 raise v
             return v
 
-        with patch.object(fetcher._SESSION, "get",
-                          side_effect=side_effect), \
-             patch("crawler.core.fetcher.time.sleep"):
+        with (
+            patch.object(fetcher._SESSION, "get", side_effect=side_effect),
+            patch("crawler.core.fetcher.time.sleep"),
+        ):
             assert fetcher.fetch_page("https://example.com/x") is not None
 
     def test_http_error_returns_none(self):
-        with patch.object(fetcher._SESSION, "get") as mock_get, \
-             patch("crawler.core.fetcher.time.sleep"):
+        with (
+            patch.object(fetcher._SESSION, "get") as mock_get,
+            patch("crawler.core.fetcher.time.sleep"),
+        ):
             mock_get.return_value = _mk_response(status=500)
             assert fetcher.fetch_page("https://example.com/x") is None
 
@@ -243,16 +265,20 @@ class TestNonRetryableExceptions:
     """Configuration / content errors return None immediately without
     burning ~13s of retry backoff."""
 
-    @pytest.mark.parametrize("exc_cls,name", [
-        ("InvalidURL", "InvalidURL"),
-        ("MissingSchema", "MissingSchema"),
-        ("InvalidSchema", "InvalidSchema"),
-        ("URLRequired", "URLRequired"),
-        ("TooManyRedirects", "TooManyRedirects"),
-        ("SSLError", "SSLError"),
-    ])
+    @pytest.mark.parametrize(
+        "exc_cls,name",
+        [
+            ("InvalidURL", "InvalidURL"),
+            ("MissingSchema", "MissingSchema"),
+            ("InvalidSchema", "InvalidSchema"),
+            ("URLRequired", "URLRequired"),
+            ("TooManyRedirects", "TooManyRedirects"),
+            ("SSLError", "SSLError"),
+        ],
+    )
     def test_no_retry_on_permanent_failures(self, exc_cls, name):
         from requests import exceptions as rexc
+
         exc = getattr(rexc, exc_cls)("permanent")
 
         slept = []
@@ -260,9 +286,10 @@ class TestNonRetryableExceptions:
         def fake_sleep(s):
             slept.append(s)
 
-        with patch.object(fetcher._SESSION, "get",
-                          side_effect=exc) as mock_get, \
-             patch("crawler.core.fetcher.time.sleep", side_effect=fake_sleep):
+        with (
+            patch.object(fetcher._SESSION, "get", side_effect=exc) as mock_get,
+            patch("crawler.core.fetcher.time.sleep", side_effect=fake_sleep),
+        ):
             assert fetcher.fetch_page("https://example.com/x") is None
         # Exactly one attempt, zero backoff sleeps.
         assert mock_get.call_count == 1, f"{name} should not retry"
@@ -279,9 +306,12 @@ class TestNonRetryableExceptions:
             raise ChunkedEncodingError("connection reset mid-body")
 
         slept = []
-        with patch.object(fetcher._SESSION, "get") as mock_get, \
-             patch("crawler.core.fetcher.time.sleep",
-                   side_effect=lambda s: slept.append(s)):
+        with (
+            patch.object(fetcher._SESSION, "get") as mock_get,
+            patch(
+                "crawler.core.fetcher.time.sleep", side_effect=lambda s: slept.append(s)
+            ),
+        ):
             resp = _mk_response()
             resp.iter_content.side_effect = explode_iter
             mock_get.return_value = resp
@@ -293,6 +323,7 @@ class TestNonRetryableExceptions:
 # ---------------------------------------------------------------------------
 # SSRF gate: redirect-chain validation
 # ---------------------------------------------------------------------------
+
 
 class TestRedirectSafety:
     def _redirect_resp(self, location: str, status: int = 302) -> MagicMock:
@@ -308,6 +339,7 @@ class TestRedirectSafety:
 
     def test_follows_redirect_chain_to_public_target(self, monkeypatch):
         from crawler import config
+
         monkeypatch.setattr(config, "ALLOW_PRIVATE_HOSTS", True)
         responses = [
             self._redirect_resp("https://example.com/final"),
@@ -324,6 +356,7 @@ class TestRedirectSafety:
         """Public URL → 302 → AWS metadata IP must be refused without
         fetching the body. Classic SSRF chain."""
         from crawler import config
+
         monkeypatch.setattr(config, "ALLOW_PRIVATE_HOSTS", False)
 
         # Sequence: first request returns a 302 to the metadata IP. The
@@ -333,9 +366,10 @@ class TestRedirectSafety:
         def fake_get(url, **kwargs):
             return responses.pop(0)
 
-        with patch.object(fetcher._SESSION, "get",
-                          side_effect=fake_get) as mock_get, \
-             patch("crawler.core.fetcher.time.sleep"):
+        with (
+            patch.object(fetcher._SESSION, "get", side_effect=fake_get) as mock_get,
+            patch("crawler.core.fetcher.time.sleep"),
+        ):
             assert fetcher.fetch_page("https://public.example.com/x") is None
         # Exactly one GET fired — the would-be second hop was vetoed.
         assert mock_get.call_count == 1
@@ -343,20 +377,23 @@ class TestRedirectSafety:
     def test_blocks_redirect_chain_exceeding_cap(self, monkeypatch):
         """An infinite-redirect chain (or > MAX_REDIRECTS) is dropped."""
         from crawler import config
+
         monkeypatch.setattr(config, "ALLOW_PRIVATE_HOSTS", True)
 
         def fake_get(url, **kwargs):
             return self._redirect_resp("https://example.com/loop")
 
-        with patch.object(fetcher._SESSION, "get",
-                          side_effect=fake_get) as mock_get, \
-             patch("crawler.core.fetcher.time.sleep"):
+        with (
+            patch.object(fetcher._SESSION, "get", side_effect=fake_get) as mock_get,
+            patch("crawler.core.fetcher.time.sleep"),
+        ):
             assert fetcher.fetch_page("https://example.com/start") is None
         # MAX_REDIRECTS + 1 attempts before giving up.
         assert mock_get.call_count == config.MAX_REDIRECTS + 1
 
     def test_redirect_without_location_header_drops(self, monkeypatch):
         from crawler import config
+
         monkeypatch.setattr(config, "ALLOW_PRIVATE_HOSTS", True)
 
         bad = MagicMock()
@@ -365,14 +402,17 @@ class TestRedirectSafety:
         bad.headers = {}  # no Location
         bad.close = MagicMock()
 
-        with patch.object(fetcher._SESSION, "get", return_value=bad), \
-             patch("crawler.core.fetcher.time.sleep"):
+        with (
+            patch.object(fetcher._SESSION, "get", return_value=bad),
+            patch("crawler.core.fetcher.time.sleep"),
+        ):
             assert fetcher.fetch_page("https://example.com/x") is None
 
     def test_relative_redirect_resolved_against_current_url(self, monkeypatch):
         """302 → '/path' (relative) must resolve against the current URL,
         not the original entry URL."""
         from crawler import config
+
         monkeypatch.setattr(config, "ALLOW_PRIVATE_HOSTS", True)
 
         responses = [

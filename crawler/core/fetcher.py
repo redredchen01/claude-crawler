@@ -1,402 +1,376 @@
-"""Page fetcher with retry logic, connection pooling, and JS rendering detection.
+from __future__ import annotations
 
-Module-level :class:`requests.Session` reuses TCP+TLS connections across all
-worker threads, so a 200-page same-domain crawl pays the handshake cost once
-per host instead of once per page (~10-40s saved at typical RTTs).
+"""Page fetcher with Stealth 7.0 Arsenal.
 
-`fetch_page` also defends against two waste paths:
-  - Non-HTML responses are dropped after the headers come back (Content-Type
-    check). The Frontier already filters URLs by extension, but this catches
-    extension-less URLs (`/download?id=123`) that would otherwise burn a
-    full body download + parser pass on a binary blob.
-  - Bodies larger than ``MAX_RESPONSE_BYTES`` are stream-aborted. A hostile
-    page can't pull megabytes through a worker thread.
+Implements:
+1. Proxy Matrix (IP Rotation)
+2. UA-TLS Alignment
+3. Organic Referer Injection
 """
 
 import logging
+import os
+import random
 import re
+import ssl
+import threading
 import time
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import requests
-from requests.adapters import HTTPAdapter
-from requests.exceptions import (
-    ChunkedEncodingError, ContentDecodingError, InvalidSchema, InvalidURL,
-    MissingSchema, SSLError, TooManyRedirects, URLRequired,
-)
-
-from crawler import config
 from crawler.config import (
-    HTML_CONTENT_TYPE_MARKERS, HTTP_POOL_CONNECTIONS, HTTP_POOL_MAXSIZE,
-    HTTP_TIMEOUT, JS_BODY_MIN_LENGTH, MAX_RESPONSE_BYTES, RETRY_BACKOFF,
-    RETRY_COUNT, USER_AGENT,
+    ALLOW_PRIVATE_HOSTS,
+    HTML_CONTENT_TYPE_MARKERS,
+    HTTP_POOL_CONNECTIONS,
+    HTTP_POOL_MAXSIZE,
+    HTTP_TIMEOUT,
+    JS_BODY_MIN_LENGTH,
+    MAX_RESPONSE_BYTES,
+    MAX_REDIRECTS,
+    RETRY_BACKOFF,
+    RETRY_COUNT,
+    USER_AGENT_POOL,
+    PROXY_POOL,
+    PROXY_ROTATION_ENABLED,
 )
 from crawler.core.url import is_private_host
-
-# ALLOW_PRIVATE_HOSTS and MAX_REDIRECTS are read via `config.NAME` at call
-# time (not imported as constants) so tests and operators can flip them
-# without re-importing the module.
+from crawler.exceptions import NetworkError
+from requests.adapters import HTTPAdapter
 
 logger = logging.getLogger(__name__)
-
-_JS_MARKERS = ("__NEXT_DATA__", "data-reactroot", "__nuxt")
-_STREAM_CHUNK_BYTES = 64 * 1024
-
-# Non-retryable: configuration errors, redirect loops, body-stream corruption.
-# Returning None immediately (vs. retrying 3× with backoff) saves up to 13s
-# per request and keeps the failure_reason classifier from drowning real
-# transient blips in permanent-failure noise.
-_NO_RETRY_EXCEPTIONS = (
-    InvalidURL, InvalidSchema, MissingSchema, URLRequired,
-    TooManyRedirects, SSLError, ChunkedEncodingError, ContentDecodingError,
-)
+_SESSION = requests.Session()
 
 
-def _build_session() -> requests.Session:
-    """Build the shared Session with a tuned connection pool.
+class StealthAdapter(HTTPAdapter):
+    """Aligns TLS fingerprints with User-Agent and handles Proxy configs."""
 
-    ``max_retries=0`` because retry/backoff is handled in :func:`fetch_page`
-    (so we get logging + observability per attempt rather than urllib3's
-    silent internal retry).
-    """
-    sess = requests.Session()
-    adapter = HTTPAdapter(
+    def __init__(self, *args, **kwargs):
+        self._ua = kwargs.pop("user_agent", USER_AGENT_POOL[0])
+        super().__init__(*args, **kwargs)
+
+    def init_poolmanager(self, *args, **kwargs):
+        context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        # UA-TLS Alignment
+        if "Firefox" in self._ua:
+            ciphers = [
+                "TLS_AES_128_GCM_SHA256",
+                "TLS_CHACHA20_POLY1305_SHA256",
+                "ECDHE-ECDSA-AES128-GCM-SHA256",
+            ]
+        else:
+            ciphers = [
+                "ECDHE-ECDSA-AES128-GCM-SHA256",
+                "ECDHE-RSA-AES128-GCM-SHA256",
+                "ECDHE-ECDSA-CHACHA20-POLY1305",
+            ]
+        random.shuffle(ciphers)
+        context.set_ciphers(":".join(ciphers))
+        kwargs["ssl_context"] = context
+        return super().init_poolmanager(*args, **kwargs)
+
+
+class ProxyManager:
+    """Intelligent proxy rotator with health tracking and cooldowns."""
+    def __init__(self, proxies: list[str]):
+        self.proxies = [{"url": p, "fails": 0, "cooldown_until": 0} for p in proxies]
+        self._lock = threading.Lock()
+
+    def get_proxy(self) -> str | None:
+        if not self.proxies: return None
+        with self._lock:
+            now = time.time()
+            available = [p for p in self.proxies if p["cooldown_until"] < now]
+            if not available:
+                # If all cooled down, pick the one with least fails
+                available = sorted(self.proxies, key=lambda x: x["fails"])
+            
+            p = random.choice(available[:3]) # Top 3 healthy options
+            return p["url"]
+
+    def mark_fail(self, proxy_url: str, is_block: bool = False):
+        with self._lock:
+            for p in self.proxies:
+                if p["url"] == proxy_url:
+                    p["fails"] += 1
+                    if is_block:
+                        # 5 minute cooldown for WAF blocks
+                        p["cooldown_until"] = time.time() + 300
+                    break
+
+_PROXY_MGR = ProxyManager(PROXY_POOL)
+
+
+def _build_session(referer: str | None = None) -> requests.Session:
+    sess, ua = requests.Session(), random.choice(USER_AGENT_POOL)
+    adapter = StealthAdapter(
         pool_connections=HTTP_POOL_CONNECTIONS,
         pool_maxsize=HTTP_POOL_MAXSIZE,
-        max_retries=0,
-        # pool_block=False (default): when a host's pool is saturated, urllib3
-        # creates a fresh ad-hoc connection rather than blocking the worker.
-        # The ad-hoc connection isn't pooled (closed after use) — explicit
-        # here so the choice survives the next reviewer asking about it.
-        pool_block=False,
+        user_agent=ua,
     )
     sess.mount("http://", adapter)
     sess.mount("https://", adapter)
-    sess.headers.update({
-        "User-Agent": USER_AGENT,
-        "Accept": (
-            "text/html,application/xhtml+xml,application/xml;q=0.9,"
-            "text/plain;q=0.5,*/*;q=0.1"
-        ),
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate",
-    })
+
+    # --- Unit H3: Proxy Matrix with Health Tracking ---
+    current_proxy = _PROXY_MGR.get_proxy()
+    if current_proxy:
+        sess.proxies = {"http": current_proxy, "https": current_proxy}
+        # Attach proxy info to session for error reporting
+        sess.metadata = {"proxy": current_proxy}
+
+    sess.headers.update(
+        {
+            "User-Agent": ua,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Referer": referer or "",
+        }
+    )
     return sess
 
 
-# Module-level singleton — thread-safe via HTTPAdapter's pool. Tests can
-# replace this via ``crawler.core.fetcher._SESSION = ...`` if they need to
-# inject a mock without monkeypatching every call site.
-_SESSION = _build_session()
+_WAF_FINGERPRINTS = ("cloudflare", "akamai", "incapsula", "sucuri", "firewall")
 
 
-def _content_type_is_html(content_type: str) -> bool:
-    """True when the response can plausibly be parsed as HTML/XML/plaintext.
+def _classify_exception(exc):
+    from requests.exceptions import (
+        ConnectTimeout,
+        ReadTimeout,
+        SSLError,
+        ConnectionError,
+        HTTPError,
+    )
 
-    Permissive when the header is missing or empty — many small CMSes omit
-    Content-Type entirely and we'd rather attempt a parse than drop a real
-    page. Strict when the header is present and clearly binary.
-    """
-    if not content_type:
-        return True
-    lowered = content_type.lower()
-    return any(marker in lowered for marker in HTML_CONTENT_TYPE_MARKERS)
+    if isinstance(exc, ConnectTimeout):
+        return "connection_timeout"
+    if isinstance(exc, ReadTimeout):
+        return "read_timeout"
+    if isinstance(exc, SSLError):
+        return "ssl_error"
+    if isinstance(exc, ConnectionError):
+        return "dns_failed"
+    if isinstance(exc, HTTPError) and exc.response is not None:
+        if exc.response.status_code == 403:
+            t = (exc.response.text or "").lower()
+            if any(f in t for f in _WAF_FINGERPRINTS):
+                return "waf_blocked"
+            return "forbidden"
+        return f"http_{exc.response.status_code}"
+    return "fetch_failed"
 
 
-def _read_capped_body(resp: requests.Response) -> bytes | None:
-    """Stream the response body up to ``MAX_RESPONSE_BYTES``; ``None`` past cap.
-
-    On cap-exceeded, explicitly closes the response. urllib3 won't return a
-    half-read connection to the pool — being explicit makes the connection
-    drop deterministic instead of relying on ``__exit__`` semantics that
-    sometimes try (and fail) to drain first.
-    """
-    cl = resp.headers.get("Content-Length")
-    if cl:
+def _fetch_with_retry(url, fetch_fn, raise_on_failure=False, session=None):
+    for attempt in range(RETRY_COUNT):
         try:
-            if int(cl) > MAX_RESPONSE_BYTES:
-                resp.close()
-                return None
-        except ValueError:
-            pass  # malformed Content-Length: fall through to streaming check
+            return fetch_fn()
+        except Exception as e:
+            # Unit H3: Feedback to ProxyManager
+            if session and hasattr(session, "metadata") and "proxy" in session.metadata:
+                proxy = session.metadata["proxy"]
+                is_block = "forbidden" in str(e).lower() or "waf" in str(e).lower()
+                _PROXY_MGR.mark_fail(proxy, is_block=is_block)
 
-    chunks: list[bytes] = []
-    total = 0
-    for chunk in resp.iter_content(chunk_size=_STREAM_CHUNK_BYTES):
-        if not chunk:
-            continue
-        total += len(chunk)
-        if total > MAX_RESPONSE_BYTES:
-            resp.close()
-            return None
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
-def _decode_body(resp: requests.Response, body: bytes) -> str:
-    """Decode ``body`` using the best available encoding signal.
-
-    ``requests`` defaults ``resp.encoding`` to ``ISO-8859-1`` when the
-    server returns ``Content-Type: text/html`` with no charset (per
-    RFC 2616) — applied blindly that mojibakes UTF-8 pages. Use
-    ``apparent_encoding`` (chardet) when the header is silent on charset.
-    """
-    encoding = resp.encoding
-    ctype = resp.headers.get("Content-Type", "").lower()
-    if encoding is None or "charset=" not in ctype:
-        # apparent_encoding triggers chardet on the body — only call it
-        # when the header genuinely doesn't tell us.
-        encoding = resp.apparent_encoding or encoding or "utf-8"
-    try:
-        return body.decode(encoding, errors="replace")
-    except LookupError:
-        return body.decode("utf-8", errors="replace")
+            backoff = (
+                RETRY_BACKOFF[attempt]
+                if attempt < len(RETRY_BACKOFF)
+                else RETRY_BACKOFF[-1]
+            ) * random.uniform(0.8, 1.2)
+            time.sleep(backoff)
+    if raise_on_failure:
+        raise NetworkError(f"Failed {url}", "fetch_failed")
+    return None
 
 
-def _follow_redirects_safely(url: str, cached_etag: str | None = None,
-                            cached_last_modified: str | None = None) -> requests.Response | None:
-    """GET ``url``, following redirects manually so each hop's host can be
-    SSRF-checked. Returns the final 2xx Response (caller closes), or None
-    if a hop targets a private host or the chain exceeds MAX_REDIRECTS.
+def fetch_page_with_cache_tracking(
+    url: str, cache_service, referer: str | None = None
+) -> tuple[str | None, bool]:
+    c = cache_service.get_cache(url)
+    etag, lm, body = (
+        (c["etag"] if c else None),
+        (c["last_modified"] if c else None),
+        (c["response_body"] if c else None),
+    )
 
-    With ``allow_redirects=False`` we still get cookies/headers handled by
-    the Session — the only thing we lose is automatic Location handling,
-    which we recreate with explicit per-hop validation.
+    # Strategy: Build a fresh organic session per top-level fetch if needed
+    session = _build_session(referer=referer)
 
-    Conditional request headers (If-None-Match, If-Modified-Since) are sent
-    on the first request only — cached validators apply to the original URL,
-    not redirects.
-    """
-    from urllib.parse import urljoin
-    current = url
-    headers = {}
-    if cached_etag:
-        headers["If-None-Match"] = cached_etag
-    if cached_last_modified:
-        headers["If-Modified-Since"] = cached_last_modified
-
-    for i, _ in enumerate(range(config.MAX_REDIRECTS + 1)):
-        if not config.ALLOW_PRIVATE_HOSTS:
-            host = urlparse(current).hostname
-            if is_private_host(host):
-                logger.warning(
-                    "Refusing fetch — host %r is private/loopback (SSRF gate). "
-                    "URL=%s", host, current,
+    def do():
+        r = _follow_redirects_safely(session, url, etag, lm)
+        if not r:
+            return None, False, None, None
+        with r:
+            if r.status_code == 304:
+                return (
+                    (body.decode("utf-8", errors="replace") if body else None),
+                    True,
+                    etag,
+                    lm,
                 )
-                return None
-        # Conditional headers only on the first request.
-        req_headers = headers if i == 0 else {}
-        resp = _SESSION.get(
-            current, timeout=HTTP_TIMEOUT, stream=True, allow_redirects=False,
-            headers=req_headers,
-        )
-        if not resp.is_redirect:
-            return resp
-        location = resp.headers.get("Location")
-        resp.close()
-        if not location:
-            return None
-        # Resolve relative redirects against the URL we just hit.
-        current = urljoin(current, location)
-    logger.warning("Redirect chain exceeded MAX_REDIRECTS=%d for %s",
-                   config.MAX_REDIRECTS, url)
-    return None
-
-
-def _attempt_fetch(url: str, cached_etag: str | None = None,
-                  cached_last_modified: str | None = None,
-                  cached_body: bytes | None = None) -> tuple[str | None, bool, str | None, str | None]:
-    """One fetch attempt with optional cache validation.
-
-    Returns (html or None, is_cached, etag, last_modified).
-
-    Drop reasons: HTTP error, non-HTML Content-Type, body over cap, request
-    error, SSRF gate (private/loopback host in the redirect chain). Each
-    path logs at debug/warning level so a zero-resource scan can be
-    diagnosed from the logs without code changes.
-
-    If cached_etag or cached_last_modified are provided, sends conditional
-    headers (If-None-Match, If-Modified-Since) and returns cached_body on 304.
-    """
-    resp = _follow_redirects_safely(url, cached_etag=cached_etag,
-                                   cached_last_modified=cached_last_modified)
-    if resp is None:
-        return None, False, None, None
-
-    with resp:
-        etag = resp.headers.get("ETag")
-        last_modified = resp.headers.get("Last-Modified")
-
-        # Handle 304 Not Modified
-        if resp.status_code == 304:
-            if cached_body is not None and len(cached_body) > 0:
-                logger.debug("Cache hit (304) for %s", url)
-                return _decode_body(resp, cached_body), True, etag, last_modified
-            else:
-                logger.warning("304 response but cached_body is empty for %s", url)
+            r.raise_for_status()
+            if not any(
+                m in r.headers.get("Content-Type", "").lower()
+                for m in HTML_CONTENT_TYPE_MARKERS
+            ):
                 return None, False, None, None
-
-        resp.raise_for_status()
-
-        ctype = resp.headers.get("Content-Type", "")
-        if not _content_type_is_html(ctype):
-            logger.debug("Skipping non-HTML response (%s) for %s", ctype, url)
-            return None, False, None, None
-
-        body = _read_capped_body(resp)
-        if body is None:
-            logger.warning(
-                "Response body exceeded cap (%d bytes) for %s — dropped",
-                MAX_RESPONSE_BYTES, url,
+            b = r.content[:MAX_RESPONSE_BYTES]  # Simplified for Arsenal 7.0
+            return (
+                b.decode("utf-8", errors="replace"),
+                False,
+                r.headers.get("ETag"),
+                r.headers.get("Last-Modified"),
             )
-            return None, False, None, None
 
-        return _decode_body(resp, body), False, etag, last_modified
+    res = _fetch_with_retry(url, do, raise_on_failure=False, session=session)
+    logger.debug(f"fetch_page_with_cache_tracking result: {res}")
+    if res and len(res) >= 2:
+        # Unpack up to 4 values if present, but we only strictly need h, cached for return
+        h, cached = res[0], res[1]
+        if len(res) >= 4:
+            et, lmod = res[2], res[3]
+            if h and not cached and (et or lmod):
+                cache_service.save_cache(url, et, lmod, None, h.encode("utf-8"))
+        return h, cached
+    
+    # Try to diagnose the failure reason if possible
+    reason = "fetch_failed"
+    try:
+        # Just a quick check to get a better reason if it was a DNS/SSL error
+        _build_session().get(url, timeout=5)
+    except Exception as e:
+        reason = _classify_exception(e)
+        
+    raise NetworkError(f"Fetch failed for {url}", reason)
 
 
-def fetch_page(url: str, use_playwright: bool = False) -> str | None:
-    """Fetch HTML content from a URL via plain HTTP.
-
-    The ``use_playwright`` flag is **deprecated and ignored** — JS rendering
-    flows through :class:`crawler.core.render.RenderThread`. The flag remains
-    for backward-compatible call sites until the engine refactor finishes.
-
-    Returns HTML string, or ``None`` if the page could not be fetched as
-    HTML (HTTP error, non-HTML Content-Type, body over cap, network error).
-    """
-    if use_playwright:
-        logger.debug(
-            "fetch_page(use_playwright=True) is a no-op; "
-            "route to RenderThread instead (url=%s)", url,
+def _follow_redirects_safely(session_or_url, url=None, etag=None, lm=None, cached_etag=None, cached_last_modified=None):
+    if isinstance(session_or_url, str):
+        url = session_or_url
+        session = _SESSION
+        etag = cached_etag if cached_etag is not None else etag
+        lm = cached_last_modified if cached_last_modified is not None else lm
+    else:
+        session = session_or_url
+    curr, hdrs = url, {}
+    if etag:
+        hdrs["If-None-Match"] = etag
+    if lm:
+        hdrs["If-Modified-Since"] = lm
+    for i in range(MAX_REDIRECTS + 1):
+        if not ALLOW_PRIVATE_HOSTS and is_private_host(urlparse(curr).hostname):
+            return None
+        r = session.get(
+            curr,
+            timeout=HTTP_TIMEOUT,
+            stream=True,
+            allow_redirects=False,
+            headers=(hdrs if i == 0 else {}),
         )
-
-    for attempt in range(RETRY_COUNT):
-        try:
-            html, _, _, _ = _attempt_fetch(url)
-            return html
-        except _NO_RETRY_EXCEPTIONS as exc:
-            # Permanent failure: malformed URL, redirect loop, SSL handshake
-            # failure, body-stream corruption. Retrying just burns backoff time.
-            logger.warning("Non-retryable fetch failure for %s: %s", url, exc)
+        if not r.is_redirect:
+            return r
+        loc = r.headers.get("Location")
+        r.close()
+        if not loc:
             return None
-        except Exception as exc:
-            backoff = (
-                RETRY_BACKOFF[attempt]
-                if attempt < len(RETRY_BACKOFF)
-                else RETRY_BACKOFF[-1]
-            )
-            logger.warning(
-                "Fetch attempt %d/%d failed for %s: %s (backoff %ds)",
-                attempt + 1, RETRY_COUNT, url, exc, backoff,
-            )
-            if attempt < RETRY_COUNT - 1:
-                time.sleep(backoff)
-
-    logger.error("All %d fetch attempts failed for %s", RETRY_COUNT, url)
+        curr = urljoin(curr, loc)
     return None
 
 
-def fetch_page_with_cache_tracking(url: str, cache_service) -> tuple[str | None, bool]:
-    """Fetch HTML with HTTP caching and return cache status.
+def fetch_page(url, **kwargs):
+    s = _build_session()
+    res = _fetch_with_retry(url, lambda: _follow_redirects_safely(s, url))
+    return res.text if res else None
 
-    Returns:
-        (html, was_cached) tuple. was_cached is True if response came from 304 Not Modified.
+
+def download_asset(url: str, save_path: str, timeout: tuple = (5, 30)) -> bool:
+    """Download a binary asset (image, etc.) to the local filesystem with validation.
+    
+    Returns True if successful and valid, False otherwise.
     """
-    cached = cache_service.get_cache(url)
-    cached_etag = cached["etag"] if cached else None
-    cached_last_modified = cached["last_modified"] if cached else None
-    cached_body = cached["response_body"] if cached else None
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    s = _build_session()
+    try:
+        r = _fetch_with_retry(url, lambda: s.get(url, timeout=timeout, stream=True))
+        if not r or r.status_code != 200:
+            return False
+            
+        # R17: Content-Type Validation
+        ctype = r.headers.get("Content-Type", "").lower()
+        if "image" not in ctype and "octet-stream" not in ctype:
+            logger.warning(f"Rejected non-image asset from {url} (Type: {ctype})")
+            return False
 
-    for attempt in range(RETRY_COUNT):
-        try:
-            html, is_cached, etag, last_modified = _attempt_fetch(
-                url, cached_etag, cached_last_modified, cached_body)
-            if html is not None and not is_cached:
-                # New/updated response: save to cache for future requests.
-                if etag or last_modified:
-                    cache_service.save_cache(url, etag, last_modified, None,
-                                           html.encode("utf-8"))
-            return html, is_cached
-        except _NO_RETRY_EXCEPTIONS as exc:
-            logger.warning("Non-retryable fetch failure for %s: %s", url, exc)
-            return None, False
-        except Exception as exc:
-            backoff = (
-                RETRY_BACKOFF[attempt]
-                if attempt < len(RETRY_BACKOFF)
-                else RETRY_BACKOFF[-1]
-            )
-            logger.warning(
-                "Fetch attempt %d/%d failed for %s: %s (backoff %ds)",
-                attempt + 1, RETRY_COUNT, url, exc, backoff,
-            )
-            if attempt < RETRY_COUNT - 1:
-                time.sleep(backoff)
-
-    logger.error("All %d fetch attempts failed for %s", RETRY_COUNT, url)
-    return None, False
+        with open(save_path, 'wb') as f:
+            size = 0
+            for chunk in r.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    size += len(chunk)
+        
+        # Ensure file isn't empty or tiny (e.g. tracking pixels are usually < 100 bytes)
+        if size < 200:
+            if os.path.exists(save_path): os.remove(save_path)
+            return False
+            
+        return True
+    except Exception as e:
+        logger.error(f"Failed to download asset {url}: {e}")
+        if os.path.exists(save_path): os.remove(save_path)
+        return False
 
 
-def fetch_page_with_cache(url: str, cache_service) -> str | None:
-    """Fetch HTML with HTTP caching support via ETag and Last-Modified headers.
-
-    Implements conditional requests: if a cached response exists, sends
-    If-None-Match/If-Modified-Since headers. On 304 Not Modified, returns
-    cached body. On 200 OK, saves new response to cache.
-
-    Args:
-        url: The URL to fetch.
-        cache_service: CacheService instance for cache persistence.
-
-    Returns:
-        HTML string, or None if fetch failed.
-    """
-    cached = cache_service.get_cache(url)
-    cached_etag = cached["etag"] if cached else None
-    cached_last_modified = cached["last_modified"] if cached else None
-    cached_body = cached["response_body"] if cached else None
-
-    for attempt in range(RETRY_COUNT):
-        try:
-            html, is_cached, etag, last_modified = _attempt_fetch(
-                url, cached_etag, cached_last_modified, cached_body)
-            if html is not None and not is_cached:
-                # New/updated response: save to cache for future requests.
-                if etag or last_modified:
-                    cache_service.save_cache(url, etag, last_modified, None,
-                                           html.encode("utf-8"))
-            return html
-        except _NO_RETRY_EXCEPTIONS as exc:
-            logger.warning("Non-retryable fetch failure for %s: %s", url, exc)
-            return None
-        except Exception as exc:
-            backoff = (
-                RETRY_BACKOFF[attempt]
-                if attempt < len(RETRY_BACKOFF)
-                else RETRY_BACKOFF[-1]
-            )
-            logger.warning(
-                "Fetch attempt %d/%d failed for %s: %s (backoff %ds)",
-                attempt + 1, RETRY_COUNT, url, exc, backoff,
-            )
-            if attempt < RETRY_COUNT - 1:
-                time.sleep(backoff)
-
-    logger.error("All %d fetch attempts failed for %s", RETRY_COUNT, url)
-    return None
+def _read_capped_body(resp):
+    return resp.content[:MAX_RESPONSE_BYTES]
 
 
 def needs_js_rendering(html: str) -> bool:
-    """Return True if page likely needs JS rendering.
-
-    Checks: body text shorter than threshold or contains JS framework markers.
-    """
-    body_match = re.search(r"<body[^>]*>(.*)</body>", html, re.DOTALL | re.IGNORECASE)
-    body_html = body_match.group(1) if body_match else html
-
-    text = re.sub(r"<[^>]+>", "", body_html).strip()
-
-    if len(text) < JS_BODY_MIN_LENGTH:
+    """Smart detection of pages requiring JavaScript rendering."""
+    if not html: return True
+    
+    # R18: Direct markers (Strong)
+    markers = ("__NEXT_DATA__", "data-reactroot", "__nuxt", "document.getElementById('root')", "react-root")
+    if any(x in html for x in markers):
         return True
+        
+    # R28: Splash Page / JS Wall detection (Heuristic)
+    # If text content is very short but scripts are present
+    text_only = re.sub(r'<script.*?</script>|<style.*?</style>|<.*?>', '', html, flags=re.S).strip()
+    if len(text_only) < 300:
+        if "javascript" in html.lower() and ("enable" in html.lower() or "required" in html.lower()):
+            return True
+            
+    return len(html) < JS_BODY_MIN_LENGTH
 
-    return any(marker in html for marker in _JS_MARKERS)
+
+def _attempt_fetch(url, cached_etag=None, cached_last_modified=None, cached_body=None):
+    """Backward-compat wrapper — delegates to _fetch_with_retry + _follow_redirects_safely."""
+    s = _build_session()
+    result = _fetch_with_retry(
+        url,
+        lambda: _follow_redirects_safely(s, url, cached_etag, cached_last_modified),
+    )
+    if result is None:
+        return None, False, None, None
+    if result.status_code == 304:
+        if cached_body:
+            return cached_body.decode("utf-8", errors="replace"), True, result.headers.get("ETag"), result.headers.get("Last-Modified")
+        return None, False, None, None
+    body = _read_capped_body(result).decode("utf-8", errors="replace")
+    etag = result.headers.get("ETag")
+    lm = result.headers.get("Last-Modified")
+    return body, False, etag, lm
+
+
+def fetch_page_with_cache(url: str, cache_service, referer: str | None = None):
+    try:
+        cached = cache_service.get_cache(url)
+        etag = cached["etag"] if cached else None
+        last_modified = cached["last_modified"] if cached else None
+        body = cached["response_body"] if cached else None
+        html, is_cached, new_etag, new_last_modified = _attempt_fetch(
+            url, etag, last_modified, body
+        )
+    except Exception:
+        return None
+    if html is None:
+        return None
+    if not is_cached and (new_etag or new_last_modified):
+        cache_service.save_cache(url, new_etag, new_last_modified, None, html.encode("utf-8"))
+    return html

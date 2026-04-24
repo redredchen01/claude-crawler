@@ -1,8 +1,14 @@
 """Tests for crawler.core.url.normalize — the canonical URL normalizer."""
 
-import pytest
+from __future__ import annotations
 
-from crawler.core.url import normalize
+from socket import AF_INET, SOCK_STREAM
+from unittest.mock import patch
+
+import pytest
+import pytest as _pytest
+
+from crawler.core.url import is_private_host, normalize
 
 
 class TestNormalize:
@@ -107,46 +113,50 @@ class TestEngineFrontierAlignment:
 # is_private_host — SSRF gate
 # ---------------------------------------------------------------------------
 
-import pytest as _pytest
-from unittest.mock import patch
-
-from crawler.core.url import is_private_host
-
 
 class TestIsPrivateHost:
-    @_pytest.mark.parametrize("host", [
-        "localhost",
-        "Localhost",
-        "LOCALHOST",
-        "localhost.localdomain",
-        "ip6-localhost",
-    ])
+    @_pytest.mark.parametrize(
+        "host",
+        [
+            "localhost",
+            "Localhost",
+            "LOCALHOST",
+            "localhost.localdomain",
+            "ip6-localhost",
+        ],
+    )
     def test_well_known_hostnames(self, host):
         assert is_private_host(host) is True
 
-    @_pytest.mark.parametrize("ip", [
-        "127.0.0.1",       # loopback
-        "10.0.0.1",        # RFC1918 private
-        "10.255.255.255",
-        "172.16.0.1",      # RFC1918 private
-        "172.31.0.1",
-        "192.168.0.1",     # RFC1918 private
-        "192.168.255.255",
-        "169.254.169.254", # AWS metadata / link-local
-        "169.254.0.1",
-        "0.0.0.0",         # unspecified
-        "224.0.0.1",       # multicast
-        "240.0.0.1",       # reserved
-    ])
+    @_pytest.mark.parametrize(
+        "ip",
+        [
+            "127.0.0.1",  # loopback
+            "10.0.0.1",  # RFC1918 private
+            "10.255.255.255",
+            "172.16.0.1",  # RFC1918 private
+            "172.31.0.1",
+            "192.168.0.1",  # RFC1918 private
+            "192.168.255.255",
+            "169.254.169.254",  # AWS metadata / link-local
+            "169.254.0.1",
+            "0.0.0.0",  # unspecified
+            "224.0.0.1",  # multicast
+            "240.0.0.1",  # reserved
+        ],
+    )
     def test_private_ipv4_literals(self, ip):
         assert is_private_host(ip) is True, f"{ip} should be private"
 
-    @_pytest.mark.parametrize("ip", [
-        "::1",          # IPv6 loopback
-        "fe80::1",      # IPv6 link-local
-        "fc00::1",      # IPv6 unique-local
-        "fd00::1",      # IPv6 unique-local
-    ])
+    @_pytest.mark.parametrize(
+        "ip",
+        [
+            "::1",  # IPv6 loopback
+            "fe80::1",  # IPv6 link-local
+            "fc00::1",  # IPv6 unique-local
+            "fd00::1",  # IPv6 unique-local
+        ],
+    )
     def test_private_ipv6_literals(self, ip):
         assert is_private_host(ip) is True, f"{ip} should be private"
 
@@ -154,12 +164,15 @@ class TestIsPrivateHost:
         # urlparse leaves IPv6 hostnames bracketed in some contexts.
         assert is_private_host("[::1]") is True
 
-    @_pytest.mark.parametrize("ip", [
-        "8.8.8.8",         # public
-        "1.1.1.1",         # public
-        "151.101.1.1",     # public CDN
-        "2606:4700:4700::1111",  # public IPv6 (Cloudflare)
-    ])
+    @_pytest.mark.parametrize(
+        "ip",
+        [
+            "8.8.8.8",  # public
+            "1.1.1.1",  # public
+            "151.101.1.1",  # public CDN
+            "2606:4700:4700::1111",  # public IPv6 (Cloudflare)
+        ],
+    )
     def test_public_ips_pass(self, ip):
         assert is_private_host(ip) is False
 
@@ -179,7 +192,6 @@ class TestIsPrivateHost:
     def test_resolved_hostname_pointing_to_private_ip_blocked(self):
         """A public-looking hostname that DNS-resolves to an internal IP
         is the classic DNS-rebind / hosts-trick SSRF vector."""
-        from socket import AF_INET, SOCK_STREAM
 
         fake_resolve = [(AF_INET, SOCK_STREAM, 0, "", ("10.0.0.5", 0))]
         with patch(

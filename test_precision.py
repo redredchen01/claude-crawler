@@ -2,12 +2,10 @@
 """Auto-test metric/cover/date precision on real websites."""
 
 import sqlite3
-import sys
 import tempfile
-from pathlib import Path
 
-from crawler.core.engine import run_crawl
 from crawler import storage
+from crawler.core.engine import run_crawl
 
 
 def test_site_with_render(
@@ -65,30 +63,35 @@ def test_site_with_render(
             for r in resources:
                 # Metric check
                 has_metric = any(
-                    r[col] is not None
-                    for col in ["views", "likes", "hearts"]
+                    r[col] is not None for col in ["views", "likes", "hearts"]
                 )
                 if has_metric:
-                    metric_samples.append({
-                        "title": r["title"],
-                        "views": r["views"],
-                        "likes": r["likes"],
-                        "hearts": r["hearts"],
-                    })
+                    metric_samples.append(
+                        {
+                            "title": r["title"],
+                            "views": r["views"],
+                            "likes": r["likes"],
+                            "hearts": r["hearts"],
+                        }
+                    )
 
                 # Cover check
                 if r["cover_url"]:
-                    cover_samples.append({
-                        "title": r["title"],
-                        "cover": r["cover_url"][:60] + "...",
-                    })
+                    cover_samples.append(
+                        {
+                            "title": r["title"],
+                            "cover": r["cover_url"][:60] + "...",
+                        }
+                    )
 
                 # Date check
                 if r["published_at"]:
-                    date_samples.append({
-                        "title": r["title"],
-                        "published_at": r["published_at"],
-                    })
+                    date_samples.append(
+                        {
+                            "title": r["title"],
+                            "published_at": r["published_at"],
+                        }
+                    )
 
             print(f"   Metrics: {len(metric_samples)}/{len(resources)} ✓")
             print(f"   Covers: {len(cover_samples)}/{len(resources)} ✓")
@@ -122,14 +125,14 @@ def main():
         # Test URLs — content-rich blogs with clear article structure
         test_urls = [
             ("https://techcrunch.com", False),
-            ("https://techcrunch.com", True),   # With Playwright
+            ("https://techcrunch.com", True),  # With Playwright
         ]
 
         results = []
         for url, force_playwright in test_urls:
-            print(f"\n{'='*70}")
+            print(f"\n{'=' * 70}")
             print(f"Testing {url} (playwright={'YES' if force_playwright else 'NO'})")
-            print('='*70)
+            print("=" * 70)
             result = test_site_with_render(
                 url, db_path, max_pages=5, force_playwright=force_playwright
             )
@@ -142,10 +145,7 @@ def main():
 
         for r in results:
             status = "✓" if r.get("resources_found", 0) > 0 else "✗"
-            print(
-                f"{status} {r['url']}: "
-                f"{r.get('resources_found', '?')} resources"
-            )
+            print(f"{status} {r['url']}: {r.get('resources_found', '?')} resources")
 
             if r.get("error"):
                 print(f"  Error: {r['error']}")
@@ -157,9 +157,9 @@ def main():
             total = r.get("resources_found", 1) or 1
 
             print(
-                f"  Metrics: {m_count}/{total} ({100*m_count//total}%) "
-                f"Covers: {c_count}/{total} ({100*c_count//total}%) "
-                f"Dates: {d_count}/{total} ({100*d_count//total}%)"
+                f"  Metrics: {m_count}/{total} ({100 * m_count // total}%) "
+                f"Covers: {c_count}/{total} ({100 * c_count // total}%) "
+                f"Dates: {d_count}/{total} ({100 * d_count // total}%)"
             )
 
             # Show first sample of each

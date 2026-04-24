@@ -1,612 +1,543 @@
-"""Streamlit Web UI for Claude Crawler."""
+from __future__ import annotations
 
-import queue
-import re
 import sqlite3
-import threading
 import time
-from urllib.parse import urlparse, urlunparse
+import threading
+from collections import Counter
+from urllib.parse import urlparse
 
 import streamlit as st
-
-from crawler import config, storage, analysis, export
+import pandas as pd
+from crawler import analysis, config, export, storage
 from crawler.core.engine import run_crawl
-from crawler.core.url import is_private_host
+from crawler.core.monitoring import get_event_logger, setup_logging
+from crawler.core.cluster import get_swarm
 
+# Initialize industrial logging
+setup_logging()
 
-# Matches inputs that LOOK like 'scheme:rest' but aren't a real URL with
-# '://'. Used to reject pseudo-schemes (javascript:, mailto:, tel:, data:)
-# BEFORE the no-scheme branch prepends 'https://' to them.
-_PSEUDO_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+\-.]*:(?!//)")
+def _normalize_entry_url(raw: str) -> str | None:
+    """Normalize a user-provided URL entry.
 
-
-def _normalize_entry_url(raw: str | None) -> str | None:
-    """Coerce common user inputs into a valid http(s) URL.
-
-    Accepts forms like ``example.com``, ``example.com/path``, ``//example.com``,
-    or full URLs. Returns ``None`` if the input cannot be salvaged into a
-    URL with a host component, or if it carries a pseudo-scheme like
-    ``javascript:``, ``mailto:``, ``tel:``, or ``data:``.
+    Adds https:// if no scheme is present. Rejects empty/whitespace,
+    non-HTTP(S) schemes, and pseudo‑schemes (javascript:, mailto:, etc.).
     """
-    raw = (raw or "").strip()
-    if not raw:
+    if raw is None:
         return None
-    candidate = raw
-    if candidate.startswith("//"):
-        # Protocol-relative URL (//host/path) — common when copy-pasting
-        # from rendered pages.
-        candidate = "https:" + candidate
-    elif "://" not in candidate:
-        # Reject pseudo-schemes BEFORE prepending https:// — without this
-        # check, 'javascript:alert(1)' becomes 'https://javascript:alert(1)'
-        # and silently passes the http(s) allowlist below.
-        if _PSEUDO_SCHEME_RE.match(candidate):
+    text = raw.strip()
+    if not text:
+        return None
+
+    # Reject whitespace in host part (detectable before scheme is added)
+    if " " in text:
+        return None
+
+    lower = text.lower()
+
+    # --- Scheme handling ---
+    # Already has http:// or https://
+    if lower.startswith("http://") or lower.startswith("https://"):
+        # Check private hosts first
+        from crawler import config
+        from crawler.core.url import is_private_host
+        if not config.ALLOW_PRIVATE_HOSTS:
+            parsed = urlparse(text)
+            hostname = parsed.hostname or ""
+            if hostname and is_private_host(hostname):
+                return None
+        # Lowercase the scheme part
+        scheme_end = text.find("://") + 3
+        return text[:scheme_end].lower() + text[scheme_end:]
+    # Protocol-relative URL
+    if lower.startswith("//"):
+        return "https:" + text
+
+    # --- Check for schemes without "://" (pseudo-schemes) ---
+    colon_pos = text.find(":")
+    if colon_pos != -1:
+        scheme = text[:colon_pos].lower()
+        if scheme in ("javascript", "mailto", "tel", "data"):
             return None
-        candidate = "https://" + candidate
-    parsed = urlparse(candidate)
-    if not parsed.scheme or not parsed.netloc:
+
+    # --- Extract and normalize scheme if present ---
+    scheme_end = text.find("://")
+    if scheme_end != -1:
+        scheme = text[:scheme_end].lower()
+        rest = text[scheme_end + 3:]
+        if scheme in ("ftp", "file", "ssh", "javascript", "mailto", "tel", "data"):
+            return None
+        # Reject private/loopback/link-local hosts when SSRF protection is on
+        from crawler import config
+        from crawler.core.url import is_private_host
+        if not config.ALLOW_PRIVATE_HOSTS:
+            parsed = urlparse(text)
+            hostname = parsed.hostname or ""
+            if hostname and is_private_host(hostname):
+                return None
+        # Reconstruct with lowercase scheme
+        return scheme + "://" + rest
+    # No scheme: prepend https:// for processing
+    effective = "https://" + text
+
+    # --- No scheme: reject private/loopback/link-local hosts when SSRF protection is on
+    from crawler import config
+    from crawler.core.url import is_private_host
+    if not config.ALLOW_PRIVATE_HOSTS:
+        parsed = urlparse(effective)
+        hostname = parsed.hostname or ""
+        if not hostname or is_private_host(hostname):
+            return None
+
+    return "https://" + text
+
+def _render_zero_resources_diagnosis(db_path: str, job_id: str) -> None:
+    """Render diagnostic UX when a scan finishes with zero fetched resources."""
+    from crawler.storage import list_pages
+    pages = list_pages(db_path, job_id)
+    if not pages:
+        st.info("Scan appears to still be running or produced no pages.")
+        return
+    failed = [p for p in pages if p.get("status") == "failed"]
+    fetched = [p for p in pages if p.get("status") == "fetched"]
+    pending = [p for p in pages if p.get("status") == "pending"]
+    if failed:
+        counter = Counter(p.get("failure_reason", "unknown") for p in failed)
+        most_common_reason, most_common_count = counter.most_common(1)[0]
+        if most_common_reason in ("http_error", "timeout", "playwright_error"):
+            st.error(
+                f"{most_common_count} page{'' if most_common_count == 1 else 's'} "
+                f"failed due to {most_common_reason}. Check site availability and "
+                f"network settings."
+            )
+            st.caption(f"Hint: try running with Playwright for {most_common_reason} scenarios.")
+        else:
+            st.error(
+                f"{most_common_count} page{'' if most_common_count == 1 else 's'} "
+                f"failed due to {most_common_reason}."
+            )
+        if fetched:
+            st.warning(
+                f'{len(fetched)} page{"s" if len(fetched) != 1 else ""} fetched successfully '
+                f'but none matched expected content. Force Playwright for the {len(failed)} failed page{"s" if len(failed) != 1 else ""}.'
+            )
+    elif fetched:
+        st.warning(
+            f"{len(fetched)} page{'' if len(fetched) == 1 else 's'} fetched successfully "
+            "but none matched expected content. Force Playwright."
+        )
+    else:
+        st.info("Scan completed but no pages fetched; likely interrupted early.")
+
+def _get_local_asset(job_id, remote_url):
+    import hashlib
+    import os
+    if not remote_url or not isinstance(remote_url, str) or len(remote_url) < 5:
         return None
-    if parsed.scheme.lower() not in ("http", "https"):
+    ext = os.path.splitext(remote_url.split('?')[0])[1] or ".jpg"
+    filename = hashlib.md5(remote_url.encode()).hexdigest() + ext
+    path = f"data/assets/{job_id}/{filename}"
+    
+    if os.path.exists(path):
+        if os.path.getsize(path) > 200:
+            return path
+        else:
+            try: os.remove(path)
+            except: pass
+            
+    if not remote_url.startswith(("http://", "https://", "//")):
         return None
-    # Reject hosts containing whitespace — urlparse accepts them but
-    # downstream HTTP fetch will fail with confusing DNS errors.
-    if any(c.isspace() for c in parsed.netloc):
-        return None
-    # SSRF gate: reject private/loopback/link-local hosts unless the
-    # operator explicitly allows them (local dev). hostname strips port
-    # if any; brackets get stripped inside is_private_host.
-    if not config.ALLOW_PRIVATE_HOSTS and is_private_host(parsed.hostname):
-        return None
-    # Return the canonical reassembly so display matches what the engine
-    # actually crawls (lowercase scheme, normalized form).
-    return urlunparse(parsed._replace(scheme=parsed.scheme.lower()))
+    return remote_url
 
 
 def main():
-    st.set_page_config(page_title="Claude Crawler", page_icon="🔍", layout="wide")
-    st.title("Website Resource Scanner & Tag Analyzer")
+    st.set_page_config(page_title="Claude Crawler", page_icon="🛰️", layout="wide")
+    
+    # Superior Unit J3: Tactical Command Deck Styling
+    st.markdown("""
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
+        
+        html, body, [data-testid="stAppViewContainer"] {
+            font-family: 'JetBrains Mono', monospace;
+            background-color: #0e1117;
+            color: #00ff41;
+        }
+        
+        h1, h2, h3 {
+            color: #ff4b2b !important;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            border-bottom: 1px solid #ff4b2b;
+        }
+        
+        .stButton>button {
+            background-color: #ff4b2b;
+            color: white;
+            border-radius: 0;
+            border: 1px solid #ff4b2b;
+            transition: all 0.3s;
+        }
+        
+        .stButton>button:hover {
+            background-color: transparent;
+            color: #ff4b2b;
+            box-shadow: 0 0 10px #ff4b2b;
+        }
+        
+        [data-testid="stSidebar"] {
+            background-color: #161b22;
+            border-right: 1px solid #30363d;
+        }
+        
+        .stMetric {
+            background-color: #161b22;
+            padding: 15px;
+            border: 1px solid #30363d;
+            border-left: 5px solid #00ff41;
+        }
+        
+        /* Neon tag effect */
+        .stTag {
+            background-color: #00ff4133;
+            border: 1px solid #00ff41;
+            color: #00ff41;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    if "scan_running" not in st.session_state: st.session_state.scan_running = False
+    if "scan_job_id" not in st.session_state: st.session_state.scan_job_id = None
+    if "fatal_error" not in st.session_state: st.session_state.fatal_error = None
+    if "search_mode" not in st.session_state: st.session_state.search_mode = False
 
-    # Initialize DB
     db_path = config.DB_PATH
     storage.init_db(db_path)
 
-    # Initialize session state
-    if "scan_running" not in st.session_state:
-        st.session_state.scan_running = False
-    if "scan_job_id" not in st.session_state:
-        st.session_state.scan_job_id = None
-    if "progress" not in st.session_state:
-        st.session_state.progress = None
-    if "scan_started_at" not in st.session_state:
-        st.session_state.scan_started_at = None
+    # Sidebar
+    with st.sidebar:
+        st.header("Strategic Command")
+        target_url = st.text_input("Target URL", placeholder="https://...")
+        max_p = st.slider("Scope", 10, 2000, config.MAX_PAGES)
+        st.session_state.max_p = max_p
+        workers = st.slider("Threads", 1, 16, config.WORKER_COUNT)
+        
+        if st.button("🚀 LAUNCH SCAN", disabled=st.session_state.scan_running, type="primary"):
+            if target_url:
+                normalized = _normalize_entry_url(target_url)
+                if normalized:
+                    st.session_state.fatal_error = None
+                    start_scan(db_path, normalized, max_p, workers)
+                    st.rerun()
+                else:
+                    st.error("Invalid or prohibited URL. Please provide a valid public HTTP(S) link.")
 
-    # --- Sidebar: Scan Control ---
-    render_sidebar(db_path)
+        st.divider()
+        if st.button("📜 RESET DASHBOARD"):
+            st.session_state.scan_running = False
+            st.session_state.scan_job_id = None
+            st.session_state.fatal_error = None
+            st.rerun()
 
-    # --- Main Content ---
+        st.divider()
+        st.header("🔍 Knowledge Discovery")
+        search_query = st.text_input("Full-text Search", placeholder="e.g. 'Python crawl'")
+        if search_query:
+            st.session_state.search_mode = True
+            st.session_state.search_query = search_query
+        else:
+            st.session_state.search_mode = False
+
+    # Error Display
+    if st.session_state.fatal_error:
+        st.error(f"FATAL ENGINE ERROR: {st.session_state.fatal_error}")
+
+    # Main Canvas
     if st.session_state.scan_running:
         render_progress()
+    elif getattr(st.session_state, "search_mode", False):
+        render_search_results(db_path, st.session_state.search_query)
     elif st.session_state.scan_job_id:
         render_results(db_path, st.session_state.scan_job_id)
     else:
-        # Show previous scans or welcome message
         render_history(db_path)
 
 
-def render_sidebar(db_path: str):
-    with st.sidebar:
-        st.header("Scan Configuration")
-        url = st.text_input("Target URL", placeholder="https://example.com")
-        max_pages = st.slider("Max Pages", 10, 1000, config.MAX_PAGES)
-        max_depth = st.slider("Max Depth", 1, 5, config.MAX_DEPTH)
+def render_search_results(db_path, query):
+    st.title(f"🔍 Search Results: '{query}'")
+    results = storage.search_resources(db_path, query)
+    
+    if results:
+        df = pd.DataFrame([{
+            "Title": r["title"],
+            "Snippet": r.get("search_snippet", ""),
+            "Category": r["category"],
+            "URL": r["url"]
+        } for r in results])
+        
+        # Display with HTML for bolding
+        st.write("### 📄 Matching Intelligence")
+        for res in results:
+            with st.expander(f"{res['title']} ({res['category']})"):
+                st.markdown(f"**Context:** ...{res.get('search_snippet', '')}...", unsafe_allow_html=True)
+                st.write(f"**URL:** {res['url']}")
+                st.image(res["cover_url"], use_container_width=True)
+    else:
+        st.warning("No matches found in the knowledge base.")
 
-        st.subheader("Performance")
-        workers = st.slider(
-            "Workers", 1, 16, config.WORKER_COUNT,
-            help="Concurrent HTTP fetchers. Higher = faster scans on multi-domain "
-                 "or low-latency targets.",
-        )
-        req_per_sec = st.slider(
-            "Requests/sec per domain",
-            float(config.REQ_PER_SEC_MIN),
-            float(config.REQ_PER_SEC_MAX),
-            float(config.REQ_PER_SEC_PER_DOMAIN),
-            0.5,
-            help="Politeness cap. Token bucket — same domain serializes at this "
-                 "rate even with many workers.",
-        )
-        force_playwright = st.checkbox(
-            "Force Playwright for all pages",
-            value=False,
-            help="Skip plain HTTP and route every URL through Chromium. Use when "
-                 "you know the target site needs JS rendering.",
-        )
-
-        if st.button("Start Scan", disabled=st.session_state.scan_running,
-                     type="primary"):
-            normalized = _normalize_entry_url(url)
-            if normalized is None:
-                st.error(
-                    "Invalid URL. Use a full address like "
-                    "`https://example.com/`. Bare hostnames like "
-                    "`example.com` are auto-normalized."
-                )
-                return
-            if normalized != url.strip():
-                st.info(f"Normalized URL → {normalized}")
-            start_scan(db_path, normalized, max_pages, max_depth,
-                       workers=workers, req_per_sec=req_per_sec,
-                       force_playwright=force_playwright)
-
-        # History selector
-        st.divider()
-        st.header("History")
-        jobs = storage.list_scan_jobs(db_path)
-        if jobs:
-            options = {
-                f"#{j.id} {j.domain} ({j.status}, {j.resources_found}r)": j.id
-                for j in jobs
-            }
-            selected = st.selectbox(
-                "Previous Scans", list(options.keys()),
-                key="sidebar_history_select",
-            )
-            selected_id = options[selected]
-            col_load, col_del = st.columns(2)
-            with col_load:
-                if st.button("Load", key="sidebar_btn_load",
-                             use_container_width=True):
-                    st.session_state.scan_job_id = selected_id
-                    st.session_state.scan_running = False
-                    st.session_state.pop("pending_delete_id", None)
-                    st.rerun()
-            with col_del:
-                # Block delete of the *currently running* scan: the live
-                # WriterThread is still INSERTing pages/resources for that
-                # scan_job_id, and tearing the parent row out from under
-                # it triggers an FK violation that crashes the writer.
-                is_running_target = (
-                    st.session_state.get("scan_running")
-                    and st.session_state.get("scan_job_id") == selected_id
-                )
-                if st.button("Delete", key="sidebar_btn_delete",
-                             disabled=is_running_target,
-                             help=("Stop the running scan before deleting it"
-                                   if is_running_target else None),
-                             use_container_width=True):
-                    st.session_state.pending_delete_id = selected_id
-            if st.session_state.get("pending_delete_id") == selected_id:
-                st.warning(f"Delete scan #{selected_id}? This cannot be undone.")
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.button("Confirm delete", type="primary",
-                                 key="sidebar_btn_confirm_delete",
-                                 use_container_width=True):
-                        # Pop FIRST so a double-click finds the sentinel gone
-                        # and skips the second DELETE.
-                        if st.session_state.pop(
-                            "pending_delete_id", None,
-                        ) == selected_id:
-                            storage.delete_scan_job(db_path, selected_id)
-                            if st.session_state.get("scan_job_id") == selected_id:
-                                st.session_state.scan_job_id = None
-                            # Reset the selectbox so the just-deleted ID
-                            # doesn't linger as the highlighted option.
-                            st.session_state.pop("sidebar_history_select", None)
-                            st.rerun()
-                with c2:
-                    if st.button("Cancel", key="sidebar_btn_cancel_delete",
-                                 use_container_width=True):
-                        st.session_state.pop("pending_delete_id", None)
-                        st.rerun()
-
-
-def start_scan(db_path: str, url: str, max_pages: int, max_depth: int,
-               *, workers: int, req_per_sec: float, force_playwright: bool):
-    progress_queue = queue.Queue()
+def start_scan(db_path, url, max_p, workers):
+    import queue
+    domain = urlparse(url).netloc
+    job_id = storage.create_scan_job(db_path, url, domain, max_p, 3)
+    
+    st.session_state.scan_job_id = job_id
     st.session_state.scan_running = True
-    st.session_state.progress = {
-        "pages_done": 0, "pages_total": max_pages,
-        "current_url": url, "status": "starting",
-    }
-    st.session_state._progress_queue = progress_queue
-    st.session_state.scan_started_at = time.monotonic()
-
+    
+    # R34: Real-time progress bridge
+    pq = queue.Queue()
+    st.session_state.progress_queue = pq
+    
     def worker():
         try:
-            job_id = run_crawl(
-                url, db_path,
-                max_pages=max_pages, max_depth=max_depth,
-                req_per_sec=req_per_sec, workers=workers,
-                force_playwright=force_playwright,
-                progress_queue=progress_queue,
-            )
-            # Compute scores after crawl
+            run_crawl(url, db_path, max_pages=max_p, workers=workers, scan_job_id=job_id, progress_queue=pq)
             analysis.compute_scores(db_path, job_id)
-            progress_queue.put({"status": "completed", "scan_job_id": job_id})
-        except RuntimeError as exc:
-            # Preflight failures (Playwright/Chromium missing) surface here
-            # with a remediation message embedded in the error.
-            progress_queue.put({
-                "status": "failed",
-                "error": str(exc),
-                "remediation": (
-                    "playwright install chromium" in str(exc)
-                ),
-            })
-        except Exception as exc:
-            progress_queue.put({"status": "failed", "error": str(exc)})
+        except Exception as e:
+            st.session_state.fatal_error = str(e)
+            st.session_state.scan_running = False
 
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
-    st.rerun()
-
+    threading.Thread(target=worker, daemon=True).start()
 
 def render_progress():
-    st.subheader("Scanning in progress...")
+    st.title("🛰️ Tactical Command Center")
+    job_id = st.session_state.scan_job_id
+    db_path = config.DB_PATH
+    pq = st.session_state.get("progress_queue")
 
-    progress_queue = st.session_state.get("_progress_queue")
-    if progress_queue:
-        # Drain all available progress updates — coalescer already throttles
-        # to ~4 events/sec, so the loop is bounded.
-        while True:
-            try:
-                update = progress_queue.get_nowait()
-                st.session_state.progress = update
-            except queue.Empty:
+    # Static placeholders for smooth updates
+    metrics_slot = st.empty()
+    progress_slot = st.empty()
+    log_slot = st.empty()
+    
+    # R34: High-frequency refresh loop
+    while st.session_state.scan_running:
+        # Check for updates in the queue
+        stats = None
+        try:
+            # Drain queue and take latest only
+            while pq and not pq.empty():
+                stats = pq.get_nowait()
+        except: pass
+        
+        # Fallback to DB if queue is empty or not yet ready
+        if not stats:
+            try: stats = storage.get_realtime_stats(db_path, job_id)
+            except: pass
+
+        if stats:
+            if stats["status"] in ("completed", "failed"):
+                st.session_state.scan_running = False
                 break
+                
+            # Update Metrics
+            with metrics_slot.container():
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Captured", stats["pages_done"])
+                c2.metric("Resources", stats["resources_found"])
+                latency = stats.get("latency_ms", 0) or stats.get("avg_page_time_ms", 0)
+                c3.metric("Latency", f"{latency}ms")
+                swarm = get_swarm()
+                active_peers = len([p for p, t in swarm.peers.items() if time.time() - t < 30])
+                c4.metric("Swarm Nodes", active_peers + 1)
+            
+            # Update Progress Bar
+            progress_slot.progress(min(stats["pages_done"]/(st.session_state.get("max_p", config.MAX_PAGES) or 100), 1.0))
+            
+            # Update Log Feed
+            with log_slot.container():
+                st.subheader("📡 Intelligence Feed")
+                curr_url = stats.get("current_url", "Listening...")
+                st.code(f"SCANNING >> {curr_url}", language="text")
+                if "warning" in stats:
+                    st.warning(stats["warning"])
 
-    prog = st.session_state.progress or {}
-    status = prog.get("status", "unknown")
-
-    if status == "completed":
-        st.session_state.scan_running = False
-        st.session_state.scan_job_id = prog.get("scan_job_id")
-        st.success("Scan completed!")
-        time.sleep(0.5)
-        st.rerun()
-        return
-    elif status == "failed":
-        st.session_state.scan_running = False
-        error_msg = prog.get("error", "Unknown error")
-        if prog.get("remediation"):
-            st.error("Playwright Chromium is not installed.")
-            st.code("playwright install chromium", language="bash")
-            st.caption(error_msg)
-        else:
-            st.error(f"Scan failed: {error_msg}")
-        return
-
-    pages_done = prog.get("pages_done", 0)
-    pages_total = prog.get("pages_total", 1)
-    current_url = prog.get("current_url", "")
-    warning = prog.get("warning")
-    if warning == "render_disabled":
-        st.warning(
-            "JS rendering disabled — Chromium failed repeatedly. "
-            "Remaining JS-rendered pages will be marked failed. "
-            "Check `playwright install chromium` and the application logs."
-        )
-
-    started = st.session_state.get("scan_started_at")
-    elapsed = time.monotonic() - started if started else 0
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Pages Scanned", pages_done)
-    with col2:
-        st.metric("Target", pages_total)
-    with col3:
-        st.metric("Elapsed", f"{int(elapsed)}s")
-
-    st.progress(min(pages_done / max(pages_total, 1), 1.0))
-    st.caption(f"Current: {current_url}")
-
-    # Auto-refresh while scanning
-    time.sleep(1)
-    st.rerun()
+        time.sleep(0.1) # 10Hz smoothness
+    
+    st.rerun() # Exit loop and show results
 
 
-def render_results(db_path: str, scan_job_id: int):
-    job = storage.get_scan_job(db_path, scan_job_id)
-    if not job:
-        st.error("Scan job not found")
-        return
+def render_results(db_path, job_id):
+    job = storage.get_scan_job(db_path, job_id)
+    if not job: return
+    st.title(f"🔍 Mission Intelligence: {job.domain}")
+    st.caption(f"Scan Scope: {job.max_pages} pages | Completed: {job.completed_at}")
 
-    st.subheader(f"Results: {job.domain}")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Pages Scanned", job.pages_scanned)
-    with col2:
-        st.metric("Resources Found", job.resources_found)
-    with col3:
-        overview = analysis.get_tag_overview(db_path, scan_job_id)
-        st.metric("Tags Found", overview["total_tags"])
-
-    tab1, tab2, tab3 = st.tabs([
-        "📊 Hot Resources", "🏷️ Tag Analysis", "⚠️ Failed Pages",
-    ])
+    tab1, tab2, tab3, tab4 = st.tabs(["🏆 Popularity", "🏷️ Tag Analysis", "🧠 Content Intelligence", "🖼️ Asset Gallery"])
 
     with tab1:
-        render_rankings(db_path, scan_job_id)
+        res = storage.get_resources(db_path, job_id)
+        if res:
+            # Show top 5 with images
+            st.subheader("Top Resources")
+            cols = st.columns(5)
+            for i, r in enumerate(res[:5]):
+                with cols[i]:
+                    img_src = _get_local_asset(job_id, r.cover_url)
+                    if img_src:
+                        try:
+                            st.image(img_src, caption=r.title[:20], use_container_width=True)
+                        except Exception:
+                            st.warning("🖼️ Image Error")
+                    else:
+                        st.info("No Image")
+                    st.caption(f"Score: {r.popularity_score}")
+
+            df = pd.DataFrame([{
+                "Score": r.popularity_score,
+                "Title": r.title, 
+                "Category": r.category,
+                "Views": r.views, 
+                "URL": r.url
+            } for r in res])
+            st.dataframe(df.sort_values("Score", ascending=False), use_container_width=True, hide_index=True)
+        else:
+            st.error("No resources identified.")
+            _render_zero_resources_diagnosis(db_path, job_id)
 
     with tab2:
-        render_tag_analysis(db_path, scan_job_id)
+        overview = analysis.get_tag_overview(db_path, job_id)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Unique Tags", overview["total_tags"])
+        c2.metric("Resources", overview["total_resources"])
+        c3.metric("Avg Tags/Res", overview["avg_tags_per_resource"])
+
+        tags = analysis.get_tag_stats(db_path, job_id)
+        if tags:
+            tag_df = pd.DataFrame([{"Tag": t.name, "Frequency": t.resource_count} for t in tags])
+            st.bar_chart(tag_df.set_index("Tag").head(20))
+            
+            st.subheader("🤝 Tag Correlation")
+            st.write("Topics that frequently appear together in the same resource.")
+            co_occur = analysis.get_tag_cooccurrence(db_path, job_id)
+            if co_occur:
+                co_df = pd.DataFrame([{
+                    "Topic A": c["pair"][0],
+                    "Topic B": c["pair"][1],
+                    "Strength": c["count"]
+                } for c in co_occur])
+                st.table(co_df.head(10))
+            else:
+                st.caption("No significant tag correlations found yet.")
+                
+            st.subheader("📦 All Tags")
+            st.dataframe(tag_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No tags extracted. Ensure multi-signal tagging is enabled.")
 
     with tab3:
-        render_failed_pages(db_path, scan_job_id)
+        st.subheader("SimHash Content Clusters")
+        st.write("Groups of resources identified as near-duplicate content based on 64-bit SimHash fingerprints.")
+        
+        clusters = analysis.get_cluster_report(db_path, job_id)
+        if clusters:
+            for i, c in enumerate(clusters):
+                with st.expander(f"Cluster #{i+1}: {c['representative_title']} ({c['size']} items, avg popularity {c['avg_popularity']})"):
+                    st.write("**Common Tags:** " + (", ".join(c["common_tags"]) if c["common_tags"] else "None"))
+                    st.write("**Matching URLs:**")
+                    for url in c["urls"]:
+                        st.markdown(f"- {url}")
+        else:
+            st.success("No significant content clusters found. All resources appear unique.")
+            
+        st.divider()
+        st.subheader("🔎 Semantic Discovery")
+        selected_res = st.selectbox("Find related items for:", res, format_func=lambda x: x.title)
+        if selected_res:
+            similar = analysis.get_similar_items(db_path, selected_res.id)
+            if similar:
+                st.write(f"Items related to **{selected_res.title}**:")
+                cols = st.columns(len(similar))
+                for i, s in enumerate(similar):
+                    with cols[i]:
+                        img_src = _get_local_asset(job_id, s.cover_url)
+                        if img_src:
+                            try:
+                                st.image(img_src, use_container_width=True)
+                            except Exception:
+                                st.warning("🖼️ Err")
+                        else:
+                            st.info("No Image")
+                        st.caption(s.title[:20])
+            else:
+                st.info("No similar items found for this specific resource.")
 
+    with tab4:
+        st.subheader("Archived Resource Gallery")
+        if res:
+            # Simple grid for all images
+            cols = st.columns(6)
+            for i, r in enumerate(res):
+                local_path = _get_local_asset(job_id, r.cover_url)
+                # Only show if it's a confirmed local file path
+                if local_path and isinstance(local_path, str) and local_path.startswith("data/"):
+                    with cols[i % 6]:
+                        try:
+                            st.image(local_path, use_container_width=True)
+                            st.caption(r.title[:15])
+                        except Exception:
+                            pass
+        else:
+            st.info("No assets archived for this mission.")
 
-# Hint dict keys must match values written to pages.failure_reason by
-# crawler/core/engine.py (`http_error`, `robots_blocked`, `render_failed`,
-# `fetch_failed`). The "render disabled" condition is surfaced separately
-# via the live progress event's `warning` field, not via failure_reason.
-_FAILURE_REASON_HINTS = {
-    "http_error": (
-        "All fetch attempts failed (DNS, refused, 4xx/5xx, timeout). "
-        "Verify the URL is reachable in a browser; check that you used "
-        "https:// not http:// if the site requires TLS."
-    ),
-    "robots_blocked": (
-        "robots.txt forbids crawling these URLs. "
-        "This is the site's policy, not a bug."
-    ),
-    "render_failed": (
-        "Plain HTTP succeeded but the Playwright render attempt failed. "
-        "Check `playwright install chromium` and the application logs."
-    ),
-    "fetch_failed": (
-        "Generic fetch failure. See logs for the underlying exception."
-    ),
-}
+def render_history(db_path):
+    st.title("🛰️ Strategic Intelligence Archive")
+    
+    # R29: Global Metrics Summary
+    with get_swarm()._l1_lock if hasattr(get_swarm(), "_l1_lock") else threading.Lock():
+         # Simplified global count
+         try:
+            with storage.get_connection(db_path) as conn:
+                total_res = conn.execute("SELECT COUNT(*) FROM resources").fetchone()[0]
+                total_tags = conn.execute("SELECT COUNT(DISTINCT name) FROM tags").fetchone()[0]
+         except: total_res, total_tags = 0, 0
 
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Intelligence Assets", total_res)
+    c2.metric("Known Topics", total_tags)
+    c3.metric("System Status", "Ready")
 
-def _render_zero_resources_diagnosis(db_path: str, scan_job_id: int) -> None:
-    """Replace the misleading 'No resources found' message with an actionable
-    diagnosis: how many pages were fetched vs failed, and what the failure
-    reasons were. Only renders when zero resources were extracted."""
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        counts = {
-            row["status"]: row["c"]
-            for row in conn.execute(
-                "SELECT status, COUNT(*) AS c FROM pages "
-                "WHERE scan_job_id = ? GROUP BY status",
-                (scan_job_id,),
-            )
-        }
-        failure_groups = conn.execute(
-            "SELECT failure_reason, COUNT(*) AS c FROM pages "
-            "WHERE scan_job_id = ? AND status = 'failed' "
-            "GROUP BY failure_reason ORDER BY c DESC",
-            (scan_job_id,),
-        ).fetchall()
-
-    fetched = counts.get("fetched", 0)
-    failed = counts.get("failed", 0)
-    pending = counts.get("pending", 0)
-    total = fetched + failed + pending
-
-    if failed and not fetched:
-        # All pages failed — the misleading "No resources" goes away
-        # entirely; show what actually went wrong. Defensive: count vs
-        # group_by races (writer commits between the two queries) can
-        # produce failed>0 with empty failure_groups.
-        if not failure_groups:
-            st.error(f"Scan failed: {failed} page(s) errored out.")
-            return
-        primary = failure_groups[0]
-        reason = primary["failure_reason"] or "(unknown)"
-        st.error(
-            f"Scan failed: all {failed} page(s) errored out before "
-            f"resources could be extracted. "
-            f"Most common failure: **{reason}** ({primary['c']} of {failed})."
-        )
-        hint = _FAILURE_REASON_HINTS.get(reason)
-        if hint:
-            st.caption(hint)
-        if len(failure_groups) > 1:
-            with st.expander("All failure reasons"):
-                st.dataframe(
-                    [{"Reason": g["failure_reason"] or "(unknown)",
-                      "Count": g["c"]} for g in failure_groups],
-                    use_container_width=True, hide_index=True,
-                )
-    elif fetched and not failed:
-        # Pages loaded fine but the parser found nothing extractable.
-        st.warning(
-            f"Crawled {fetched} page(s) successfully but the parser "
-            f"extracted **0 resources**. Likely causes: the site needs "
-            f"JS rendering (try **Force Playwright** in the sidebar), or "
-            f"its HTML structure doesn't match the resource-extraction "
-            f"heuristics (looking for `<article>`, `og:title`, card grids)."
-        )
-    elif fetched and failed:
-        st.warning(
-            f"Crawled {fetched} page(s) successfully and {failed} "
-            f"failed. Parser extracted **0 resources** from the "
-            f"successful pages."
-        )
-        if failure_groups:  # race-window safe (see all-failed branch)
-            primary = failure_groups[0]
-            reason = primary["failure_reason"] or "(unknown)"
-            st.caption(
-                f"Most common failure on the {failed} failed page(s): "
-                f"**{reason}** ({primary['c']})."
-            )
-    else:
-        # Fallback — shouldn't happen normally.
-        st.info(
-            f"No resources extracted (pages: {total} total, "
-            f"{fetched} fetched, {failed} failed, {pending} pending)."
-        )
-
-
-def render_failed_pages(db_path: str, scan_job_id: int):
-    """Show failed pages grouped by failure_reason so users can debug
-    crawl problems without digging through logs."""
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        # Aggregate by reason for the summary table.
-        groups = conn.execute(
-            "SELECT failure_reason, COUNT(*) AS c FROM pages "
-            "WHERE scan_job_id = ? AND status = 'failed' "
-            "GROUP BY failure_reason ORDER BY c DESC",
-            (scan_job_id,),
-        ).fetchall()
-        # Per-row drilldown.
-        failed_rows = conn.execute(
-            "SELECT url, failure_reason, depth FROM pages "
-            "WHERE scan_job_id = ? AND status = 'failed' "
-            "ORDER BY failure_reason, url",
-            (scan_job_id,),
-        ).fetchall()
-
-    if not failed_rows:
-        st.success("No failed pages — crawl is clean.")
-        return
-
-    st.subheader("Failure Summary")
-    st.dataframe(
-        [{"Reason": (g["failure_reason"] or "(unknown)"), "Count": g["c"]}
-         for g in groups],
-        use_container_width=True, hide_index=True,
-    )
-
-    st.subheader("Failed URLs")
-    for group in groups:
-        reason = group["failure_reason"] or "(unknown)"
-        with st.expander(f"{reason} ({group['c']})"):
-            urls = [
-                {"URL": r["url"], "Depth": r["depth"]}
-                for r in failed_rows if (r["failure_reason"] or "(unknown)") == reason
-            ]
-            st.dataframe(urls, use_container_width=True, hide_index=True)
-
-
-def render_rankings(db_path: str, scan_job_id: int):
-    resources = storage.get_resources(db_path, scan_job_id)
-    if not resources:
-        _render_zero_resources_diagnosis(db_path, scan_job_id)
-        return
-
-    # Build DataFrame-like data for display
-    data = []
-    for r in resources:
-        data.append({
-            "Score": r.popularity_score,
-            "Title": r.title,
-            "Views": r.views,
-            "Likes": r.likes,
-            "Hearts": r.hearts,
-            "Tags": ", ".join(r.tags) if r.tags else "",
-            "Category": r.category,
-            "Published": r.published_at,
-            "URL": r.url,
-        })
-
-    st.dataframe(data, use_container_width=True, hide_index=True)
-
-    # Export buttons
-    col1, col2 = st.columns(2)
-    with col1:
-        csv_data = export.export_resources_csv(db_path, scan_job_id)
-        st.download_button("Download CSV", csv_data, f"resources_{scan_job_id}.csv", "text/csv")
-    with col2:
-        json_data = export.export_resources_json(db_path, scan_job_id)
-        st.download_button("Download JSON", json_data, f"resources_{scan_job_id}.json", "application/json")
-
-
-def render_tag_analysis(db_path: str, scan_job_id: int):
-    tags = analysis.get_tag_stats(db_path, scan_job_id)
-    if not tags:
-        st.info("No tags found in this scan.")
-        return
-
-    overview = analysis.get_tag_overview(db_path, scan_job_id)
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Total Tags", overview["total_tags"])
-    with col2:
-        st.metric("Total Resources", overview["total_resources"])
-    with col3:
-        st.metric("Avg Tags/Resource", overview["avg_tags_per_resource"])
-
-    # Top 20 tags bar chart
-    st.subheader("Top 20 Tags by Frequency")
-    top_tags = tags[:20]
-    chart_data = {t.name: t.resource_count for t in top_tags}
-    st.bar_chart(chart_data)
-
-    # Tag → Resource explorer
-    st.subheader("Explore Tag Resources")
-    tag_options = {f"{t.name} ({t.resource_count})": t for t in tags}
-    selected_tag_label = st.selectbox("Select a tag", list(tag_options.keys()))
-    if selected_tag_label:
-        selected_tag = tag_options[selected_tag_label]
-        tag_resources = analysis.get_tag_resources(db_path, selected_tag.id)
-        if tag_resources:
-            data = [{
-                "Score": r.popularity_score,
-                "Title": r.title,
-                "Views": r.views,
-                "URL": r.url,
-            } for r in tag_resources]
-            st.dataframe(data, use_container_width=True, hide_index=True)
-
-    # Tag export
-    col1, col2 = st.columns(2)
-    with col1:
-        csv_data = export.export_tags_csv(db_path, scan_job_id)
-        st.download_button("Download Tags CSV", csv_data, f"tags_{scan_job_id}.csv", "text/csv")
-    with col2:
-        json_data = export.export_tags_json(db_path, scan_job_id)
-        st.download_button("Download Tags JSON", json_data, f"tags_{scan_job_id}.json", "application/json")
-
-
-def render_history(db_path: str):
-    st.info("Enter a URL in the sidebar and click 'Start Scan' to begin.")
+    st.subheader("Mission Management")
     jobs = storage.list_scan_jobs(db_path)
-    if not jobs:
-        return
-
-    st.subheader("Previous Scans")
-    data = [{
-        "ID": j.id,
-        "Domain": j.domain,
-        "Status": j.status,
-        "Pages": j.pages_scanned,
-        "Resources": j.resources_found,
-        "Created": j.created_at,
-    } for j in jobs]
-    st.dataframe(data, use_container_width=True, hide_index=True)
-
-    empty_jobs = [j for j in jobs if j.resources_found == 0]
-    if empty_jobs:
-        st.caption(
-            f"{len(empty_jobs)} scan(s) found no resources — likely failed "
-            "fetches or unparseable pages."
-        )
-        confirm = st.checkbox(
-            f"Confirm delete of {len(empty_jobs)} empty scan(s)",
-            key="confirm_purge_empty",
-        )
-        if st.button("Purge empty scans", key="purge_empty_btn",
-                     disabled=not confirm):
-            # Always clear the checkbox state — even if a per-row delete
-            # raises mid-loop. Without try/finally the sticky checkbox
-            # auto-re-arms next render and silently re-purges.
-            try:
-                for j in empty_jobs:
-                    storage.delete_scan_job(db_path, j.id)
-                    if st.session_state.get("scan_job_id") == j.id:
-                        st.session_state.scan_job_id = None
-            finally:
-                st.session_state.pop("confirm_purge_empty", None)
-            st.success(f"Deleted {len(empty_jobs)} empty scan(s).")
-            st.rerun()
-
+    if jobs:
+        # R31: Interactive management list
+        for j in sorted(jobs, key=lambda x: x.id, reverse=True):
+            cols = st.columns([1, 4, 2, 2, 2])
+            cols[0].write(f"`#{j.id}`")
+            cols[1].write(f"**{j.domain}**")
+            cols[2].write(f"📦 {j.resources_found}")
+            
+            # Action buttons
+            if cols[3].button("📂 VIEW", key=f"view_{j.id}"):
+                st.session_state.scan_job_id = j.id
+                st.rerun()
+                
+            if cols[4].button("🗑️ DELETE", key=f"del_{j.id}"):
+                storage.delete_scan_job(db_path, j.id)
+                st.toast(f"Mission #{j.id} purged successfully.", icon="🔥")
+                st.rerun()
+                
+        st.divider()
+        st.write("### Quick Overview Table")
+        df = pd.DataFrame([{"ID": j.id, "Target": j.domain, "Status": j.status, "Resources": j.resources_found} for j in jobs])
+        st.dataframe(df.sort_values("ID", ascending=False), use_container_width=True, hide_index=True)
+    
+    # Global Tag Cloud (Top 30)
+    st.subheader("🌐 Global Trending Topics")
+    # We'll use a hack to get all tags across jobs
+    try:
+        with storage.get_connection(db_path) as conn:
+            all_tags = conn.execute("SELECT name, SUM(resource_count) as total FROM tags GROUP BY name ORDER BY total DESC LIMIT 30").fetchall()
+        if all_tags:
+            tag_data = [{"Tag": t[0], "Count": t[1]} for t in all_tags]
+            st.bar_chart(pd.DataFrame(tag_data).set_index("Tag"))
+    except: pass
 
 if __name__ == "__main__":
     main()

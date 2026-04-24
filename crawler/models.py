@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Data models as Python dataclasses."""
 
 from concurrent.futures import Future
@@ -18,6 +20,8 @@ class ScanJob:
     completed_at: str | None = None
     cache_hits: int = 0
     cache_misses: int = 0
+    avg_page_time_ms: int = 0
+    error_count: int = 0
 
 
 @dataclass
@@ -48,6 +52,10 @@ class Resource:
     published_at: str = ""
     popularity_score: float = 0.0
     raw_data: str = ""  # JSON string
+    content_fingerprint: str = ""
+    content_dna: str = ""
+    origin_sites: str = ""
+    alternative_urls: str = ""
     tags: list[str] = field(default_factory=list)
 
 
@@ -62,23 +70,35 @@ class Tag:
 @dataclass
 class ParseResult:
     """Result from parsing a single page."""
+
     page_type: str = "other"
     resources: list[Resource] = field(default_factory=list)
     links: list[str] = field(default_factory=list)
+    outbound_targets: list[str] = field(
+        default_factory=list
+    )  # Found high-value external domains
+    source: str = "static"  # "static" | "rendered" — extraction source
 
 
 # --- Inter-thread message types ---
 
+
 @dataclass
 class RenderRequest:
     """Worker-to-render-thread request. Worker awaits `future.result()`."""
+
     url: str
     future: Future  # Future[str | None] — resolved HTML or exception
+    enable_scroll: bool = False  # Enable infinite scroll detection
+    scroll_pause_ms: int = 500  # Pause between scroll attempts
+    max_scroll_count: int = 10  # Maximum scroll attempts
+    stability_threshold: int = 3  # Consecutive no-DOM-change threshold to stop
 
 
 @dataclass
 class InsertPageRequest:
     """Orchestrator/Frontier-to-writer request. Caller awaits `future.result()` for page_id."""
+
     scan_job_id: int
     url: str
     depth: int
@@ -94,6 +114,7 @@ class InsertPagesBatchRequest:
     match the input items. This collapses N fsyncs into one and lets
     Frontier.push exit its lock without waiting for any DB round-trip.
     """
+
     scan_job_id: int
     items: list[tuple[str, int]]  # [(url, depth), ...]
     future: Future  # Future[list[int]] — resolved page_ids in input order
@@ -105,21 +126,25 @@ class PageWriteRequest:
     is supplied) signals success/failure to the worker via that Future so
     counter increments only happen on confirmed-committed writes.
     """
+
     scan_job_id: int
     page_id: int
     parse_result: ParseResult | None
-    page_status: str                  # "fetched" | "failed"
+    page_status: str  # "fetched" | "failed"
     page_type: str = "other"
     failure_reason: str | None = None
-    reply: Future | None = None       # Future[bool] — True on commit, exception on rollback
+    reply: Future | None = None  # Future[bool] — True on commit, exception on rollback
 
 
 @dataclass
 class ScanJobUpdateRequest:
     """Final job-state update, sent via writer as last operation before shutdown."""
+
     scan_job_id: int
-    status: str                        # "completed" | "failed" | "cancelled"
+    status: str  # "completed" | "failed" | "cancelled"
     pages_scanned: int = 0
     resources_found: int = 0
     cache_hits: int = 0
     cache_misses: int = 0
+    avg_page_time_ms: int = 0
+    error_count: int = 0

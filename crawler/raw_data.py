@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Resource.raw_data JSON schema — internal format, not an external contract.
 
 This module defines the on-disk shape of the ``raw_data`` column (a TEXT
@@ -41,26 +43,36 @@ PROVENANCE_MICRODATA = "microdata"
 PROVENANCE_DOM = "dom"
 PROVENANCE_MISSING = "missing"
 
-VALID_PROVENANCE_SOURCES = frozenset({
-    PROVENANCE_JSONLD,
-    PROVENANCE_OG,
-    PROVENANCE_TWITTER,
-    PROVENANCE_MICRODATA,
-    PROVENANCE_DOM,
-    PROVENANCE_MISSING,
-})
+VALID_PROVENANCE_SOURCES = frozenset(
+    {
+        PROVENANCE_JSONLD,
+        PROVENANCE_OG,
+        PROVENANCE_TWITTER,
+        PROVENANCE_MICRODATA,
+        PROVENANCE_DOM,
+        PROVENANCE_MISSING,
+    }
+)
 
 # Resource fields that get provenance tracking. `description` is
 # deliberately NOT here — it lives as a top-level sibling of provenance
 # in the raw_data JSON, not as a tracked provenance entry.
-PROVENANCE_FIELDS = frozenset({
-    "title", "cover_url",
-    "views", "likes", "hearts",
-    "tags", "category", "published_at",
-})
+PROVENANCE_FIELDS = frozenset(
+    {
+        "title",
+        "cover_url",
+        "views",
+        "likes",
+        "hearts",
+        "tags",
+        "category",
+        "published_at",
+    }
+)
 
 
 # --- Build / Parse ---------------------------------------------------------
+
 
 def build_raw_data(provenance: dict, description: str = "") -> str:
     """Serialize provenance map + optional description to the v1 JSON.
@@ -70,9 +82,7 @@ def build_raw_data(provenance: dict, description: str = "") -> str:
     ``PROVENANCE_FIELDS`` constants rather than raw strings.
     """
     if not isinstance(description, str):
-        raise TypeError(
-            f"description must be str, got {type(description).__name__}"
-        )
+        raise TypeError(f"description must be str, got {type(description).__name__}")
     for field, source in provenance.items():
         if field not in PROVENANCE_FIELDS:
             raise ValueError(

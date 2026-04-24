@@ -1,0 +1,110 @@
+[
+  {
+    "finding": "P0 test failures are ACTUAL blocker, not theoretical",
+    "severity": "HIGH",
+    "confidence": 0.95,
+    "detail": "8 test failures in test_crawler.py are live on main branch. Root cause: fetch_page_with_cache_tracking(url, cache_service) returns (html, is_cached) on line 319, but _attempt_fetch() on line 312 returns 4 values (html, is_cached, etag, last_modified). Line 312-313 unpacks as 4-tuple, line 319 returns only 2-tuple. This is a direct code path bug, not a hypothesis.",
+    "path": "/Users/dex/YD 2026/projects/tools/claude-crawler-clean/crawler/core/fetcher.py:312-319",
+    "impact": "All 8 failing tests depend on _fetch_html() → fetch_page_with_cache_tracking(). No R0/R1 work can begin until this is fixed. Test suite gates all integration work.",
+    "recommendation": "Fix immediately (5 min fix). Unpack only (html, is_cached) on line 312, ignore etag/last_modified in the cache_tracking wrapper."
+  },
+  {
+    "finding": "R1.1 specification is incomplete but specified enough to plan",
+    "severity": "MODERATE",
+    "confidence": 0.72,
+    "detail": "Document explicitly chooses Option A (content stability via MutationObserver, 3 consecutive scrolls with no new DOM nodes). This IS a specification — not a hard requirement to implement today, but enough to scope the work. The plan is not blocked on choosing between options; it has chosen. Remaining unknowns (max scroll count=10, pause=500ms) are configurable parameters, not design decisions.",
+    "path": "/Users/dex/YD 2026/projects/tools/claude-crawler-clean/docs/brainstorms/2026-04-20-claude-crawler-optimization-analysis.md:58-61",
+    "impact": "R1.1 can be planned without a separate decision gate. Test harness will need fixture for MutationObserver spy or injectable scroll-callback.",
+    "recommendation": "Specification is complete. No blocker. Implementation can proceed if R0 is done first."
+  },
+  {
+    "finding": "R1.2 parser interface extension is deferred but dependencies not addressed",
+    "severity": "MODERATE",
+    "confidence": 0.68,
+    "detail": "Plan states 'parser.py all `_extract_*` functions receive `source` parameter' but does not trace impact on: (1) existing 150+ extract calls in parser.py itself, (2) storage.py save_resource() signature, (3) test fixtures that mock parser output. The plan identifies the architectural need but not the call-site scope.",
+    "path": "/Users/dex/YD 2026/projects/tools/claude-crawler-clean/docs/brainstorms/2026-04-20-claude-crawler-optimization-analysis.md:63-66",
+    "impact": "R1.2 scope is incomplete. Implementation will require tracing 150+ internal call sites if attempted as stated. Risk: incomplete refactor leaving some _extract_* functions untagged with source=rendered vs source=static.",
+    "recommendation": "Before R1.2 planning: audit parser.py for all _extract_* calls and document the refactor scope (estimated N call-sites to update). Consider wrapper function to inject source parameter rather than editing every call."
+  },
+  {
+    "finding": "R3.2 transaction safety claim needs verification",
+    "severity": "MODERATE",
+    "confidence": 0.70,
+    "detail": "Plan claims 'batch processing will break counter ↔ DB rows invariant' and proposes 'explicit buffer flush' or 'async counter' as mitigation. Current storage.py (435 LOC) uses WriterThread which is single-threaded, so counter and inserts are already serialized. Plan does not acknowledge that the problem may not exist in current architecture — it assumes a concurrent batching scenario that WriterThread prevents by design.",
+    "path": "/Users/dex/YD 2026/projects/tools/claude-crawler-clean/crawler/core/writer.py, /Users/dex/YD 2026/projects/tools/claude-crawler-clean/crawler/core/storage.py",
+    "impact": "R3.2 risk assessment is overstated. If WriterThread is retained, no invariant-breaking is possible (single-threaded). If batching is added without WriterThread refactor, then the risk is real. Plan does not distinguish.",
+    "recommendation": "Clarify whether R3.2 assumes WriterThread remains in place. If yes, re-assess if batching risk is real. If no, specify the new concurrency model that creates the risk."
+  },
+  {
+    "finding": "Performance baseline is missing, making P3 ROI unverifiable",
+    "severity": "MODERATE",
+    "confidence": 0.75,
+    "detail": "Plan states 'must measure current cache hit rate, if <40% delay R3.1' but no baseline data is provided. Current code has HTTP caching via ETag/Last-Modified, but plan does not show: (1) typical hit rate on real crawl jobs, (2) memory footprint of current cache, (3) pages/sec throughput without R3 changes. Success metrics (10% throughput gain, 50% cache hit rate, 600MB memory) are absolute targets, not measured against baseline.",
+    "path": "/Users/dex/YD 2026/projects/tools/claude-crawler-clean/docs/brainstorms/2026-04-20-claude-crawler-optimization-analysis.md:108-112",
+    "impact": "P3 cannot be prioritized or scheduled without baseline. Risk: investing in R3.1/R3.2 may deliver <5% actual gain, making the effort unjustified.",
+    "recommendation": "Before P3 planning: run smoke test suite (100-page crawl) and capture: pages/sec, peak memory, cache hit rate, cache byte size. Then re-assess R3.1 ROI."
+  },
+  {
+    "finding": "R1.3 heuristic validation scope is concrete but not integrated into test plan",
+    "severity": "LOW",
+    "confidence": 0.65,
+    "detail": "Plan specifies 'verify: 100+ real URL test, classification accuracy ≥80%' but does not define: (1) which 100 URLs (fixture? prod data?), (2) how to generate ground truth (manual annotation? already-crawled results?), (3) acceptance criteria if 80% accuracy is not met on day 1 (retry heuristics vs. accept lower bar?).",
+    "path": "/Users/dex/YD 2026/projects/tools/claude-crawler-clean/docs/brainstorms/2026-04-20-claude-crawler-optimization-analysis.md:69-70, 182-183",
+    "impact": "R1.3 validation is gate-like but not gated formally. Risk: R1.3 may be skipped or validated on non-representative URLs, leading to 50%+ heuristic false-positive rate in production.",
+    "recommendation": "Add to R1.3 spec: URL source (fixture file, path), ground truth method, and escalation policy if ≥80% accuracy is not achieved. Test this before R1.1/R1.2 integration."
+  },
+  {
+    "finding": "P0 → P1 sequencing is justified but P1+P2 parallelism needs coordination",
+    "severity": "LOW",
+    "confidence": 0.78,
+    "detail": "Plan states P1 (JS rendering) and P2 (performance) 'can be parallel' but R1.2 depends on parser signature changes. R3.2 batch processing assumes WriterThread. If both proceed in parallel, integration risk is high (merge conflicts on engine.py, storage.py, writer.py).",
+    "path": "/Users/dex/YD 2026/projects/tools/claude-crawler-clean/docs/brainstorms/2026-04-20-claude-crawler-optimization-analysis.md:143",
+    "impact": "While technically independent, shared file (engine.py, writer.py) will cause merge conflicts if both teams edit in parallel.",
+    "recommendation": "P1 and P2 can be worked in parallel on separate branches, but must be merged sequentially to origin (P0 → P1 merge → P2 merge). Or designate one reviewer to ensure compatibility checks."
+  },
+  {
+    "finding": "Type annotation P4 priority is correctly downgraded but storage.py gap is real",
+    "severity": "LOW",
+    "confidence": 0.72,
+    "detail": "Plan correctly identifies type coverage: parser.py 98%, storage.py 79%, engine.py 100%. Downgrading P4 to '养护 (maintenance)' is sound. However, storage.py 79% means ~90 LOC is untyped. If R3.2 batch refactor touches storage.py, those untyped functions will need signatures. Not blocking, but worth noting.",
+    "path": "/Users/dex/YD 2026/projects/tools/claude-crawler-clean/crawler/core/storage.py:79% coverage",
+    "impact": "Negligible. P4 can be deferred safely.",
+    "recommendation": "If R3.2 batch refactor is started, add type annotations to storage.py functions it touches as part of that work. Don't do it in a separate pass."
+  },
+  {
+    "finding": "Assumption 1 (Playwright lifecycle is mature) requires verification",
+    "severity": "LOW",
+    "confidence": 0.60,
+    "detail": "Plan assumes 'Playwright browser lifecycle management is mature in render.py (no rewrite needed)'. Current render.py (688 LOC) has browser launch/crash recovery (lines 14-17), but tests show RenderThread in use. No evidence of stress tests on crash scenarios (Chromium OOM, network timeouts during page render). If R0 adds monitoring/retry, this assumption should be validated.",
+    "path": "/Users/dex/YD 2026/projects/tools/claude-crawler-clean/crawler/core/render.py:14-17",
+    "impact": "Low. R0 monitoring will reveal if render lifecycle has gaps. If crash recovery is unreliable, R1 JS rendering will amplify the problem.",
+    "recommendation": "R0.2 retry logic should include render-specific test case: simulate browser crash mid-render and verify recovery."
+  },
+  {
+    "finding": "Data volume assumption (100K pages) is not validated for SQLite choice",
+    "severity": "LOW",
+    "confidence": 0.65,
+    "detail": "Plan assumes 'SQLite sufficient for 100K pages (migrate later if needed)' but provides no evidence. Current test suite uses small in-memory databases. No load test on 100K-row crawl_job + 500K-row resource tables. SQLite write concurrency on WriterThread may become bottleneck at scale.",
+    "path": "/Users/dex/YD 2026/projects/tools/claude-crawler-clean/docs/brainstorms/2026-04-20-claude-crawler-optimization-analysis.md:174",
+    "impact": "Assumption is reasonable for MVP, but not validated. If user scales to 100K pages and observes writer thread blocking, re-assessment will be needed.",
+    "recommendation": "Load test R3.2 batch changes on 10K-page crawl (simple fixture, repeated inserts). If WriterThread blocks >5% of worker time, reconsider SQLite for write-heavy workloads."
+  },
+  {
+    "finding": "Failure path tracing for R1.1 is incomplete",
+    "severity": "MODERATE",
+    "confidence": 0.68,
+    "detail": "Happy path: scroll detects MutationObserver trigger after 3 cycles, returns full HTML. Nil path (no initial HTML from static fetch) not addressed. Empty path (page loads but no new DOM after 30s) should timeout and return partial HTML. Error path (Chromium crash during scroll) should fall through to R0.2 retry or emit RenderError. Plan does not document these 3 alternate paths.",
+    "path": "/Users/dex/YD 2026/projects/tools/claude-crawler-clean/docs/brainstorms/2026-04-20-claude-crawler-optimization-analysis.md:58-66",
+    "impact": "Moderate. Implementation will need to add error handling for nil/empty/error cases. If not addressed in spec, implementer must invent the behavior, risking inconsistency with other R1 units.",
+    "recommendation": "Expand R1.1 spec with explicit failure modes: (nil) no initial HTML → fail with 'render_precondition_failed', (empty) timeout after max_scroll_count → return partial HTML, (error) Chromium crash → delegate to R0.2 retry."
+  },
+  {
+    "finding": "Implementability: R0.1 exception hierarchy is concrete enough",
+    "severity": "SUPPRESS",
+    "confidence": 0.80,
+    "detail": "Plan defines exception classes (NetworkError, RenderError, ParserError, StorageError) with clear semantics. Current code has scattered logging but no unified exception hierarchy. Implementer can create crawler/core/exceptions.py with 4-5 subclasses and wire them into fetcher.py, render.py, parser.py, writer.py within 2-3 hours. No ambiguity.",
+    "path": "/Users/dex/YD 2026/projects/tools/claude-crawler-clean/docs/brainstorms/2026-04-20-claude-crawler-optimization-analysis.md:34",
+    "impact": "None — plan is specific enough.",
+    "recommendation": "No action needed. Implement as-is."
+  }
+]

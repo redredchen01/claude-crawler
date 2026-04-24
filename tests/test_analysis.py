@@ -1,12 +1,25 @@
+from __future__ import annotations
+
 """Tests for analysis module."""
 
 import os
 import tempfile
-import pytest
 
-from crawler.storage import init_db, create_scan_job, save_resource_with_tags, get_resources
+import pytest
+from crawler.analysis import (
+    _normalize,
+    _recency_factor,
+    compute_scores,
+    get_tag_overview,
+    get_tag_stats,
+)
 from crawler.models import Resource
-from crawler.analysis import compute_scores, _normalize, _recency_factor, get_tag_stats, get_tag_overview
+from crawler.storage import (
+    create_scan_job,
+    get_resources,
+    init_db,
+    save_resource_with_tags,
+)
 
 
 @pytest.fixture
@@ -42,6 +55,7 @@ class TestRecencyFactor:
 
     def test_recent_date(self):
         from datetime import datetime
+
         today = datetime.now().strftime("%Y-%m-%d")
         factor = _recency_factor(today)
         # Today should have high recency (close to 100)
@@ -54,6 +68,7 @@ class TestRecencyFactor:
 
     def test_slash_format(self):
         from datetime import datetime
+
         today = datetime.now().strftime("%Y/%m/%d")
         factor = _recency_factor(today)
         assert factor > 80.0
@@ -64,20 +79,41 @@ class TestComputeScores:
         job_id = create_scan_job(db_path, "https://example.com", "example.com")
 
         # Resource with highest views
-        save_resource_with_tags(db_path, Resource(
-            scan_job_id=job_id, title="High Views",
-            url="https://example.com/r1", views=100, likes=10, hearts=5,
-        ))
+        save_resource_with_tags(
+            db_path,
+            Resource(
+                scan_job_id=job_id,
+                title="High Views",
+                url="https://example.com/r1",
+                views=100,
+                likes=10,
+                hearts=5,
+            ),
+        )
         # Resource with highest likes
-        save_resource_with_tags(db_path, Resource(
-            scan_job_id=job_id, title="High Likes",
-            url="https://example.com/r2", views=50, likes=20, hearts=5,
-        ))
+        save_resource_with_tags(
+            db_path,
+            Resource(
+                scan_job_id=job_id,
+                title="High Likes",
+                url="https://example.com/r2",
+                views=50,
+                likes=20,
+                hearts=5,
+            ),
+        )
         # Resource with zero metrics
-        save_resource_with_tags(db_path, Resource(
-            scan_job_id=job_id, title="Zero",
-            url="https://example.com/r3", views=0, likes=0, hearts=0,
-        ))
+        save_resource_with_tags(
+            db_path,
+            Resource(
+                scan_job_id=job_id,
+                title="Zero",
+                url="https://example.com/r3",
+                views=0,
+                likes=0,
+                hearts=0,
+            ),
+        )
 
         compute_scores(db_path, job_id)
         resources = get_resources(db_path, job_id)
@@ -93,10 +129,17 @@ class TestComputeScores:
 
     def test_all_zero_metrics(self, db_path):
         job_id = create_scan_job(db_path, "https://example.com", "example.com")
-        save_resource_with_tags(db_path, Resource(
-            scan_job_id=job_id, title="Zero",
-            url="https://example.com/r1", views=0, likes=0, hearts=0,
-        ))
+        save_resource_with_tags(
+            db_path,
+            Resource(
+                scan_job_id=job_id,
+                title="Zero",
+                url="https://example.com/r1",
+                views=0,
+                likes=0,
+                hearts=0,
+            ),
+        )
         compute_scores(db_path, job_id)
         resources = get_resources(db_path, job_id)
         # Should not crash, score includes recency component
@@ -104,10 +147,17 @@ class TestComputeScores:
 
     def test_single_resource(self, db_path):
         job_id = create_scan_job(db_path, "https://example.com", "example.com")
-        save_resource_with_tags(db_path, Resource(
-            scan_job_id=job_id, title="Only",
-            url="https://example.com/r1", views=100, likes=50, hearts=25,
-        ))
+        save_resource_with_tags(
+            db_path,
+            Resource(
+                scan_job_id=job_id,
+                title="Only",
+                url="https://example.com/r1",
+                views=100,
+                likes=50,
+                hearts=25,
+            ),
+        )
         compute_scores(db_path, job_id)
         resources = get_resources(db_path, job_id)
         # Single resource normalizes to max (100) for each dimension
@@ -124,14 +174,24 @@ class TestTagStats:
 
         # Tag A on 3 resources, Tag B on 1
         for i in range(3):
-            save_resource_with_tags(db_path, Resource(
-                scan_job_id=job_id, title=f"R{i}",
-                url=f"https://example.com/r{i}", tags=["tag-a"],
-            ))
-        save_resource_with_tags(db_path, Resource(
-            scan_job_id=job_id, title="R3",
-            url="https://example.com/r3", tags=["tag-b"],
-        ))
+            save_resource_with_tags(
+                db_path,
+                Resource(
+                    scan_job_id=job_id,
+                    title=f"R{i}",
+                    url=f"https://example.com/r{i}",
+                    tags=["tag-a"],
+                ),
+            )
+        save_resource_with_tags(
+            db_path,
+            Resource(
+                scan_job_id=job_id,
+                title="R3",
+                url="https://example.com/r3",
+                tags=["tag-b"],
+            ),
+        )
 
         compute_scores(db_path, job_id)
         tags = get_tag_stats(db_path, job_id)
@@ -144,14 +204,24 @@ class TestTagStats:
 
     def test_tag_overview(self, db_path):
         job_id = create_scan_job(db_path, "https://example.com", "example.com")
-        save_resource_with_tags(db_path, Resource(
-            scan_job_id=job_id, title="R1",
-            url="https://example.com/r1", tags=["a", "b"],
-        ))
-        save_resource_with_tags(db_path, Resource(
-            scan_job_id=job_id, title="R2",
-            url="https://example.com/r2", tags=["a"],
-        ))
+        save_resource_with_tags(
+            db_path,
+            Resource(
+                scan_job_id=job_id,
+                title="R1",
+                url="https://example.com/r1",
+                tags=["a", "b"],
+            ),
+        )
+        save_resource_with_tags(
+            db_path,
+            Resource(
+                scan_job_id=job_id,
+                title="R2",
+                url="https://example.com/r2",
+                tags=["a"],
+            ),
+        )
         compute_scores(db_path, job_id)
 
         overview = get_tag_overview(db_path, job_id)

@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  crawler-node-1:
+    build: .
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - NODE_ID=node-01
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - redis
+
+  crawler-node-2:
+    build: .
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - NODE_ID=node-02
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - redis
+
+  dashboard:
+    build: .
+    command: streamlit run app.py --server.port=8501 --server.address=0.0.0.0
+    ports:
+      - "8501:8501"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - redis

@@ -1,19 +1,38 @@
 """Tests for storage module."""
 
+from __future__ import annotations
+
 import os
 import sqlite3
 import tempfile
 import threading
+from contextlib import contextmanager
+from unittest.mock import patch
+
 import pytest
 
-from crawler.storage import (
-    init_db, create_scan_job, delete_scan_job, get_scan_job, update_scan_job,
-    list_scan_jobs, insert_page, insert_resource, get_resources,
-    save_resource_with_tags, get_tags, get_resources_by_tag,
-    update_tag_counts, update_page, get_connection,
-    get_cached_response, save_cached_response, clear_http_cache, get_cache_metrics,
-)
 from crawler.models import Resource
+from crawler.storage import (
+    clear_http_cache,
+    create_scan_job,
+    delete_scan_job,
+    get_cache_metrics,
+    get_cached_response,
+    get_connection,
+    get_resources,
+    get_resources_by_tag,
+    get_scan_job,
+    get_tags,
+    init_db,
+    insert_page,
+    insert_resource,
+    list_scan_jobs,
+    save_cached_response,
+    save_resource_with_tags,
+    update_page,
+    update_scan_job,
+    update_tag_counts,
+)
 
 
 @pytest.fixture
@@ -77,9 +96,13 @@ class TestResource:
         page_id = insert_page(db_path, job_id, "https://example.com/page1")
 
         res = Resource(
-            scan_job_id=job_id, page_id=page_id,
-            title="Test Resource", url="https://example.com/res1",
-            views=100, likes=10, hearts=5,
+            scan_job_id=job_id,
+            page_id=page_id,
+            title="Test Resource",
+            url="https://example.com/res1",
+            views=100,
+            likes=10,
+            hearts=5,
         )
         res_id = insert_resource(db_path, res)
         assert res_id is not None
@@ -101,8 +124,10 @@ class TestTagsAndRelations:
     def test_save_resource_with_tags(self, db_path):
         job_id = create_scan_job(db_path, "https://example.com", "example.com")
         res = Resource(
-            scan_job_id=job_id, title="Tagged Resource",
-            url="https://example.com/r1", tags=["python", "web", "scraping"],
+            scan_job_id=job_id,
+            title="Tagged Resource",
+            url="https://example.com/r1",
+            tags=["python", "web", "scraping"],
         )
         res_id = save_resource_with_tags(db_path, res)
         assert res_id is not None
@@ -117,8 +142,10 @@ class TestTagsAndRelations:
 
         for i in range(3):
             res = Resource(
-                scan_job_id=job_id, title=f"Resource {i}",
-                url=f"https://example.com/r{i}", tags=["shared-tag"],
+                scan_job_id=job_id,
+                title=f"Resource {i}",
+                url=f"https://example.com/r{i}",
+                tags=["shared-tag"],
                 views=i * 10,
             )
             save_resource_with_tags(db_path, res)
@@ -150,7 +177,8 @@ class TestFailureReasonMigration:
         page_id = insert_page(db_path, job_id, "https://example.com/x")
         with sqlite3.connect(db_path) as conn:
             row = conn.execute(
-                "SELECT failure_reason FROM pages WHERE id = ?", (page_id,),
+                "SELECT failure_reason FROM pages WHERE id = ?",
+                (page_id,),
             ).fetchone()
         assert row[0] == ""
 
@@ -160,7 +188,8 @@ class TestFailureReasonMigration:
         update_page(db_path, page_id, status="failed", failure_reason="HTTP 503")
         with sqlite3.connect(db_path) as conn:
             row = conn.execute(
-                "SELECT status, failure_reason FROM pages WHERE id = ?", (page_id,),
+                "SELECT status, failure_reason FROM pages WHERE id = ?",
+                (page_id,),
             ).fetchone()
         assert row[0] == "failed"
         assert row[1] == "HTTP 503"
@@ -187,9 +216,7 @@ class TestFailureReasonMigration:
                 conn.execute(
                     "INSERT INTO scan_jobs (id, entry_url, domain) VALUES (1, 'x', 'x')"
                 )
-                conn.execute(
-                    "INSERT INTO pages (scan_job_id, url) VALUES (1, 'x')"
-                )
+                conn.execute("INSERT INTO pages (scan_job_id, url) VALUES (1, 'x')")
                 conn.commit()
 
             # Run init_db — triggers migration.
@@ -230,8 +257,10 @@ class TestFailureReasonMigration:
 
             t1 = threading.Thread(target=run)
             t2 = threading.Thread(target=run)
-            t1.start(); t2.start()
-            t1.join(); t2.join()
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
 
             assert errors == [], f"init_db race errors: {errors}"
             with sqlite3.connect(path) as conn:
@@ -249,7 +278,8 @@ class TestGetResourcesQueryCount:
         for i in range(10):
             res = Resource(
                 scan_job_id=job_id,
-                title=f"R{i}", url=f"https://example.com/r{i}",
+                title=f"R{i}",
+                url=f"https://example.com/r{i}",
                 tags=[f"t{j}" for j in range(3)],
             )
             save_resource_with_tags(db_path, res)
@@ -268,8 +298,6 @@ class TestGetResourcesQueryCount:
         try:
             # Import the actual function and monkey-patch get_connection to
             # return our traced connection.
-            from unittest.mock import patch
-            from contextlib import contextmanager
 
             @contextmanager
             def fake_get_conn(_path=None):
@@ -286,7 +314,8 @@ class TestGetResourcesQueryCount:
             assert len(res.tags) == 3
         # Only one SELECT from resources ran — no N+1.
         resource_selects = [
-            s for s in trace
+            s
+            for s in trace
             if s.strip().upper().startswith("SELECT") and "FROM RESOURCES" in s.upper()
         ]
         assert len(resource_selects) == 1, (
@@ -298,7 +327,8 @@ class TestGetResourcesQueryCount:
         job_id = create_scan_job(db_path, "https://example.com", "example.com")
         res = Resource(
             scan_job_id=job_id,
-            title="NoTags", url="https://example.com/nt",
+            title="NoTags",
+            url="https://example.com/nt",
             tags=[],
         )
         save_resource_with_tags(db_path, res)
@@ -313,7 +343,8 @@ class TestGetResourcesQueryCount:
         job_id = create_scan_job(db_path, "https://example.com", "example.com")
         res = Resource(
             scan_job_id=job_id,
-            title="T", url="https://example.com/t",
+            title="T",
+            url="https://example.com/t",
             tags=["a,b", "c,d", "e"],
         )
         save_resource_with_tags(db_path, res)
@@ -328,11 +359,20 @@ class TestDeleteScanJob:
         sj = create_scan_job(db_path, "https://a.com", "a.com", 10, 2)
         page_id = insert_page(db_path, sj, "https://a.com/x")
         update_page(db_path, page_id, status="fetched")
-        save_resource_with_tags(db_path, Resource(
-            scan_job_id=sj, page_id=page_id,
-            title="t", url="https://a.com/x", cover_url="",
-            tags=["t1", "t2"], views=1, likes=1, hearts=1,
-        ))
+        save_resource_with_tags(
+            db_path,
+            Resource(
+                scan_job_id=sj,
+                page_id=page_id,
+                title="t",
+                url="https://a.com/x",
+                cover_url="",
+                tags=["t1", "t2"],
+                views=1,
+                likes=1,
+                hearts=1,
+            ),
+        )
         return sj
 
     def test_cascades_through_all_child_tables(self, db_path):
@@ -358,7 +398,8 @@ class TestDeleteScanJob:
         # And no orphaned pages.
         with sqlite3.connect(db_path) as conn:
             p_count = conn.execute(
-                "SELECT COUNT(*) FROM pages WHERE scan_job_id = ?", (sj,),
+                "SELECT COUNT(*) FROM pages WHERE scan_job_id = ?",
+                (sj,),
             ).fetchone()[0]
         assert p_count == 0
 
@@ -393,8 +434,15 @@ class TestHttpCache:
         with get_connection(db_path) as conn:
             url = "https://example.com/page1"
             body = b"<html>content</html>"
-            save_cached_response(conn, url, "abc123", "Wed, 21 Oct 2025 07:28:00 GMT", "max-age=3600", body)
-            
+            save_cached_response(
+                conn,
+                url,
+                "abc123",
+                "Wed, 21 Oct 2025 07:28:00 GMT",
+                "max-age=3600",
+                body,
+            )
+
             result = get_cached_response(conn, url)
             assert result is not None
             assert result["etag"] == "abc123"
@@ -411,7 +459,7 @@ class TestHttpCache:
             save_cached_response(conn, url, "v1", "date1", "max-age=3600", b"old")
             # Update
             save_cached_response(conn, url, "v2", "date2", "max-age=7200", b"new")
-            
+
             result = get_cached_response(conn, url)
             assert result["etag"] == "v2"
             assert result["last_modified"] == "date2"
@@ -424,7 +472,7 @@ class TestHttpCache:
         with get_connection(db_path) as conn:
             url = "https://example.com/page1"
             save_cached_response(conn, url, None, None, None, b"body")
-            
+
             result = get_cached_response(conn, url)
             assert result is not None
             assert result["etag"] is None
@@ -439,14 +487,14 @@ class TestHttpCache:
             save_cached_response(conn, "https://a.com", "etag1", None, None, b"a")
             save_cached_response(conn, "https://b.com", "etag2", None, None, b"b")
             save_cached_response(conn, "https://c.com", "etag3", None, None, b"c")
-            
+
             # Verify they exist
             assert get_cached_response(conn, "https://a.com") is not None
             assert get_cached_response(conn, "https://b.com") is not None
-            
+
             # Clear
             clear_http_cache(conn)
-            
+
             # Verify all gone
             assert get_cached_response(conn, "https://a.com") is None
             assert get_cached_response(conn, "https://b.com") is None
@@ -455,9 +503,13 @@ class TestHttpCache:
     def test_get_cache_metrics(self, db_path):
         """Metrics report cache size and entry count."""
         with get_connection(db_path) as conn:
-            save_cached_response(conn, "https://a.com", None, None, None, b"abc")  # 3 bytes
-            save_cached_response(conn, "https://b.com", None, None, None, b"12345")  # 5 bytes
-            
+            save_cached_response(
+                conn, "https://a.com", None, None, None, b"abc"
+            )  # 3 bytes
+            save_cached_response(
+                conn, "https://b.com", None, None, None, b"12345"
+            )  # 5 bytes
+
             metrics = get_cache_metrics(conn)
             assert metrics["total_bytes"] == 8
             assert metrics["entry_count"] == 2
@@ -472,18 +524,20 @@ class TestHttpCache:
     def test_concurrent_cache_writes(self, db_path):
         """Concurrent writes to same URL via UPSERT are safe."""
         import concurrent.futures
-        
+
         def write_cache(url, etag, body):
             with get_connection(db_path) as conn:
                 save_cached_response(conn, url, etag, None, None, body)
-        
+
         url = "https://example.com/concurrent"
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             futures = []
             for i in range(5):
-                futures.append(executor.submit(write_cache, url, f"etag{i}", f"body{i}".encode()))
+                futures.append(
+                    executor.submit(write_cache, url, f"etag{i}", f"body{i}".encode())
+                )
             concurrent.futures.wait(futures)
-        
+
         # Final state should be valid (last write wins)
         with get_connection(db_path) as conn:
             result = get_cached_response(conn, url)
@@ -495,7 +549,9 @@ class TestHttpCache:
         """Migration should create http_cache table (tested via successful save/get)."""
         # If table wasn't created, this would fail
         with get_connection(db_path) as conn:
-            save_cached_response(conn, "https://example.com", "etag", None, None, b"test")
+            save_cached_response(
+                conn, "https://example.com", "etag", None, None, b"test"
+            )
             result = get_cached_response(conn, "https://example.com")
             assert result is not None
 
@@ -503,9 +559,11 @@ class TestHttpCache:
         """Migration should add pages.cached column."""
         job_id = create_scan_job(db_path, "https://example.com", "example.com")
         page_id = insert_page(db_path, job_id, "https://example.com/page1")
-        
+
         # Column should exist and default to False
         with get_connection(db_path) as conn:
-            row = conn.execute("SELECT cached FROM pages WHERE id = ?", (page_id,)).fetchone()
+            row = conn.execute(
+                "SELECT cached FROM pages WHERE id = ?", (page_id,)
+            ).fetchone()
             assert row is not None
             assert row["cached"] == 0  # False in SQLite

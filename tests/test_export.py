@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Tests for export module."""
 
 import csv
@@ -5,12 +7,17 @@ import io
 import json
 import os
 import tempfile
-import pytest
 
-from crawler.storage import init_db, create_scan_job, save_resource_with_tags
-from crawler.models import Resource
+import pytest
 from crawler.analysis import compute_scores
-from crawler.export import export_resources_csv, export_resources_json, export_tags_csv, export_tags_json
+from crawler.export import (
+    export_resources_csv,
+    export_resources_json,
+    export_tags_csv,
+    export_tags_json,
+)
+from crawler.models import Resource
+from crawler.storage import create_scan_job, init_db, save_resource_with_tags
 
 
 @pytest.fixture
@@ -20,21 +27,43 @@ def db_with_data():
     init_db(path)
 
     job_id = create_scan_job(path, "https://example.com", "example.com")
-    save_resource_with_tags(path, Resource(
-        scan_job_id=job_id, title="Resource One",
-        url="https://example.com/r1", views=100, likes=10, hearts=5,
-        category="tech", tags=["python", "web"],
-    ))
-    save_resource_with_tags(path, Resource(
-        scan_job_id=job_id, title="Resource Two",
-        url="https://example.com/r2", views=50, likes=20, hearts=15,
-        tags=["python"],
-    ))
-    save_resource_with_tags(path, Resource(
-        scan_job_id=job_id, title="Comma, in title",
-        url="https://example.com/r3", views=10, likes=5, hearts=2,
-        tags=["tag, with comma"],
-    ))
+    save_resource_with_tags(
+        path,
+        Resource(
+            scan_job_id=job_id,
+            title="Resource One",
+            url="https://example.com/r1",
+            views=100,
+            likes=10,
+            hearts=5,
+            category="tech",
+            tags=["python", "web"],
+        ),
+    )
+    save_resource_with_tags(
+        path,
+        Resource(
+            scan_job_id=job_id,
+            title="Resource Two",
+            url="https://example.com/r2",
+            views=50,
+            likes=20,
+            hearts=15,
+            tags=["python"],
+        ),
+    )
+    save_resource_with_tags(
+        path,
+        Resource(
+            scan_job_id=job_id,
+            title="Comma, in title",
+            url="https://example.com/r3",
+            views=10,
+            likes=5,
+            hearts=2,
+            tags=["tag, with comma"],
+        ),
+    )
     compute_scores(path, job_id)
 
     yield path, job_id
@@ -121,30 +150,54 @@ class TestExportProvenance:
     @pytest.fixture
     def db_with_provenance(self):
         from crawler.raw_data import build_raw_data
+
         fd, path = tempfile.mkstemp(suffix=".db")
         os.close(fd)
         init_db(path)
         job_id = create_scan_job(path, "https://example.com", "example.com")
 
-        save_resource_with_tags(path, Resource(
-            scan_job_id=job_id, title="With Sources",
-            url="https://example.com/a", views=100, likes=10, hearts=0,
-            tags=["python"],
-            raw_data=build_raw_data(
-                {"title": "jsonld", "views": "jsonld", "likes": "dom"},
-                description="From JSON-LD.",
+        save_resource_with_tags(
+            path,
+            Resource(
+                scan_job_id=job_id,
+                title="With Sources",
+                url="https://example.com/a",
+                views=100,
+                likes=10,
+                hearts=0,
+                tags=["python"],
+                raw_data=build_raw_data(
+                    {"title": "jsonld", "views": "jsonld", "likes": "dom"},
+                    description="From JSON-LD.",
+                ),
             ),
-        ))
-        save_resource_with_tags(path, Resource(
-            scan_job_id=job_id, title="Legacy Row",
-            url="https://example.com/b", views=1, likes=1, hearts=1,
-            tags=[], raw_data="",
-        ))
-        save_resource_with_tags(path, Resource(
-            scan_job_id=job_id, title="Corrupt Row",
-            url="https://example.com/c", views=1, likes=1, hearts=1,
-            tags=[], raw_data="{not json",
-        ))
+        )
+        save_resource_with_tags(
+            path,
+            Resource(
+                scan_job_id=job_id,
+                title="Legacy Row",
+                url="https://example.com/b",
+                views=1,
+                likes=1,
+                hearts=1,
+                tags=[],
+                raw_data="",
+            ),
+        )
+        save_resource_with_tags(
+            path,
+            Resource(
+                scan_job_id=job_id,
+                title="Corrupt Row",
+                url="https://example.com/c",
+                views=1,
+                likes=1,
+                hearts=1,
+                tags=[],
+                raw_data="{not json",
+            ),
+        )
         compute_scores(path, job_id)
         yield path, job_id
         os.unlink(path)

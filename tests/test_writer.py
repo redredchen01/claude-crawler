@@ -12,6 +12,8 @@ Coverage matrix (mirrors plan Unit 5 acceptance scenarios):
     - integration: 8 worker threads × 100 writes, no DB lock errors
 """
 
+from __future__ import annotations
+
 import os
 import sqlite3
 import tempfile
@@ -24,11 +26,18 @@ import pytest
 
 from crawler.core.writer import WriterThread, WriterUnavailableError
 from crawler.models import (
-    InsertPageRequest, PageWriteRequest, ParseResult, Resource,
+    InsertPageRequest,
+    PageWriteRequest,
+    ParseResult,
+    Resource,
     ScanJobUpdateRequest,
 )
 from crawler.storage import (
-    create_scan_job, get_resources, get_scan_job, get_tags, init_db,
+    create_scan_job,
+    get_resources,
+    get_scan_job,
+    get_tags,
+    init_db,
 )
 
 
@@ -58,8 +67,9 @@ def started_writer(db_path):
         writer.shutdown(timeout=5.0)
 
 
-def _resource(scan_job_id: int, url: str, *, tags: list[str] | None = None,
-              title: str = "") -> Resource:
+def _resource(
+    scan_job_id: int, url: str, *, tags: list[str] | None = None, title: str = ""
+) -> Resource:
     return Resource(
         scan_job_id=scan_job_id,
         url=url,
@@ -145,13 +155,15 @@ class TestWritePage:
                 ],
                 links=[],
             )
-            started_writer.write_page(PageWriteRequest(
-                scan_job_id=scan_job_id,
-                page_id=page_id,
-                parse_result=parse_result,
-                page_status="fetched",
-                page_type="list",
-            ))
+            started_writer.write_page(
+                PageWriteRequest(
+                    scan_job_id=scan_job_id,
+                    page_id=page_id,
+                    parse_result=parse_result,
+                    page_status="fetched",
+                    page_type="list",
+                )
+            )
 
         started_writer.shutdown(timeout=3.0)
 
@@ -170,15 +182,19 @@ class TestWritePage:
         tags = {t.name for t in get_tags(db_path, scan_job_id)}
         assert tags == {"alpha", "beta"}
 
-    def test_empty_resources_updates_page_only(self, started_writer, db_path, scan_job_id):
+    def test_empty_resources_updates_page_only(
+        self, started_writer, db_path, scan_job_id
+    ):
         page_id = started_writer.insert_page(scan_job_id, "https://example.com/x", 0)
-        started_writer.write_page(PageWriteRequest(
-            scan_job_id=scan_job_id,
-            page_id=page_id,
-            parse_result=ParseResult(page_type="other", resources=[], links=[]),
-            page_status="fetched",
-            page_type="other",
-        ))
+        started_writer.write_page(
+            PageWriteRequest(
+                scan_job_id=scan_job_id,
+                page_id=page_id,
+                parse_result=ParseResult(page_type="other", resources=[], links=[]),
+                page_status="fetched",
+                page_type="other",
+            )
+        )
         started_writer.shutdown(timeout=2.0)
 
         assert get_resources(db_path, scan_job_id) == []
@@ -189,42 +205,53 @@ class TestWritePage:
             ).fetchone()
         assert row["status"] == "fetched"
 
-    def test_write_page_with_reply_resolves_on_commit(self, started_writer, db_path, scan_job_id):
+    def test_write_page_with_reply_resolves_on_commit(
+        self, started_writer, db_path, scan_job_id
+    ):
         """B1: PageWriteRequest with reply Future is resolved with True after commit."""
         page_id = started_writer.insert_page(scan_job_id, "https://example.com/r1", 0)
         reply: Future = Future()
-        started_writer.write_page(PageWriteRequest(
-            scan_job_id=scan_job_id,
-            page_id=page_id,
-            parse_result=ParseResult(page_type="other", resources=[], links=[]),
-            page_status="fetched",
-            page_type="other",
-            reply=reply,
-        ))
+        started_writer.write_page(
+            PageWriteRequest(
+                scan_job_id=scan_job_id,
+                page_id=page_id,
+                parse_result=ParseResult(page_type="other", resources=[], links=[]),
+                page_status="fetched",
+                page_type="other",
+                reply=reply,
+            )
+        )
         assert reply.result(timeout=2.0) is True
 
     def test_write_page_with_reply_set_exception_on_rollback(
-        self, started_writer, db_path, scan_job_id,
+        self,
+        started_writer,
+        db_path,
+        scan_job_id,
     ):
         """B1: PageWriteRequest with reply Future receives exception when the
         per-message handler rolls back. Counter coherence depends on this."""
         page_id = started_writer.insert_page(scan_job_id, "https://example.com/r2", 0)
         reply: Future = Future()
         # Force save_resource_with_tags to raise so _write_page rolls back.
-        with patch("crawler.core.writer.save_resource_with_tags",
-                   side_effect=sqlite3.OperationalError("forced rollback")):
-            started_writer.write_page(PageWriteRequest(
-                scan_job_id=scan_job_id,
-                page_id=page_id,
-                parse_result=ParseResult(
+        with patch(
+            "crawler.core.writer.save_resource_with_tags",
+            side_effect=sqlite3.OperationalError("forced rollback"),
+        ):
+            started_writer.write_page(
+                PageWriteRequest(
+                    scan_job_id=scan_job_id,
+                    page_id=page_id,
+                    parse_result=ParseResult(
+                        page_type="other",
+                        resources=[_resource(scan_job_id, "https://example.com/r2/x")],
+                        links=[],
+                    ),
+                    page_status="fetched",
                     page_type="other",
-                    resources=[_resource(scan_job_id, "https://example.com/r2/x")],
-                    links=[],
-                ),
-                page_status="fetched",
-                page_type="other",
-                reply=reply,
-            ))
+                    reply=reply,
+                )
+            )
             with pytest.raises(sqlite3.OperationalError, match="forced rollback"):
                 reply.result(timeout=2.0)
 
@@ -232,20 +259,25 @@ class TestWritePage:
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
-                "SELECT status FROM pages WHERE id = ?", (page_id,),
+                "SELECT status FROM pages WHERE id = ?",
+                (page_id,),
             ).fetchone()
         assert row["status"] == "pending"
 
-    def test_failed_page_records_failure_reason(self, started_writer, db_path, scan_job_id):
+    def test_failed_page_records_failure_reason(
+        self, started_writer, db_path, scan_job_id
+    ):
         page_id = started_writer.insert_page(scan_job_id, "https://example.com/y", 0)
-        started_writer.write_page(PageWriteRequest(
-            scan_job_id=scan_job_id,
-            page_id=page_id,
-            parse_result=None,
-            page_status="failed",
-            page_type="other",
-            failure_reason="HTTP 503",
-        ))
+        started_writer.write_page(
+            PageWriteRequest(
+                scan_job_id=scan_job_id,
+                page_id=page_id,
+                parse_result=None,
+                page_status="failed",
+                page_type="other",
+                failure_reason="HTTP 503",
+            )
+        )
         started_writer.shutdown(timeout=2.0)
 
         with sqlite3.connect(db_path) as conn:
@@ -259,7 +291,10 @@ class TestWritePage:
 
 class TestErrorRecovery:
     def test_fk_violation_rolls_back_writer_keeps_running(
-        self, started_writer, db_path, scan_job_id,
+        self,
+        started_writer,
+        db_path,
+        scan_job_id,
     ):
         # Insert a real page first to confirm baseline.
         good_page = started_writer.insert_page(scan_job_id, "https://example.com/ok", 0)
@@ -267,23 +302,34 @@ class TestErrorRecovery:
         # Now submit a request whose Future will surface the failure: an
         # InsertPageRequest with a bogus scan_job_id triggers a FK violation.
         bad_future: Future = Future()
-        started_writer._queue.put(InsertPageRequest(
-            scan_job_id=99999, url="https://example.com/bad", depth=0,
-            future=bad_future,
-        ))
+        started_writer._queue.put(
+            InsertPageRequest(
+                scan_job_id=99999,
+                url="https://example.com/bad",
+                depth=0,
+                future=bad_future,
+            )
+        )
         with pytest.raises(sqlite3.IntegrityError):
             bad_future.result(timeout=2.0)
 
         # Writer must keep running — submit another good message and verify it
         # commits. last_exception stays None for per-message errors.
-        next_id = started_writer.insert_page(scan_job_id, "https://example.com/after", 0)
+        next_id = started_writer.insert_page(
+            scan_job_id, "https://example.com/after", 0
+        )
         assert next_id > good_page
         assert started_writer.last_exception is None
 
     def test_atomicity_on_mid_loop_resource_failure(
-        self, started_writer, db_path, scan_job_id,
+        self,
+        started_writer,
+        db_path,
+        scan_job_id,
     ):
-        page_id = started_writer.insert_page(scan_job_id, "https://example.com/atomic", 0)
+        page_id = started_writer.insert_page(
+            scan_job_id, "https://example.com/atomic", 0
+        )
 
         call_count = {"n": 0}
 
@@ -294,23 +340,32 @@ class TestErrorRecovery:
             cursor = conn.execute(
                 "INSERT OR IGNORE INTO resources "
                 "(scan_job_id, page_id, title, url) VALUES (?, ?, ?, ?)",
-                (_resource.scan_job_id, _resource.page_id,
-                 _resource.title, _resource.url),
+                (
+                    _resource.scan_job_id,
+                    _resource.page_id,
+                    _resource.title,
+                    _resource.url,
+                ),
             )
             return cursor.lastrowid
 
         resources = [
             _resource(scan_job_id, f"https://example.com/r{i}") for i in range(10)
         ]
-        with patch("crawler.core.writer.save_resource_with_tags",
-                   side_effect=flaky_save):
-            started_writer.write_page(PageWriteRequest(
-                scan_job_id=scan_job_id,
-                page_id=page_id,
-                parse_result=ParseResult(page_type="list", resources=resources, links=[]),
-                page_status="fetched",
-                page_type="list",
-            ))
+        with patch(
+            "crawler.core.writer.save_resource_with_tags", side_effect=flaky_save
+        ):
+            started_writer.write_page(
+                PageWriteRequest(
+                    scan_job_id=scan_job_id,
+                    page_id=page_id,
+                    parse_result=ParseResult(
+                        page_type="list", resources=resources, links=[]
+                    ),
+                    page_status="fetched",
+                    page_type="list",
+                )
+            )
             _wait_until_drained(started_writer)
 
         # All-or-nothing: failure on resource #4 means none committed.
@@ -318,19 +373,23 @@ class TestErrorRecovery:
 
         # Writer is still alive — submit a clean message and verify it succeeds.
         clean_page = started_writer.insert_page(
-            scan_job_id, "https://example.com/clean", 0,
+            scan_job_id,
+            "https://example.com/clean",
+            0,
         )
-        started_writer.write_page(PageWriteRequest(
-            scan_job_id=scan_job_id,
-            page_id=clean_page,
-            parse_result=ParseResult(
+        started_writer.write_page(
+            PageWriteRequest(
+                scan_job_id=scan_job_id,
+                page_id=clean_page,
+                parse_result=ParseResult(
+                    page_type="list",
+                    resources=[_resource(scan_job_id, "https://example.com/clean/r")],
+                    links=[],
+                ),
+                page_status="fetched",
                 page_type="list",
-                resources=[_resource(scan_job_id, "https://example.com/clean/r")],
-                links=[],
-            ),
-            page_status="fetched",
-            page_type="list",
-        ))
+            )
+        )
         started_writer.shutdown(timeout=2.0)
         assert len(get_resources(db_path, scan_job_id)) == 1
 
@@ -345,14 +404,16 @@ class TestBackpressure:
 
         def produce():
             for i in range(20):
-                writer.write_page(PageWriteRequest(
-                    scan_job_id=scan_job_id,
-                    page_id=sentinel_page_ids[i % 10],
-                    parse_result=None,
-                    page_status="failed",
-                    page_type="other",
-                    failure_reason=f"#{i}",
-                ))
+                writer.write_page(
+                    PageWriteRequest(
+                        scan_job_id=scan_job_id,
+                        page_id=sentinel_page_ids[i % 10],
+                        parse_result=None,
+                        page_status="failed",
+                        page_type="other",
+                        failure_reason=f"#{i}",
+                    )
+                )
                 accepted.append(i)
             producer_done.set()
 
@@ -393,20 +454,26 @@ class TestShutdownDrain:
 
         page_ids: list[int] = []
         for i in range(50):
-            page_ids.append(writer.insert_page(
-                scan_job_id, f"https://example.com/p{i}", 0,
-            ))
+            page_ids.append(
+                writer.insert_page(
+                    scan_job_id,
+                    f"https://example.com/p{i}",
+                    0,
+                )
+            )
 
         # All 50 inserts succeeded synchronously; now blast 50 write_pages
         # and immediately shut down. Sentinel queues behind them.
         for pid in page_ids:
-            writer.write_page(PageWriteRequest(
-                scan_job_id=scan_job_id,
-                page_id=pid,
-                parse_result=ParseResult(page_type="other", resources=[], links=[]),
-                page_status="fetched",
-                page_type="other",
-            ))
+            writer.write_page(
+                PageWriteRequest(
+                    scan_job_id=scan_job_id,
+                    page_id=pid,
+                    parse_result=ParseResult(page_type="other", resources=[], links=[]),
+                    page_status="fetched",
+                    page_type="other",
+                )
+            )
 
         start = time.monotonic()
         writer.shutdown(timeout=3.0)
@@ -421,13 +488,17 @@ class TestShutdownDrain:
 
 
 class TestUpdateScanJob:
-    def test_terminal_status_sets_completed_at(self, started_writer, db_path, scan_job_id):
-        started_writer.update_scan_job(ScanJobUpdateRequest(
-            scan_job_id=scan_job_id,
-            status="completed",
-            pages_scanned=42,
-            resources_found=120,
-        ))
+    def test_terminal_status_sets_completed_at(
+        self, started_writer, db_path, scan_job_id
+    ):
+        started_writer.update_scan_job(
+            ScanJobUpdateRequest(
+                scan_job_id=scan_job_id,
+                status="completed",
+                pages_scanned=42,
+                resources_found=120,
+            )
+        )
         started_writer.shutdown(timeout=2.0)
 
         job = get_scan_job(db_path, scan_job_id)
@@ -457,21 +528,25 @@ class TestConcurrent:
                 barrier.wait()
                 for offset in range(100):
                     pid = page_ids[slice_start + offset]
-                    writer.write_page(PageWriteRequest(
-                        scan_job_id=scan_job_id,
-                        page_id=pid,
-                        parse_result=ParseResult(
+                    writer.write_page(
+                        PageWriteRequest(
+                            scan_job_id=scan_job_id,
+                            page_id=pid,
+                            parse_result=ParseResult(
+                                page_type="list",
+                                resources=[
+                                    _resource(
+                                        scan_job_id,
+                                        f"https://load.test/p{slice_start + offset}/r",
+                                        tags=["t"],
+                                    )
+                                ],
+                                links=[],
+                            ),
+                            page_status="fetched",
                             page_type="list",
-                            resources=[_resource(
-                                scan_job_id,
-                                f"https://load.test/p{slice_start + offset}/r",
-                                tags=["t"],
-                            )],
-                            links=[],
-                        ),
-                        page_status="fetched",
-                        page_type="list",
-                    ))
+                        )
+                    )
             except BaseException as exc:
                 errors.append(exc)
 
@@ -502,12 +577,16 @@ class TestConcurrent:
 class TestInsertPagesBatch:
     """A5: insert_pages_batch — one BEGIN IMMEDIATE per batch, ordered ids."""
 
-    def test_empty_batch_returns_empty_list_no_writer_call(self, started_writer, scan_job_id):
+    def test_empty_batch_returns_empty_list_no_writer_call(
+        self, started_writer, scan_job_id
+    ):
         # Should be a synchronous no-op without enqueuing.
         result = started_writer.insert_pages_batch(scan_job_id, [])
         assert result == []
 
-    def test_batch_returns_ids_in_input_order(self, started_writer, db_path, scan_job_id):
+    def test_batch_returns_ids_in_input_order(
+        self, started_writer, db_path, scan_job_id
+    ):
         items = [
             ("https://example.com/a", 1),
             ("https://example.com/b", 1),
@@ -529,7 +608,9 @@ class TestInsertPagesBatch:
         for (url, _), got_id in zip(items, ids):
             assert rows[url] == got_id
 
-    def test_batch_handles_duplicates_within_batch(self, started_writer, db_path, scan_job_id):
+    def test_batch_handles_duplicates_within_batch(
+        self, started_writer, db_path, scan_job_id
+    ):
         # The same URL appears twice. INSERT OR IGNORE collapses; SELECT
         # returns one row; both input positions get the same page_id.
         items = [
@@ -541,21 +622,28 @@ class TestInsertPagesBatch:
 
         with sqlite3.connect(db_path) as conn:
             count = conn.execute(
-                "SELECT COUNT(*) FROM pages WHERE scan_job_id = ?", (scan_job_id,),
+                "SELECT COUNT(*) FROM pages WHERE scan_job_id = ?",
+                (scan_job_id,),
             ).fetchone()[0]
         assert count == 1
 
     def test_batch_idempotent_with_existing_rows(self, started_writer, scan_job_id):
         # First batch inserts.
-        first = started_writer.insert_pages_batch(scan_job_id, [
-            ("https://example.com/x", 1),
-            ("https://example.com/y", 1),
-        ])
+        first = started_writer.insert_pages_batch(
+            scan_job_id,
+            [
+                ("https://example.com/x", 1),
+                ("https://example.com/y", 1),
+            ],
+        )
         # Second batch with same URLs returns the same ids.
-        second = started_writer.insert_pages_batch(scan_job_id, [
-            ("https://example.com/x", 1),
-            ("https://example.com/y", 1),
-        ])
+        second = started_writer.insert_pages_batch(
+            scan_job_id,
+            [
+                ("https://example.com/x", 1),
+                ("https://example.com/y", 1),
+            ],
+        )
         assert first == second
 
     def test_batch_chunks_large_url_lists(self, started_writer, db_path, scan_job_id):
@@ -568,29 +656,39 @@ class TestInsertPagesBatch:
         assert len(set(ids)) == 2000  # all distinct
         with sqlite3.connect(db_path) as conn:
             count = conn.execute(
-                "SELECT COUNT(*) FROM pages WHERE scan_job_id = ?", (scan_job_id,),
+                "SELECT COUNT(*) FROM pages WHERE scan_job_id = ?",
+                (scan_job_id,),
             ).fetchone()[0]
         assert count == 2000
 
     def test_batch_preserves_input_order_with_mixed_new_and_existing(
-        self, started_writer, db_path, scan_job_id,
+        self,
+        started_writer,
+        db_path,
+        scan_job_id,
     ):
         """Resume path: some URLs are already in pages, some are new. The
         chunked SELECT must still resolve page_ids in the order they were
         submitted."""
         # First batch inserts a few.
-        first = started_writer.insert_pages_batch(scan_job_id, [
-            ("https://example.com/a", 1),
-            ("https://example.com/b", 1),
-        ])
+        first = started_writer.insert_pages_batch(
+            scan_job_id,
+            [
+                ("https://example.com/a", 1),
+                ("https://example.com/b", 1),
+            ],
+        )
         a_id, b_id = first[0], first[1]
 
         # Second batch: a, c (new), b — ordering interleaves existing + new.
-        second = started_writer.insert_pages_batch(scan_job_id, [
-            ("https://example.com/a", 1),
-            ("https://example.com/c", 1),
-            ("https://example.com/b", 1),
-        ])
+        second = started_writer.insert_pages_batch(
+            scan_job_id,
+            [
+                ("https://example.com/a", 1),
+                ("https://example.com/c", 1),
+                ("https://example.com/b", 1),
+            ],
+        )
         assert second[0] == a_id
         assert second[2] == b_id
         # 'c' is new → has its own id distinct from a and b
@@ -600,14 +698,20 @@ class TestInsertPagesBatch:
         # Trigger FK violation by using nonexistent scan_job_id. The whole
         # batch should roll back: zero pages inserted.
         with pytest.raises(Exception):
-            started_writer.insert_pages_batch(99999, [
-                ("https://example.com/p1", 1),
-                ("https://example.com/p2", 1),
-            ])
+            started_writer.insert_pages_batch(
+                99999,
+                [
+                    ("https://example.com/p1", 1),
+                    ("https://example.com/p2", 1),
+                ],
+            )
         # Writer keeps running; subsequent valid batch succeeds.
-        ids = started_writer.insert_pages_batch(scan_job_id, [
-            ("https://example.com/ok", 0),
-        ])
+        ids = started_writer.insert_pages_batch(
+            scan_job_id,
+            [
+                ("https://example.com/ok", 0),
+            ],
+        )
         assert len(ids) == 1
 
 
@@ -632,21 +736,36 @@ class TestHealthSurface:
         writer = WriterThread(db_path, queue_size=2, producer_timeout=0.3)
 
         # Fill the queue so the next put will block.
-        writer.write_page(PageWriteRequest(
-            scan_job_id=scan_job_id, page_id=1, parse_result=None,
-            page_status="failed", page_type="other",
-        ))
-        writer.write_page(PageWriteRequest(
-            scan_job_id=scan_job_id, page_id=2, parse_result=None,
-            page_status="failed", page_type="other",
-        ))
+        writer.write_page(
+            PageWriteRequest(
+                scan_job_id=scan_job_id,
+                page_id=1,
+                parse_result=None,
+                page_status="failed",
+                page_type="other",
+            )
+        )
+        writer.write_page(
+            PageWriteRequest(
+                scan_job_id=scan_job_id,
+                page_id=2,
+                parse_result=None,
+                page_status="failed",
+                page_type="other",
+            )
+        )
 
         start = time.monotonic()
         with pytest.raises(WriterUnavailableError, match="queue full"):
-            writer.write_page(PageWriteRequest(
-                scan_job_id=scan_job_id, page_id=3, parse_result=None,
-                page_status="failed", page_type="other",
-            ))
+            writer.write_page(
+                PageWriteRequest(
+                    scan_job_id=scan_job_id,
+                    page_id=3,
+                    parse_result=None,
+                    page_status="failed",
+                    page_type="other",
+                )
+            )
         elapsed = time.monotonic() - start
         # Should fail close to producer_timeout (0.3s), not hang.
         assert 0.2 < elapsed < 1.0, f"unexpected elapsed: {elapsed}"
@@ -676,7 +795,9 @@ class TestHealthSurface:
         elapsed = time.monotonic() - start
         assert elapsed < 1.5, f"shutdown hung: {elapsed}s"
 
-    def test_insert_page_future_timeout_raises_writer_unavailable(self, db_path, scan_job_id):
+    def test_insert_page_future_timeout_raises_writer_unavailable(
+        self, db_path, scan_job_id
+    ):
         # Pre-fill queue with InsertPageRequests that will never be drained
         # (writer never starts), so the synchronous insert_page below blocks
         # waiting for its Future to resolve.

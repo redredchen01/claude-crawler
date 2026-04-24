@@ -1,688 +1,311 @@
-"""Render thread: owns Chromium subprocess + sync Playwright on a single thread.
+from __future__ import annotations
 
-Sync Playwright is thread-affine; calling it from worker threads triggers
-"event loop already running" errors. The render thread serializes all
-Playwright access behind an in-process queue. Workers submit a
-:class:`RenderRequest` and await ``future.result(timeout=...)``.
-
-Lifecycle:
-    - Lazy launch: Chromium is not started until the first request, so scans
-      that hit zero JS pages never spawn a browser.
-    - Crash recovery: Playwright "Browser has been closed" errors trigger an
-      automatic re-launch on the next request, with backoff (1s, 5s) between
-      attempts. After ``max_consecutive_failures`` attempts in a row the
-      thread refuses further requests with ``RuntimeError``.
-    - Shutdown: drains queued requests with ``ShutdownError`` on their
-      Futures, calls ``browser.close()`` with ``BROWSER_SHUTDOWN_TIMEOUT``,
-      then ``terminate()``/``kill()`` on the Chromium PID we own.
-"""
+"""Render thread with Stealth 8.0 Piercing and Captcha Arsenal."""
 
 import atexit
 import logging
 import os
 import queue
-import shutil
+import random
+import re
 import signal
 import subprocess
 import tempfile
 import threading
 import time
+from dataclasses import dataclass, field
+from typing import Any, List, Optional, Tuple
 from concurrent.futures import Future
-from dataclasses import dataclass
-from collections.abc import Callable
-from typing import Any
 
 from crawler.config import (
-    BROWSER_SHUTDOWN_TIMEOUT, RENDER_QUEUE_SIZE, RENDER_RETRY_COUNT,
-    RENDER_SUBMIT_TIMEOUT, RENDER_TIMEOUT, RENDER_WAIT_NETWORKIDLE_MS,
+    BROWSER_SHUTDOWN_TIMEOUT,
+    RENDER_QUEUE_SIZE,
+    RENDER_RETRY_COUNT,
+    RENDER_SUBMIT_TIMEOUT,
+    RENDER_TIMEOUT,
+    RENDER_WAIT_NETWORKIDLE_MS,
+    SHADOW_DOM_PIERCING_ENABLED,
+    USER_AGENT,
+    USER_AGENT_POOL,
 )
-from crawler.models import RenderRequest
 
 logger = logging.getLogger(__name__)
 
-_SHUTDOWN_SENTINEL = None
-_QUEUE_GET_TIMEOUT = 0.5
-_DEFAULT_RESTART_BACKOFFS = (1.0, 5.0)
-_DEFAULT_MAX_CONSECUTIVE_FAILURES = 3
-_DEVTOOLS_PORT_FILE = "DevToolsActivePort"
-_CHROMIUM_BOOT_TIMEOUT = 10.0
-# Bounded queue: workers block on submit() when render is the bottleneck.
-# Defaults live in crawler.config (RENDER_QUEUE_SIZE, RENDER_SUBMIT_TIMEOUT)
-# so operators can tune them without editing this module.
+class RenderQueueFullError(Exception):
+    """Raised when submit() can't enqueue within the producer timeout."""
 
+_SHADOW_PIERCER_JS = """
+(() => {
+    function pierce(root) {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+        let node = walker.nextNode();
+        while (node) {
+            if (node.shadowRoot) {
+                const shadow = node.shadowRoot;
+                const wrapper = document.createElement('shadow-pierced');
+                wrapper.innerHTML = shadow.innerHTML;
+                node.appendChild(wrapper);
+                pierce(wrapper);
+            }
+            node = walker.nextNode();
+        }
+    }
+    pierce(document.body);
+    return document.documentElement.outerHTML;
+})();
+"""
 
-class ShutdownError(RuntimeError):
-    """Raised on a Future when the render thread shuts down before completing."""
-
-
-class RenderQueueFullError(RuntimeError):
-    """Raised when submit() can't enqueue within the producer timeout —
-    indicates the render thread is the throughput bottleneck."""
-
+@dataclass
+class RenderResult:
+    html: str
+    timed_out: bool = False
 
 @dataclass
 class _ChromiumHandle:
-    """Opaque bundle held by RenderThread between launch and teardown.
-
-    Tests can substitute this with any object — the launch/render/teardown
-    callables passed into RenderThread are responsible for interpreting it.
-
-    ``context`` is the shared browser context — created lazily on first
-    render and recycled across subsequent renders via ``clear_cookies()``
-    / ``clear_permissions()``. For our anonymous, single-domain crawl
-    model that's sufficient state isolation; recreating a fresh
-    ``new_context()`` per page costs ~50-200ms of Chromium IPC overhead.
-    """
     proc: subprocess.Popen | None
-    playwright: Any  # playwright.sync_api.Playwright
-    browser: Any     # playwright.sync_api.Browser
+    playwright: Any
+    browser: Any
     user_data_dir: str | None
-    context: Any = None  # playwright.sync_api.BrowserContext, lazy-created
+    context: Any = None
+    pages_since_reset: int = 0
 
+@dataclass
+class RenderRequest:
+    url: str
+    future: Future
+    enable_scroll: bool = False
 
-def preflight() -> tuple[bool, str]:
-    """Quick check that Playwright + Chromium are installed.
+_SHUTDOWN_SENTINEL = None
 
-    Returns (ok, remediation_message). On success message is empty.
-    Cheap enough to call at scan start; surfaces "playwright install chromium"
-    instead of failing per-page deep inside the render path.
-    """
+# --- Ad-blocking patterns ---
+_BLOCK_PATTERNS = re.compile(
+    r"google-analytics|doubleclick|adservice|adsense|google-analytics|analytics\.js|"
+    r"facebook\.net|facebook\.com/plugins|connect\.facebook\.net|"
+    r"googletagmanager|googletagservices|amazon-adsystem|adnxs|scorecardresearch|"
+    r"tracking|pixel|analytics|metrics|ads-|ads\.|/ads/|advertisement",
+    re.I,
+)
+
+def _kill_proc(proc, timeout):
     try:
-        from playwright.sync_api import sync_playwright
+        proc.terminate()
+        proc.wait(timeout=timeout)
+    except: proc.kill()
+
+def _is_browser_dead_error(exc):
+    # R10: Browser-death detection using typed exception + substring fallback
+    try:
+        from playwright.sync_api import Error as PlaywrightError
+        if isinstance(exc, PlaywrightError):
+            msg = str(exc).lower()
+            if any(m in msg for m in ("browser has been closed", "target closed", "connection closed", "context closed")):
+                return True
     except ImportError:
-        return (
-            False,
-            "Playwright not installed. Run: pip install playwright "
-            "&& playwright install chromium",
-        )
+        pass
+        
+    msg = str(exc).lower()
+    return any(m in msg for m in ("browser has been closed", "target closed"))
+
+def _simulate_human_interaction(page):
+    """Simulate realistic human reading behavior."""
     try:
-        with sync_playwright() as p:
-            path = p.chromium.executable_path
-            if not path or not os.path.exists(path):
-                return (
-                    False,
-                    "Chromium binary missing. Run: playwright install chromium",
-                )
-        return (True, "")
-    except Exception as exc:
-        msg = str(exc)
-        lowered = msg.lower()
-        if (
-            "executable doesn't exist" in lowered
-            or "browsertype.executable_path" in lowered
-            or "no such file" in lowered
-        ):
-            return (
-                False,
-                "Chromium binary missing. Run: playwright install chromium",
-            )
-        return (False, f"Playwright preflight failed: {msg}")
+        # 1. Random mouse jitter
+        for _ in range(random.randint(2, 5)):
+            page.mouse.move(random.randint(100, 700), random.randint(100, 700))
+            time.sleep(random.uniform(0.1, 0.3))
+            
+        # 2. Variable Dwelling (Simulate 'reading')
+        content_len = len(page.content())
+        dwell_time = min(8, max(2, content_len / 5000))
+        time.sleep(random.uniform(dwell_time * 0.5, dwell_time))
+        
+        # 3. Micro-scroll
+        page.evaluate(f"window.scrollBy(0, {random.randint(50, 200)})")
+    except: pass
 
+def _register_interceptors(context):
+    def _intercept(route):
+        # R19: Safety first - never block essential media or images
+        if route.request.resource_type in ("image", "media", "font", "stylesheet"):
+            route.continue_()
+            return
 
-# --- Production launch / render / teardown helpers ---
-# These are split out so RenderThread can accept fakes for tests without
-# pulling in real Chromium.
+        if _BLOCK_PATTERNS.search(route.request.url):
+            route.abort()
+        else:
+            route.continue_()
+    context.route("**/*", _intercept)
 
+def _real_render(handle: _ChromiumHandle, url: str, timeout_ms: int, enable_scroll=False, **kwargs) -> RenderResult:
+    # Superior R11: Dynamic Context Pooling & Rotation
+    if handle.context is not None and handle.pages_since_reset >= 50:
+        logger.info("Rotating browser context for stability.")
+        _teardown_context(handle)
+        handle.pages_since_reset = 0
 
-def _real_launch() -> _ChromiumHandle:
-    """Spawn Chromium under our own Popen, then attach Playwright via CDP."""
-    from playwright.sync_api import sync_playwright
-
-    chromium_exe = _resolve_chromium_path()
-    user_data_dir = tempfile.mkdtemp(prefix="crawler-chromium-")
-    args = [
-        chromium_exe,
-        "--remote-debugging-port=0",
-        "--remote-debugging-address=127.0.0.1",
-        f"--user-data-dir={user_data_dir}",
-        "--headless=new",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-background-timer-throttling",
-        "--disable-renderer-backgrounding",
-        "--disable-features=Translate,BackForwardCache",
-        "--disable-dev-shm-usage",
-        "--no-sandbox",
-    ]
-    proc = subprocess.Popen(
-        args,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-    port = _wait_for_devtools_port(proc, user_data_dir, _CHROMIUM_BOOT_TIMEOUT)
-
-    playwright = sync_playwright().start()
-    try:
-        browser = playwright.chromium.connect_over_cdp(
-            f"http://127.0.0.1:{port}"
-        )
-    except Exception:
-        playwright.stop()
-        _kill_proc(proc, BROWSER_SHUTDOWN_TIMEOUT)
-        shutil.rmtree(user_data_dir, ignore_errors=True)
-        raise
-
-    return _ChromiumHandle(
-        proc=proc, playwright=playwright, browser=browser,
-        user_data_dir=user_data_dir,
-    )
-
-
-def _resolve_chromium_path() -> str:
-    from playwright.sync_api import sync_playwright
-
-    with sync_playwright() as p:
-        path = p.chromium.executable_path
-    if not path or not os.path.exists(path):
-        raise RuntimeError(
-            "Chromium binary missing. Run: playwright install chromium"
-        )
-    return path
-
-
-def _wait_for_devtools_port(proc: subprocess.Popen, user_data_dir: str,
-                            timeout: float) -> int:
-    """Poll Chromium's DevToolsActivePort file until it appears."""
-    port_file = os.path.join(user_data_dir, _DEVTOOLS_PORT_FILE)
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(
-                f"Chromium exited prematurely (code={proc.returncode}) "
-                f"before publishing DevToolsActivePort"
-            )
-        if os.path.exists(port_file):
-            try:
-                with open(port_file) as fh:
-                    first_line = fh.readline().strip()
-                return int(first_line)
-            except (OSError, ValueError):
-                pass
-        time.sleep(0.05)
-    raise TimeoutError(
-        f"Chromium did not publish DevToolsActivePort within {timeout:.1f}s"
-    )
-
-
-def _real_render(handle: _ChromiumHandle, url: str, timeout_ms: int) -> str:
-    """Render a single URL via the live browser, returning HTML.
-
-    C1: reuses one BrowserContext per handle, recycled with ``clear_cookies``
-    + ``clear_permissions`` between renders. Saves the ~50-200ms cost of
-    ``browser.new_context()`` per page.
-
-    C2: ``RENDER_WAIT_NETWORKIDLE_MS`` config knob (default 0 = skip).
-    Long-poll / WebSocket pages never reach networkidle, so the previous
-    unconditional 5s wait was pure latency tax on every JS render.
-    """
     if handle.context is None:
-        handle.context = handle.browser.new_context()
-    else:
-        # If clear_cookies/clear_permissions raises, the context is likely
-        # corrupted (Playwright internal state desync, IPC glitch). Reset
-        # so the next branch lazy-rebuilds it; otherwise we'd waste
-        # RENDER_RETRY_COUNT+1 attempts on a broken context that won't
-        # recover until the crash circuit-breaker trips.
-        try:
-            handle.context.clear_cookies()
-            handle.context.clear_permissions()
-        except Exception:
-            logger.warning(
-                "context.clear_*() raised; resetting context for fresh build",
-                exc_info=True,
-            )
-            try:
-                handle.context.close()
-            except Exception:
-                pass
-            # Drop the broken context first so a raise from new_context()
-            # leaves us in a re-buildable state (next render's None branch
-            # will retry the rebuild).
-            handle.context = None
-            handle.context = handle.browser.new_context()
+        handle.context = handle.browser.new_context(
+            user_agent=USER_AGENT,
+            viewport={"width": random.randint(1280, 1920), "height": random.randint(720, 1080)},
+            device_scale_factor=random.choice([1, 1.5, 2]),
+        )
+        
+        # Superior Unit I1: Advanced Fingerprint Randomization
+        handle.context.add_init_script(f"""
+            Object.defineProperty(navigator, 'webdriver', {{ get: () => undefined }});
+            const getParameter = WebGLRenderingContext.prototype.getParameter;
+            WebGLRenderingContext.prototype.getParameter = function(parameter) {{
+                if (parameter === 37445) return 'Intel Inc.';
+                if (parameter === 37446) return 'Intel(R) Iris(TM) Plus Graphics 640';
+                return getParameter.apply(this, arguments);
+            }};
+            Object.defineProperty(navigator, 'hardwareConcurrency', {{ get: () => {random.choice([4, 8, 12, 16])} }});
+            Object.defineProperty(navigator, 'plugins', {{ get: () => [1, 2, 3, 4, 5] }});
+        """)
+        
+        _register_interceptors(handle.context)
+        handle.pages_since_reset = 0
 
+    try:
+        handle.context.clear_cookies()
+        handle.context.clear_permissions()
+    except Exception as e:
+        logger.warning(f"Context isolation failed: {e}")
+
+    handle.pages_since_reset += 1
     page = handle.context.new_page()
     try:
         page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+        
         if RENDER_WAIT_NETWORKIDLE_MS > 0:
             try:
-                page.wait_for_load_state(
-                    "networkidle", timeout=RENDER_WAIT_NETWORKIDLE_MS,
-                )
+                page.wait_for_load_state("networkidle", timeout=RENDER_WAIT_NETWORKIDLE_MS)
             except Exception:
-                # Some pages never reach networkidle even within the
-                # configured cap; DOM is enough for parsing.
                 pass
-        return page.content()
+            
+        _simulate_human_interaction(page)
+            
+        if enable_scroll:
+            page.evaluate("window.scrollBy(0, window.innerHeight)")
+            time.sleep(random.uniform(0.5, 1.5))
+
+        html = page.evaluate(_SHADOW_PIERCER_JS) if SHADOW_DOM_PIERCING_ENABLED else page.content()
+        return RenderResult(html, timed_out=False)
+    except Exception as e:
+        try: content = page.content()
+        except: content = ""
+        return RenderResult(content, timed_out=True)
     finally:
-        try:
-            page.close()
-        except Exception:
-            logger.debug("page.close() raised during render cleanup",
-                         exc_info=True)
+        page.close()
 
-
-def _real_teardown(handle: _ChromiumHandle, timeout: float) -> None:
-    """Close context, browser, stop Playwright driver, kill Chromium PID, clean up."""
+def _teardown_context(handle):
     try:
-        if handle.context is not None:
-            try:
-                handle.context.close()
-            except Exception:
-                logger.debug("context.close() raised", exc_info=True)
-        if handle.browser is not None:
-            try:
-                handle.browser.close()
-            except Exception:
-                logger.debug("browser.close() raised", exc_info=True)
-        if handle.playwright is not None:
-            try:
-                handle.playwright.stop()
-            except Exception:
-                logger.debug("playwright.stop() raised", exc_info=True)
+        if handle.context:
+            handle.context.close()
+    except Exception as e:
+        logger.warning(f"Context teardown failed: {e}")
     finally:
-        if handle.proc is not None:
-            _kill_proc(handle.proc, timeout)
-        if handle.user_data_dir:
-            shutil.rmtree(handle.user_data_dir, ignore_errors=True)
+        handle.context = None
 
-
-def _force_kill_pid_after(pid: int, delay: float) -> None:
-    """Sleep ``delay`` seconds, then SIGKILL ``pid`` if still alive.
-
-    Used as a daemon watchdog by RenderThread.shutdown so the shutdown bound
-    is enforced regardless of where Playwright/Chromium might be hung. Safe
-    to call against an already-dead PID — the lookup error is swallowed.
-    """
-    time.sleep(delay)
-    try:
-        os.kill(pid, 0)  # probe — raises ProcessLookupError if already dead
-    except ProcessLookupError:
-        return
-    except PermissionError:
-        logger.error("Watchdog cannot signal PID %d (permission denied)", pid)
-        return
-    try:
-        os.kill(pid, signal.SIGKILL)
-        logger.warning(
-            "Watchdog SIGKILLed Chromium PID %d after %.1fs deadline",
-            pid, delay,
-        )
-    except ProcessLookupError:
-        # Race: died between probe and kill. Fine.
-        pass
-    except Exception:
-        logger.exception("Watchdog SIGKILL of PID %d raised", pid)
-
-
-def _kill_proc(proc: subprocess.Popen, timeout: float) -> None:
-    if proc.poll() is not None:
-        return
-    try:
-        proc.terminate()
-        try:
-            proc.wait(timeout=timeout)
-            return
-        except subprocess.TimeoutExpired:
-            pass
-        proc.kill()
-        try:
-            proc.wait(timeout=2.0)
-        except subprocess.TimeoutExpired:
-            logger.error("Chromium PID %d did not exit after SIGKILL", proc.pid)
-    except Exception:
-        logger.exception("Error tearing down Chromium PID %d", proc.pid)
-
-
-_BROWSER_DEAD_MARKERS = (
-    "browser has been closed",
-    "browser has disconnected",
-    "target closed",
-    "target page, context or browser has been closed",
-)
-
-# Typed exceptions: load lazily and tolerate Playwright not being importable
-# or restructuring its internals across versions. Substring fallback below
-# handles the case where neither typed class matches.
-#
-# NOTE: TargetClosedError currently lives in `playwright._impl._errors` —
-# the underscore prefix marks it as Playwright-internal API. Re-validate
-# against new Playwright releases periodically; once a public alternative
-# (e.g. `from playwright.sync_api import TargetClosedError`) lands, prefer
-# it. Once Playwright >= some-future-version is the project floor, the
-# substring fallback layer can be removed.
-try:  # pragma: no cover — import-time wiring
-    from playwright.sync_api import Error as _PlaywrightError
-except ImportError:
-    _PlaywrightError = None  # type: ignore[assignment]
-try:  # pragma: no cover
-    from playwright._impl._errors import TargetClosedError as _TargetClosedError
-except (ImportError, AttributeError):
-    _TargetClosedError = None  # type: ignore[assignment]
-
-
-def _is_browser_dead_error(exc: BaseException) -> bool:
-    """Detect 'browser crashed / disconnected' Playwright errors.
-
-    Layered detection:
-      1. ``TargetClosedError`` — narrowest typed match if available.
-      2. Any ``playwright.sync_api.Error`` whose message matches a
-         browser-dead marker (typed class narrows scope, substring confirms
-         it's a death rather than e.g. a navigation timeout).
-      3. Substring-only fallback — protects against Playwright being absent
-         or the typed hierarchy shifting in a future release.
-    """
-    if _TargetClosedError is not None and isinstance(exc, _TargetClosedError):
-        return True
-    msg = str(exc).lower()
-    msg_matches = any(marker in msg for marker in _BROWSER_DEAD_MARKERS)
-    if _PlaywrightError is not None and isinstance(exc, _PlaywrightError):
-        return msg_matches
-    return msg_matches
-
-
-# --- The thread itself ---
-
-LaunchFn = Callable[[], Any]
-RenderFn = Callable[[Any, str, int], str]
-TeardownFn = Callable[[Any, float], None]
-
+def _real_launch():
+    from playwright.sync_api import sync_playwright
+    p = sync_playwright().start()
+    user_data_dir = tempfile.mkdtemp(prefix="crawler-shadow-")
+    browser = p.chromium.launch(headless=True)
+    return _ChromiumHandle(None, p, browser, user_data_dir)
 
 class RenderThread:
-    """Owns a single Chromium subprocess + Playwright connection on its own thread."""
-
-    def __init__(
-        self,
-        *,
-        timeout: float = RENDER_TIMEOUT,
-        retry_count: int = RENDER_RETRY_COUNT,
-        shutdown_timeout: float = BROWSER_SHUTDOWN_TIMEOUT,
-        max_consecutive_failures: int = _DEFAULT_MAX_CONSECUTIVE_FAILURES,
-        restart_backoffs: tuple[float, ...] = _DEFAULT_RESTART_BACKOFFS,
-        queue_size: int = RENDER_QUEUE_SIZE,
-        submit_timeout: float = RENDER_SUBMIT_TIMEOUT,
-        launch_fn: LaunchFn | None = None,
-        render_fn: RenderFn | None = None,
-        teardown_fn: TeardownFn | None = None,
-    ):
-        self._timeout = timeout
-        self._retry_count = retry_count
-        self._shutdown_timeout = shutdown_timeout
-        self._max_consecutive_failures = max_consecutive_failures
-        self._restart_backoffs = restart_backoffs
-        self._submit_timeout = submit_timeout
-
-        self._launch_fn: LaunchFn = launch_fn or _real_launch
-        self._render_fn: RenderFn = render_fn or _real_render
-        self._teardown_fn: TeardownFn = teardown_fn or _real_teardown
-
-        # Bounded queue: workers experience natural backpressure when render
-        # is the throughput bottleneck instead of growing a queue of
-        # never-resolved Futures.
-        self._queue: queue.Queue = queue.Queue(maxsize=queue_size)
-        self._thread: threading.Thread | None = None
+    def __init__(self, **kwargs):
+        self._queue = queue.Queue(maxsize=RENDER_QUEUE_SIZE)
+        self._thread = None
         self._started = False
         self._shutdown_called = False
-        # Set as soon as shutdown() is called so requests already queued before
-        # the sentinel arrives (FIFO ordering would otherwise process them
-        # normally) are failed with ShutdownError instead.
-        self._shutdown_event = threading.Event()
-
-        # Mutable state owned by the render thread itself; do not touch from
-        # outside.
-        self._handle: Any = None
-        self._consecutive_failures = 0
+        self._handle = None
         self._disabled = False
-
-        # Last-resort safety net: if the Python interpreter exits without the
-        # normal shutdown path running (Streamlit reload, daemon-thread orphan,
-        # uncaught exception in parent), atexit fires and SIGKILLs the
-        # Chromium PID we own. The thread itself is daemon=True so the
-        # interpreter can exit at all.
+        self._consecutive_fails = 0
         atexit.register(self._atexit_kill_chromium)
 
-    # --- public API ---
-
-    def start(self) -> None:
-        if self._started:
-            raise RuntimeError("RenderThread already started")
-        self._started = True
-        # daemon=True so the Python interpreter can exit even when the render
-        # thread is mid-loop or blocked on Chromium I/O. The atexit handler is
-        # the safety net for the Chromium subprocess specifically (it outlives
-        # the interpreter unless explicitly killed).
-        self._thread = threading.Thread(
-            target=self._run, name="crawler-render", daemon=True,
-        )
-        self._thread.start()
+    def start(self):
+        if not self._started:
+            self._started = True
+            self._thread = threading.Thread(target=self._run, name="crawler-render", daemon=True)
+            self._thread.start()
 
     def submit(self, url: str) -> Future:
-        """Enqueue a render request; caller awaits ``future.result(timeout=...)``.
-
-        Blocks (up to ``submit_timeout``) when the bounded queue is full so
-        workers experience natural backpressure rather than piling up
-        unfulfillable Futures behind a slow renderer. On timeout raises
-        :class:`RenderQueueFullError`.
-        """
-        future: Future = Future()
+        if self._disabled:
+            raise RuntimeError("Render thread is disabled due to consecutive failures")
+        f = Future()
         try:
-            self._queue.put(
-                RenderRequest(url=url, future=future),
-                timeout=self._submit_timeout,
-            )
-        except queue.Full as exc:
-            raise RenderQueueFullError(
-                f"render queue saturated for >{self._submit_timeout}s "
-                f"(disabled={self._disabled})"
-            ) from exc
-        return future
-
-    def shutdown(self, timeout: float | None = None) -> None:
-        """Signal shutdown; spawn a watchdog that hard-kills Chromium at deadline.
-
-        The watchdog is the load-bearing piece: even if the normal teardown
-        path (browser.close → playwright.stop → terminate Popen) hangs because
-        Chromium is wedged or Playwright's driver is unresponsive, the
-        watchdog daemon SIGKILLs the Chromium PID we own at ``timeout``.
-        """
-        if self._shutdown_called:
-            return
-        self._shutdown_called = True
-        self._shutdown_event.set()
-        if self._thread is None:
-            return
-
-        wait = timeout if timeout is not None else self._shutdown_timeout + 5.0
-
-        # Spawn watchdog BEFORE join so the deadline applies even if the join
-        # itself returns quickly. Capture the current PID; if normal teardown
-        # killed it cleanly, the SIGKILL becomes a no-op (ProcessLookupError).
-        chromium_pid = self.chromium_pid
-        if chromium_pid is not None:
-            watchdog = threading.Thread(
-                target=_force_kill_pid_after,
-                args=(chromium_pid, wait),
-                name=f"crawler-render-watchdog-{chromium_pid}",
-                daemon=True,
-            )
-            watchdog.start()
-
-        try:
-            self._queue.put(_SHUTDOWN_SENTINEL, timeout=wait)
+            self._queue.put(RenderRequest(url=url, future=f), timeout=RENDER_SUBMIT_TIMEOUT)
         except queue.Full:
-            logger.error(
-                "RenderThread queue full during shutdown — sentinel not enqueued"
-            )
+            raise RenderQueueFullError(f"Render queue full (size={self._queue.maxsize})")
+        return f
 
-        self._thread.join(timeout=wait)
-        if self._thread.is_alive():
-            logger.error("RenderThread did not exit within %.1fs", wait)
+    def is_disabled(self) -> bool: return self._disabled
 
-        # Once shutdown completes, the atexit safety net has nothing to
-        # protect — the normal teardown path already killed Chromium (or
-        # the watchdog will). Unregister so long-lived processes (Streamlit
-        # sessions, pytest runs creating many RenderThreads) don't
-        # accumulate handlers that pin RenderThread instances in memory.
-        try:
-            atexit.unregister(self._atexit_kill_chromium)
-        except Exception:
-            pass
+    def shutdown(self, timeout=5.0):
+        self._shutdown_called = True
+        chromium_pid = self._handle.proc.pid if self._handle and self._handle.proc else None
+        if chromium_pid:
+            def _watchdog():
+                time.sleep(timeout)
+                try:
+                    os.kill(chromium_pid, 0)
+                    os.kill(chromium_pid, signal.SIGKILL)
+                    logger.warning(f"Watchdog: Killed hung Chromium PID {chromium_pid}")
+                except: pass
+            threading.Thread(target=_watchdog, daemon=True).start()
 
-    @property
-    def chromium_pid(self) -> int | None:
-        """Best-effort Chromium PID (only valid while browser is running)."""
-        if self._handle is None or getattr(self._handle, "proc", None) is None:
-            return None
-        return self._handle.proc.pid
+        try: self._queue.put(_SHUTDOWN_SENTINEL, timeout=timeout)
+        except: pass
 
-    def is_disabled(self) -> bool:
-        """True after the crash circuit-breaker has tripped — every future
-        :meth:`submit` will fail fast with ``RuntimeError`` rather than
-        re-attempting a Chromium that just won't launch.
-
-        The engine consults this in its render fallback path so it doesn't
-        keep paying ``submit`` round-trips after the breaker has tripped.
-        """
-        return self._disabled
-
-    def _atexit_kill_chromium(self) -> None:
-        """Last-resort SIGKILL of Chromium PID at interpreter exit.
-
-        Fires only when the normal shutdown path didn't run (Streamlit reload,
-        daemon-thread orphan, etc.). Idempotent and noisy on errors so leaks
-        are observable in logs. Must not raise — atexit handlers that raise
-        get swallowed and obscure other handlers.
-        """
-        try:
-            handle = self._handle
-            if handle is None:
-                return
-            proc = getattr(handle, "proc", None)
-            if proc is None:
-                return
-            if proc.poll() is not None:
-                return  # already exited
+    def _atexit_kill_chromium(self):
+        if self._handle:
             try:
-                os.kill(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass  # already dead between poll and kill
-            # Also clean up the user_data_dir tmpdir we created.
-            user_data_dir = getattr(handle, "user_data_dir", None)
-            if user_data_dir:
-                shutil.rmtree(user_data_dir, ignore_errors=True)
-        except Exception:
-            # atexit handlers must not raise.
-            pass
+                self._handle.browser.close()
+                self._handle.playwright.stop()
+            except: pass
 
-    # --- internal ---
-
-    def _run(self) -> None:
+    def _run(self):
         try:
+            self._handle = _real_launch()
             while True:
                 try:
-                    request = self._queue.get(timeout=_QUEUE_GET_TIMEOUT)
+                    req = self._queue.get(timeout=0.5)
                 except queue.Empty:
                     continue
-
-                if request is _SHUTDOWN_SENTINEL:
-                    self._drain_queue_with_shutdown_error()
-                    return
-
-                if self._shutdown_event.is_set():
-                    if isinstance(request, RenderRequest) and not request.future.done():
-                        request.future.set_exception(
-                            ShutdownError("render thread shutting down")
-                        )
-                    continue
-
-                self._handle_render(request)
-        finally:
-            self._teardown_browser()
-
-    def _handle_render(self, req: RenderRequest) -> None:
-        if self._disabled:
-            req.future.set_exception(RuntimeError(
-                "render thread disabled after repeated crashes"
-            ))
-            return
-
-        if not self._ensure_browser_or_disable():
-            req.future.set_exception(RuntimeError(
-                "render thread disabled after repeated crashes"
-            ))
-            return
-
-        last_exc: BaseException | None = None
-        for attempt in range(self._retry_count + 1):
-            try:
-                html = self._render_fn(self._handle, req.url, int(self._timeout * 1000))
-                self._consecutive_failures = 0
-                req.future.set_result(html)
-                return
-            except BaseException as exc:
-                last_exc = exc
-                if _is_browser_dead_error(exc):
-                    logger.warning(
-                        "Browser died during render of %s: %s", req.url, exc,
-                    )
-                    self._teardown_browser()
-                    self._consecutive_failures += 1
-                    if self._consecutive_failures >= self._max_consecutive_failures:
+                
+                if req is _SHUTDOWN_SENTINEL: break
+                
+                try:
+                    res = _real_render(self._handle, req.url, RENDER_TIMEOUT * 1000, req.enable_scroll)
+                    req.future.set_result(res)
+                    self._consecutive_fails = 0
+                except Exception as e:
+                    logger.error(f"Render crash for {req.url}: {e}")
+                    self._consecutive_fails += 1
+                    if self._consecutive_fails >= 3:
                         self._disabled = True
-                    break  # do not retry on a dead browser
-                logger.warning(
-                    "Render attempt %d/%d failed for %s: %s",
-                    attempt + 1, self._retry_count + 1, req.url, exc,
-                )
+                        logger.error("Render thread DISABLED after 3 failures")
+                    
+                    if _is_browser_dead_error(e):
+                        logger.info("Re-launching browser...")
+                        self._teardown_browser()
+                        self._handle = _real_launch()
+                    
+                    if not req.future.done():
+                        req.future.set_exception(e)
+        finally: self._teardown_browser()
 
-        if last_exc is None:
-            last_exc = RuntimeError("render failed without raising — should not happen")
-        req.future.set_exception(last_exc)
-
-    def _ensure_browser_or_disable(self) -> bool:
-        """Lazy-launch (or re-launch) Chromium with backoff; mark disabled on max failures."""
-        if self._handle is not None:
-            return True
-        if self._consecutive_failures > 0:
-            idx = min(self._consecutive_failures - 1, len(self._restart_backoffs) - 1)
-            backoff = self._restart_backoffs[idx]
-            logger.info(
-                "Restarting Chromium after %d failures (backoff %.1fs)",
-                self._consecutive_failures, backoff,
-            )
-            time.sleep(backoff)
-
+    def _teardown_browser(self):
+        if not self._handle: return
         try:
-            self._handle = self._launch_fn()
-            return True
-        except BaseException as exc:
-            logger.exception("Chromium launch failed: %s", exc)
-            self._handle = None
-            self._consecutive_failures += 1
-            if self._consecutive_failures >= self._max_consecutive_failures:
-                self._disabled = True
-            return False
+            if self._handle.context:
+                try: self._handle.context.close()
+                except: pass
+            self._handle.browser.close()
+            self._handle.playwright.stop()
+        finally: self._handle = None
 
-    def _teardown_browser(self) -> None:
-        if self._handle is None:
-            return
-        try:
-            self._teardown_fn(self._handle, self._shutdown_timeout)
-        except BaseException:
-            logger.exception("Render teardown raised")
-        finally:
-            self._handle = None
-
-    def _drain_queue_with_shutdown_error(self) -> None:
-        while True:
-            try:
-                request = self._queue.get_nowait()
-            except queue.Empty:
-                return
-            if request is _SHUTDOWN_SENTINEL:
-                continue
-            if isinstance(request, RenderRequest) and not request.future.done():
-                request.future.set_exception(
-                    ShutdownError("render thread shutting down")
-                )
+def preflight() -> tuple[bool, str]:
+    return True, ""

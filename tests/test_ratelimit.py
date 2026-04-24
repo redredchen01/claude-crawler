@@ -1,12 +1,14 @@
+
 """Tests for crawler.core.ratelimit — TokenBucket and DomainRateLimiter."""
+
+from __future__ import annotations
+
 
 import threading
 import time
 
 import pytest
-
-from crawler.core.ratelimit import TokenBucket, DomainRateLimiter
-
+from crawler.core.ratelimit import DomainRateLimiter, TokenBucket
 
 # Generous tolerance for timing-sensitive tests on CI hardware.
 _TIMING_TOL = 0.3  # ±30% — tests check order-of-magnitude, not exact timing
@@ -83,8 +85,10 @@ class TestDomainRateLimiter:
         t_start = time.monotonic()
         t1 = threading.Thread(target=worker, args=("https://a.com/x",))
         t2 = threading.Thread(target=worker, args=("https://b.com/x",))
-        t1.start(); t2.start()
-        t1.join(); t2.join()
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
         total = time.monotonic() - t_start
 
         # Each worker does 5 acquires at 5/s = ~1s (minus the first-token freebie).
@@ -102,8 +106,10 @@ class TestDomainRateLimiter:
         start = time.monotonic()
         t1 = threading.Thread(target=worker)
         t2 = threading.Thread(target=worker)
-        t1.start(); t2.start()
-        t1.join(); t2.join()
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
         elapsed = time.monotonic() - start
 
         # 10 acquires at 5/s = 2s ± tolerance.

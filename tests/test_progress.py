@@ -1,10 +1,12 @@
+
 """Tests for ProgressCoalescer."""
+
+from __future__ import annotations
+
 
 import queue
 import threading
 import time
-
-import pytest
 
 from crawler.core.progress import ProgressCoalescer
 
@@ -95,10 +97,12 @@ class TestThreadSafety:
             try:
                 barrier.wait()
                 for i in range(100):
-                    coalescer.emit({
-                        "status": "running",
-                        "pages_done": worker_id * 100 + i,
-                    })
+                    coalescer.emit(
+                        {
+                            "status": "running",
+                            "pages_done": worker_id * 100 + i,
+                        }
+                    )
             except BaseException as exc:
                 errors.append(exc)
 

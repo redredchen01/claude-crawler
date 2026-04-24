@@ -9,7 +9,7 @@ A high-performance website crawler with structured-data-first extraction, HTTP r
 - 🔒 **Security** — SSRF protection, private host detection, configurable redirect limits
 - 📊 **Tag analysis** — Extract and rank popular resource tags from crawled pages
 - 🎨 **Interactive UI** — Streamlit dashboard for scan monitoring and result exploration
-- ✅ **Well-tested** — 606 tests covering crawling, parsing, caching, and API logic
+- ✅ **Well-tested** — 706 tests covering crawling, parsing, caching, and API logic
 
 ## Quick Start
 
