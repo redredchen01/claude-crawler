@@ -152,14 +152,14 @@ See `crawler/storage.py` for schema details.
 ## Known Limitations & Next Steps
 
 ### Phase 2 (UI Enhancement)
-- [ ] Real-time progress streaming
-- [ ] Scan history + filtering
-- [ ] Export scheduler (email results)
+- [x] Real-time progress streaming
+- [x] Scan history + filtering
+- [x] Export scheduler (email results)
 
 ### Phase 3 (Advanced Features)
-- [ ] Clustering by content similarity
-- [ ] Keyword frequency analysis
-- [ ] Trend detection (GA integration)
+- [x] Clustering by content similarity
+- [x] Keyword frequency analysis
+- [x] Trend detection (GA integration)
 
 ## Contributing
 

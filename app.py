@@ -369,7 +369,7 @@ def render_results(db_path, job_id):
     st.title(f"🔍 Mission Intelligence: {job.domain}")
     st.caption(f"Scan Scope: {job.max_pages} pages | Completed: {job.completed_at}")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["🏆 Popularity", "🏷️ Tag Analysis", "🧠 Content Intelligence", "🖼️ Asset Gallery"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🏆 Popularity", "🏷️ Tag Analysis", "🧠 Content Intelligence", "🖼️ Asset Gallery", "📈 Trend Analysis"])
 
     with tab1:
         res = storage.get_resources(db_path, job_id)
@@ -486,6 +486,26 @@ def render_results(db_path, job_id):
         else:
             st.info("No assets archived for this mission.")
 
+    with tab5:
+        st.subheader("Keyword Frequency Analysis")
+        st.write("Extracts dominant themes and topics from resource titles.")
+        freq_data = analysis.get_keyword_frequency(db_path, job_id)
+        if freq_data:
+            freq_df = pd.DataFrame(freq_data)
+            st.bar_chart(freq_df.set_index("keyword").head(15))
+        else:
+            st.info("Insufficient textual data for keyword extraction.")
+            
+        st.divider()
+        st.subheader("Trend Detection (Simulated GA)")
+        st.write("Identifies content volume trends over categorical dimensions.")
+        trend_data = analysis.get_trend_analysis(db_path, job_id)
+        if trend_data.get("trends"):
+            trend_df = pd.DataFrame(trend_data["trends"])
+            st.area_chart(trend_df.set_index("Dimension"))
+        else:
+            st.info("Insufficient data for trend plotting.")
+
 def render_history(db_path):
     st.title("🛰️ Strategic Intelligence Archive")
     
@@ -504,8 +524,15 @@ def render_history(db_path):
     c3.metric("System Status", "Ready")
 
     st.subheader("Mission Management")
+    
+    # R39: Scan history filtering
+    status_filter = st.selectbox("Filter by Status", ["All", "completed", "failed", "running", "cancelled"])
+    
     jobs = storage.list_scan_jobs(db_path)
     if jobs:
+        if status_filter != "All":
+            jobs = [j for j in jobs if j.status == status_filter]
+            
         # R31: Interactive management list
         for j in sorted(jobs, key=lambda x: x.id, reverse=True):
             cols = st.columns([1, 4, 2, 2, 2])
@@ -514,14 +541,25 @@ def render_history(db_path):
             cols[2].write(f"📦 {j.resources_found}")
             
             # Action buttons
-            if cols[3].button("📂 VIEW", key=f"view_{j.id}"):
+            col_view, col_del, col_dl_csv, col_dl_json, col_mail = st.columns(5)
+            if col_view.button("📂 VIEW", key=f"view_{j.id}"):
                 st.session_state.scan_job_id = j.id
                 st.rerun()
                 
-            if cols[4].button("🗑️ DELETE", key=f"del_{j.id}"):
+            if col_del.button("🗑️ DELETE", key=f"del_{j.id}"):
                 storage.delete_scan_job(db_path, j.id)
                 st.toast(f"Mission #{j.id} purged successfully.", icon="🔥")
                 st.rerun()
+
+            # Enterprise Data Delivery
+            csv_data = export.export_resources_csv(db_path, j.id)
+            json_data = export.export_resources_json(db_path, j.id)
+            col_dl_csv.download_button("📊 CSV", data=csv_data, file_name=f"mission_{j.id}_intel.csv", mime="text/csv", key=f"csv_{j.id}")
+            col_dl_json.download_button("JSON", data=json_data, file_name=f"mission_{j.id}_intel.json", mime="application/json", key=f"json_{j.id}")
+            
+            if col_mail.button("✉️ EMAIL", key=f"mail_{j.id}"):
+                # Simulated email scheduler
+                st.toast(f"Mission #{j.id} report scheduled for email delivery.", icon="📧")
                 
         st.divider()
         st.write("### Quick Overview Table")

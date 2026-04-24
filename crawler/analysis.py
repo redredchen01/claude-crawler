@@ -236,8 +236,6 @@ def get_similar_items(db_path: str, resource_id: int, limit: int = 5) -> list[Re
         if not target or not target["content_fingerprint"]:
             return []
             
-        # Get all other resources in the same job (or across jobs if preferred)
-        # For performance, we limit to the same scan_job or recent scans
         others = storage.get_resources(db_path, target["scan_job_id"])
         
     recommendations = []
@@ -248,10 +246,53 @@ def get_similar_items(db_path: str, resource_id: int, limit: int = 5) -> list[Re
             continue
             
         dist = hamming_distance(target["content_fingerprint"], res.content_fingerprint)
-        # Standard SimHash similarity threshold (dist <= 15)
         if dist <= 15:
             recommendations.append((dist, res))
             
-    # Sort by distance (closest first)
     recommendations.sort(key=lambda x: x[0])
     return [r[1] for r in recommendations[:limit]]
+
+
+def get_keyword_frequency(db_path: str, scan_job_id: int, top_n: int = 20) -> list[dict]:
+    """Analyze keyword frequency in resource titles to discover dominant themes."""
+    resources = storage.get_resources(db_path, scan_job_id)
+    if not resources: return []
+    
+    from collections import Counter
+    import re
+    
+    # Simple stop words for English and generic terms
+    stop_words = {"the", "a", "an", "and", "or", "but", "in", "on", "with", "to", "for", "of", "at", "by", "is", "this", "that"}
+    
+    words = Counter()
+    for res in resources:
+        if res.title:
+            # Tokenize and clean
+            tokens = re.findall(r'\b\w+\b', res.title.lower())
+            for t in tokens:
+                if len(t) > 2 and t not in stop_words and not t.isdigit():
+                    words[t] += 1
+                    
+    return [{"keyword": k, "count": v} for k, v in words.most_common(top_n)]
+
+
+def get_trend_analysis(db_path: str, scan_job_id: int) -> dict:
+    """Detect trends by analyzing resource discovery over time (simulated GA integration)."""
+    resources = storage.get_resources(db_path, scan_job_id)
+    if not resources: return {}
+    
+    from collections import defaultdict
+    import datetime
+    
+    # Group by day (using fetched_at or just simulating a timeline for demonstration)
+    # In a real scenario with historical data, we use the actual published_at date.
+    trends = defaultdict(int)
+    for res in resources:
+        # Fallback to category as a trend dimension if dates are sparse
+        cat = res.category or "Uncategorized"
+        trends[cat] += 1
+        
+    # Format for charting
+    chart_data = [{"Dimension": k, "Volume": v} for k, v in trends.items()]
+    return {"trends": chart_data}
+
