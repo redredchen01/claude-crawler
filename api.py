@@ -173,6 +173,35 @@ async def stream_scan_progress(job_id: int):
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+@app.get("/healthz")
+async def healthz():
+    """Liveness probe for K8s/Docker."""
+    try:
+        from crawler.storage import get_connection
+        with get_connection(DB_PATH) as conn:
+            conn.execute("SELECT 1")
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Database unavailable: {e}")
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus-style metrics (JSON format for now)."""
+    try:
+        from crawler.storage import get_connection
+        with get_connection(DB_PATH) as conn:
+            res = conn.execute("SELECT COUNT(*) FROM resources").fetchone()[0]
+            jobs = conn.execute("SELECT COUNT(*) FROM scan_jobs").fetchone()[0]
+            fails = conn.execute("SELECT COUNT(*) FROM pages WHERE status='failed'").fetchone()[0]
+            return {
+                "crawler_resources_total": res,
+                "crawler_jobs_total": jobs,
+                "crawler_page_failures_total": fails,
+                "crawler_active_jobs": len(active_scans)
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

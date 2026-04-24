@@ -158,14 +158,31 @@ def _classify_exception(exc):
 
 
 def _fetch_with_retry(url, fetch_fn, raise_on_failure=False, session=None):
+    import time
     for attempt in range(RETRY_COUNT):
         try:
-            return fetch_fn()
+            r = fetch_fn()
+            # Handle specific rate-limit/overload codes
+            if hasattr(r, 'status_code') and r.status_code in (429, 503):
+                retry_after = r.headers.get('Retry-After')
+                if retry_after and retry_after.isdigit():
+                    wait_time = int(retry_after) + random.uniform(0.5, 1.5)
+                else:
+                    wait_time = (RETRY_BACKOFF[attempt] if attempt < len(RETRY_BACKOFF) else RETRY_BACKOFF[-1]) * 2.0
+                
+                logger.warning(f"Server busy ({r.status_code}) for {url}. Waiting {wait_time:.1f}s")
+                time.sleep(wait_time)
+                
+                # Report to global rate limiter if available
+                if session and hasattr(session, "metadata") and "proxy" in session.metadata:
+                    _PROXY_MGR.mark_fail(session.metadata["proxy"], is_block=True)
+                continue
+                
+            return r
         except Exception as e:
-            # Unit H3: Feedback to ProxyManager
             if session and hasattr(session, "metadata") and "proxy" in session.metadata:
                 proxy = session.metadata["proxy"]
-                is_block = "forbidden" in str(e).lower() or "waf" in str(e).lower()
+                is_block = "forbidden" in str(e).lower() or "waf" in str(e).lower() or "403" in str(e)
                 _PROXY_MGR.mark_fail(proxy, is_block=is_block)
 
             backoff = (
@@ -174,6 +191,7 @@ def _fetch_with_retry(url, fetch_fn, raise_on_failure=False, session=None):
                 else RETRY_BACKOFF[-1]
             ) * random.uniform(0.8, 1.2)
             time.sleep(backoff)
+            
     if raise_on_failure:
         raise NetworkError(f"Failed {url}", "fetch_failed")
     return None

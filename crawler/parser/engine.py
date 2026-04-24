@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from crawler.models import ParseResult, Resource
 from crawler.parser.base import BaseExtractor
+from crawler.parser.legacy import _calculate_simhash, _generate_content_dna
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,11 @@ class ParsingEngine:
 
         resources = []
         if page_type == "detail":
+            # R37: Restore SimHash clustering by mapping content fingerprint
+            content_text = merged_data.get("main_content", "") or soup.get_text(" ", strip=True)
+            fingerprint = _calculate_simhash(content_text)
+            dna = _generate_content_dna(soup, None)
+            
             # Build Single Resource
             res = Resource(
                 title=merged_data["title"],
@@ -79,6 +85,8 @@ class ParsingEngine:
                 category=merged_data["category"],
                 cover_url=merged_data["cover_url"],
                 views=merged_data.get("views", 0),
+                content_fingerprint=fingerprint,
+                content_dna=dna,
             )
             resources.append(res)
         else:
@@ -95,7 +103,10 @@ class ParsingEngine:
                 cover = urljoin(url, img.get("src")) if img and img.get("src") else ""
                 
                 if title:
-                    resources.append(Resource(title=title, url=res_url, cover_url=cover))
+                    # Generate basic fingerprint for list items based on title
+                    fingerprint = _calculate_simhash(title)
+                    dna = "T1_L1_I1_S0" # Generic DNA for list items
+                    resources.append(Resource(title=title, url=res_url, cover_url=cover, content_fingerprint=fingerprint, content_dna=dna))
                     
             if not resources and len(img_links) > 10:
                 for a in img_links:
@@ -104,7 +115,9 @@ class ParsingEngine:
                     title = img.get("alt", "") or img.get("title", "")
                     cover = urljoin(url, img.get("src")) if img.get("src") else ""
                     if title:
-                        resources.append(Resource(title=title, url=res_url, cover_url=cover))
+                        fingerprint = _calculate_simhash(title)
+                        dna = "T1_L1_I1_S0"
+                        resources.append(Resource(title=title, url=res_url, cover_url=cover, content_fingerprint=fingerprint, content_dna=dna))
         
         return ParseResult(
             page_type=page_type,

@@ -160,6 +160,8 @@ See `crawler/storage.py` for schema details.
 - [x] Clustering by content similarity
 - [x] Keyword frequency analysis
 - [x] Trend detection (GA integration)
+- [x] **Sentinel Recurring Monitor** (Phase 15 auto-scanning)
+- [x] **Tag Velocity Analysis** (Identifying Rising Stars)
 
 ## Contributing
 

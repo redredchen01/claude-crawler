@@ -208,6 +208,9 @@ def main():
     if "scan_job_id" not in st.session_state: st.session_state.scan_job_id = None
     if "fatal_error" not in st.session_state: st.session_state.fatal_error = None
     if "search_mode" not in st.session_state: st.session_state.search_mode = False
+    if "vault_mode" not in st.session_state: st.session_state.vault_mode = False
+    if "insight_mode" not in st.session_state: st.session_state.insight_mode = False
+    if "sentinel_mode" not in st.session_state: st.session_state.sentinel_mode = False
 
     db_path = config.DB_PATH
     storage.init_db(db_path)
@@ -225,6 +228,7 @@ def main():
                 normalized = _normalize_entry_url(target_url)
                 if normalized:
                     st.session_state.fatal_error = None
+                    st.session_state.vault_mode = False
                     start_scan(db_path, normalized, max_p, workers)
                     st.rerun()
                 else:
@@ -235,6 +239,37 @@ def main():
             st.session_state.scan_running = False
             st.session_state.scan_job_id = None
             st.session_state.fatal_error = None
+            st.session_state.search_mode = False
+            st.session_state.vault_mode = False
+            st.rerun()
+
+        if st.button("🏛️ GLOBAL VAULT"):
+            st.session_state.scan_running = False
+            st.session_state.scan_job_id = None
+            st.session_state.fatal_error = None
+            st.session_state.search_mode = False
+            st.session_state.vault_mode = True
+            st.session_state.insight_mode = False
+            st.rerun()
+
+        if st.button("🎯 STRATEGIC INSIGHT"):
+            st.session_state.scan_running = False
+            st.session_state.scan_job_id = None
+            st.session_state.fatal_error = None
+            st.session_state.search_mode = False
+            st.session_state.vault_mode = False
+            st.session_state.insight_mode = True
+            st.session_state.sentinel_mode = False
+            st.rerun()
+
+        if st.button("🕵️ SENTINEL MONITOR"):
+            st.session_state.scan_running = False
+            st.session_state.scan_job_id = None
+            st.session_state.fatal_error = None
+            st.session_state.search_mode = False
+            st.session_state.vault_mode = False
+            st.session_state.insight_mode = False
+            st.session_state.sentinel_mode = True
             st.rerun()
 
         st.divider()
@@ -242,6 +277,7 @@ def main():
         search_query = st.text_input("Full-text Search", placeholder="e.g. 'Python crawl'")
         if search_query:
             st.session_state.search_mode = True
+            st.session_state.vault_mode = False
             st.session_state.search_query = search_query
         else:
             st.session_state.search_mode = False
@@ -255,6 +291,12 @@ def main():
         render_progress()
     elif getattr(st.session_state, "search_mode", False):
         render_search_results(db_path, st.session_state.search_query)
+    elif getattr(st.session_state, "insight_mode", False):
+        render_strategic_insights(db_path)
+    elif getattr(st.session_state, "sentinel_mode", False):
+        render_sentinel_monitor(db_path)
+    elif getattr(st.session_state, "vault_mode", False):
+        render_vault(db_path)
     elif st.session_state.scan_job_id:
         render_results(db_path, st.session_state.scan_job_id)
     else:
@@ -435,7 +477,10 @@ def render_results(db_path, job_id):
         st.subheader("SimHash Content Clusters")
         st.write("Groups of resources identified as near-duplicate content based on 64-bit SimHash fingerprints.")
         
-        clusters = analysis.get_cluster_report(db_path, job_id)
+        # R40: Interactive threshold for clustering
+        cluster_threshold = st.slider("Similarity Threshold (Hamming Distance)", min_value=0, max_value=30, value=15, step=1, help="Higher values group items that are less similar. 0 means exactly identical.")
+        
+        clusters = analysis.get_cluster_report(db_path, job_id, threshold=cluster_threshold)
         if clusters:
             for i, c in enumerate(clusters):
                 with st.expander(f"Cluster #{i+1}: {c['representative_title']} ({c['size']} items, avg popularity {c['avg_popularity']})"):
@@ -444,7 +489,7 @@ def render_results(db_path, job_id):
                     for url in c["urls"]:
                         st.markdown(f"- {url}")
         else:
-            st.success("No significant content clusters found. All resources appear unique.")
+            st.success("No significant content clusters found at this threshold. All resources appear unique.")
             
         st.divider()
         st.subheader("🔎 Semantic Discovery")
@@ -505,6 +550,129 @@ def render_results(db_path, job_id):
             st.area_chart(trend_df.set_index("Dimension"))
         else:
             st.info("Insufficient data for trend plotting.")
+
+def render_sentinel_monitor(db_path):
+    st.title("🕵️ Sentinel Recurring Monitor")
+    st.write("Set up automated watches on high-value domains. The Sentinel will track these targets at regular intervals to capture new trends.")
+    
+    # 1. Add New Target
+    with st.expander("➕ Add New Monitored Target", expanded=False):
+        with st.form("add_target_form"):
+            new_url = st.text_input("Target URL", placeholder="https://example.com")
+            new_label = st.text_input("Friendly Label", placeholder="Competitor A")
+            freq = st.select_slider("Scan Frequency (Hours)", options=[6, 12, 24, 48, 72, 168], value=24)
+            if st.form_submit_button("ACTIVATE SENTINEL"):
+                if new_url:
+                    storage.add_monitored_target(db_path, new_url, new_label, freq)
+                    st.success(f"Sentinel activated for {new_url}")
+                    st.rerun()
+
+    # 2. List Active Monitors
+    st.subheader("Active Watchlist")
+    monitors = storage.list_monitored_targets(db_path)
+    if monitors:
+        for m in monitors:
+            with st.container():
+                c1, c2, c3, c4 = st.columns([4, 2, 2, 2])
+                c1.write(f"**{m['label'] or m['url']}**")
+                c2.write(f"⏱️ Every {m['frequency_hours']}h")
+                c3.write(f"🕒 Last: {m['last_scanned_at'] or 'Never'}")
+                if c4.button("🗑️ REMOVE", key=f"rm_sent_{m['id']}"):
+                    storage.delete_monitored_target(db_path, m['id'])
+                    st.rerun()
+    else:
+        st.info("No active monitors. Add a target above to begin automated surveillance.")
+
+
+def render_strategic_insights(db_path):
+    st.title("🎯 Strategic Tag Intelligence")
+    st.write("Beyond counts: identifying tags with high **Leverage** and **Gravity**. Use these insights to optimize your content's visibility.")
+    
+    insights = analysis.get_strategic_tag_insights(db_path)
+    velocity = analysis.get_tag_velocity(db_path)
+    
+    if insights:
+        df = pd.DataFrame(insights)
+        
+        tab_gravity, tab_velocity = st.tabs(["🚀 Tag Gravity", "📈 Rising Stars (Velocity)"])
+        
+        with tab_gravity:
+            c1, c2 = st.columns([7, 3])
+            with c1:
+                st.subheader("🔥 High Gravity Tags")
+                st.write("Gravity = engagement density. These tags drive the most impact per use.")
+                st.bar_chart(df.set_index("tag")["gravity"].head(15))
+                st.dataframe(df, use_container_width=True, hide_index=True)
+            with c2:
+                st.subheader("💡 Advice")
+                top_leverage = df.iloc[0]["tag"] if not df.empty else "N/A"
+                st.info(f"**Top ROI:** Focus on **'{top_leverage}'**.")
+                st.write("---")
+                gaps = df[df["competitors"] <= 2].sort_values("score", ascending=False)
+                if not gaps.empty:
+                    st.success(f"**Gap Found:** '{gaps.iloc[0]['tag']}'")
+                    
+        with tab_velocity:
+            if velocity:
+                v_df = pd.DataFrame(velocity)
+                st.subheader("🌟 Rising Stars: High-Growth Topics")
+                st.write("Tags with the highest volume increase in the last 3 days compared to history.")
+                st.bar_chart(v_df.set_index("tag")["velocity"].head(15))
+                st.dataframe(v_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("Insufficient longitudinal data to calculate velocity. Continue monitoring to reveal trends.")
+    else:
+        st.info("Insufficient cross-mission data to generate strategic insights. Run more scans to build the intelligence base.")
+
+
+def render_vault(db_path):
+    st.title("🏛️ Global Intelligence Vault")
+    st.write("This vault contains all resources permanently archived across all your missions. Deleting a mission will **not** affect the data stored here.")
+    
+    col1, col2 = st.columns([8, 2])
+    with col2:
+        if st.button("🔄 Sync Legacy Missions", help="Import all resources from past missions into the Vault"):
+            with st.spinner("Synchronizing..."):
+                synced_count = storage.sync_legacy_to_vault(db_path)
+                st.toast(f"Successfully synced {synced_count} resources to Vault!", icon="✅")
+                time.sleep(1)
+                st.rerun()
+
+    vault_resources = storage.get_vault_resources(db_path, limit=1000)
+    
+    if vault_resources:
+        st.metric("Total Archived Assets", len(vault_resources))
+        
+        df = pd.DataFrame([{
+            "Score": r["popularity_score"],
+            "Title": r["title"],
+            "Category": r["category"],
+            "Tags": r["tags"],
+            "URL": r["url"],
+            "First Seen": r["first_seen_at"],
+            "Last Updated": r["last_updated_at"]
+        } for r in vault_resources])
+        
+        st.dataframe(df.sort_values("Score", ascending=False), use_container_width=True, hide_index=True)
+        
+        st.divider()
+        st.header("🧠 Global Content Intelligence")
+        st.write("Cross-mission duplication detection. Identifies identical or near-duplicate resources regardless of which scan discovered them.")
+        
+        vault_threshold = st.slider("Vault Similarity Threshold", 0, 30, 15, key="vault_thresh_slider")
+        
+        vault_clusters = analysis.get_global_cluster_report(db_path, threshold=vault_threshold)
+        if vault_clusters:
+            for i, c in enumerate(vault_clusters):
+                with st.expander(f"Vault Cluster #{i+1}: {c['representative_title']} ({c['size']} instances)"):
+                    st.write("**Matching URLs:**")
+                    for url in c["urls"]:
+                        st.markdown(f"- {url}")
+        else:
+            st.success("All resources in the Vault appear unique at this threshold.")
+    else:
+        st.info("The Global Vault is currently empty. Launch a scan to start accumulating permanent intelligence.")
+
 
 def render_history(db_path):
     st.title("🛰️ Strategic Intelligence Archive")

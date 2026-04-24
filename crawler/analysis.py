@@ -225,6 +225,70 @@ def get_cluster_report(db_path: str, scan_job_id: int, threshold: int = 15) -> l
     return report
 
 
+def cluster_global_vault(db_path: str, threshold: int = 15) -> list[list[dict]]:
+    """Group all resources in the global_vault by content similarity."""
+    vault_resources = storage.get_vault_resources(db_path, limit=5000) # Process up to 5k for UI speed
+    if not vault_resources:
+        return []
+
+    clusters: list[list[dict]] = []
+    
+    for res in vault_resources:
+        fp = res.get("content_fingerprint")
+        if not fp or fp == "0" * 16:
+            clusters.append([res])
+            continue
+            
+        found_cluster = False
+        for cluster in clusters:
+            rep = cluster[0]
+            rep_fp = rep.get("content_fingerprint")
+            if not rep_fp:
+                continue
+                
+            dist = hamming_distance(fp, rep_fp)
+            if dist <= threshold:
+                cluster.append(res)
+                found_cluster = True
+                break
+        
+        if not found_cluster:
+            clusters.append([res])
+            
+    return clusters
+
+
+def get_global_cluster_report(db_path: str, threshold: int = 15) -> list[dict]:
+    """Generate a high-level similarity report for the Global Vault UI."""
+    clusters = cluster_global_vault(db_path, threshold)
+    report = []
+    
+    for cluster in clusters:
+        if len(cluster) <= 1:
+            continue
+            
+        titles = [r["title"] for r in cluster]
+        urls = [r["url"] for r in cluster]
+        
+        # Tags are strings in vault, not lists
+        def parse_tags(t_str): return set(t_str.split(",")) if t_str else set()
+        
+        common_tags = parse_tags(cluster[0].get("tags", ""))
+        for r in cluster[1:]:
+            common_tags &= parse_tags(r.get("tags", ""))
+            
+        report.append({
+            "size": len(cluster),
+            "representative_title": cluster[0]["title"],
+            "similar_titles": titles[1:],
+            "urls": urls,
+            "common_tags": list(common_tags),
+            "avg_popularity": round(sum(r.get("popularity_score", 0) for r in cluster) / len(cluster), 1)
+        })
+        
+    report.sort(key=lambda x: x["size"], reverse=True)
+    return report
+
 def get_similar_items(db_path: str, resource_id: int, limit: int = 5) -> list[Resource]:
     """Find resources with similar content fingerprints to the given resource."""
     with storage.get_connection(db_path) as conn:
@@ -276,23 +340,78 @@ def get_keyword_frequency(db_path: str, scan_job_id: int, top_n: int = 20) -> li
     return [{"keyword": k, "count": v} for k, v in words.most_common(top_n)]
 
 
-def get_trend_analysis(db_path: str, scan_job_id: int) -> dict:
-    """Detect trends by analyzing resource discovery over time (simulated GA integration)."""
-    resources = storage.get_resources(db_path, scan_job_id)
-    if not resources: return {}
-    
-    from collections import defaultdict
-    import datetime
-    
-    # Group by day (using fetched_at or just simulating a timeline for demonstration)
-    # In a real scenario with historical data, we use the actual published_at date.
-    trends = defaultdict(int)
-    for res in resources:
-        # Fallback to category as a trend dimension if dates are sparse
-        cat = res.category or "Uncategorized"
-        trends[cat] += 1
+def get_strategic_tag_insights(db_path: str, top_n: int = 30) -> list[dict]:
+    """Calculate 'Tag Gravity' (popularity/frequency ratio) to identify high-impact tags."""
+    with storage.get_connection(db_path) as conn:
+        # R41: Complex query to calculate tag impact across missions
+        rows = conn.execute(
+            """
+            SELECT 
+                t.name,
+                COUNT(DISTINCT r.scan_job_id) as site_count,
+                SUM(t.resource_count) as total_volume,
+                AVG(r.popularity_score) as avg_resource_score,
+                SUM(r.popularity_score) as total_gravity
+            FROM tags t
+            JOIN resource_tags rt ON t.id = rt.tag_id
+            JOIN resources r ON r.id = rt.resource_id
+            GROUP BY t.name
+            HAVING total_volume > 2
+            ORDER BY total_gravity DESC
+            LIMIT ?
+            """,
+            (top_n,)
+        ).fetchall()
         
-    # Format for charting
-    chart_data = [{"Dimension": k, "Volume": v} for k, v in trends.items()]
-    return {"trends": chart_data}
+    insights = []
+    for r in rows:
+        # Gravity: Normalized impact per mention
+        gravity = r["total_gravity"] / r["total_volume"]
+        insights.append({
+            "tag": r["name"],
+            "gravity": round(gravity, 2),
+            "volume": r["total_volume"],
+            "competitors": r["site_count"],
+            "score": round(r["total_gravity"], 1)
+        })
+    
+    # Sort by gravity to find 'high leverage' tags
+    insights.sort(key=lambda x: x["gravity"], reverse=True)
+    return insights
+
+
+def get_tag_velocity(db_path: str, top_n: int = 15) -> list[dict]:
+    """Identify 'Rising Stars': tags with highest growth velocity in recent missions."""
+    with storage.get_connection(db_path) as conn:
+        # R42: Calculate growth by comparing recent mission tag counts with historical baseline
+        rows = conn.execute(
+            """
+            WITH recent_tags AS (
+                SELECT t.name, SUM(t.resource_count) as recent_volume
+                FROM tags t
+                JOIN scan_jobs j ON t.scan_job_id = j.id
+                WHERE j.created_at > datetime('now', '-3 days')
+                GROUP BY t.name
+            ),
+            baseline_tags AS (
+                SELECT t.name, SUM(t.resource_count) as old_volume
+                FROM tags t
+                JOIN scan_jobs j ON t.scan_job_id = j.id
+                WHERE j.created_at <= datetime('now', '-3 days')
+                GROUP BY t.name
+            )
+            SELECT 
+                r.name as tag,
+                r.recent_volume,
+                COALESCE(b.old_volume, 0) as old_volume,
+                (CAST(r.recent_volume AS REAL) / (COALESCE(b.old_volume, 0) + 1)) as velocity
+            FROM recent_tags r
+            LEFT JOIN baseline_tags b ON r.name = b.name
+            ORDER BY velocity DESC, recent_volume DESC
+            LIMIT ?
+            """,
+            (top_n,)
+        ).fetchall()
+        
+    return [dict(r) for r in rows]
 

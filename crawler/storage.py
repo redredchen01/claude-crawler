@@ -96,12 +96,36 @@ CREATE TABLE IF NOT EXISTS events (
     metadata TEXT
 );
 
+-- Phase 15: Monitored Targets (The Sentinel)
+CREATE TABLE IF NOT EXISTS monitored_targets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    url TEXT UNIQUE NOT NULL,
+    label TEXT,
+    frequency_hours INTEGER NOT NULL DEFAULT 24,
+    last_scanned_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_active BOOLEAN DEFAULT 1
+);
+
 -- Phase 5: Full-Text Search Virtual Table
 CREATE VIRTUAL TABLE IF NOT EXISTS resources_fts USING fts5(
     title,
     category,
     content='resources',
     content_rowid='id'
+);
+
+-- Phase 14: Global Data Vault (Permanent Storage)
+CREATE TABLE IF NOT EXISTS global_vault (
+    url TEXT PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT '',
+    cover_url TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT '',
+    tags TEXT NOT NULL DEFAULT '',
+    content_fingerprint TEXT,
+    popularity_score REAL NOT NULL DEFAULT 0.0,
+    first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Triggers to keep FTS in sync
@@ -219,6 +243,58 @@ def get_connection(db_path: str | None = None, write: bool = False):
     finally:
         conn.close()
 
+
+def sync_legacy_to_vault(db_path: str) -> int:
+    """Retroactively populate the global_vault with all existing resources from past missions."""
+    with get_connection(db_path, write=True) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO global_vault (url, title, cover_url, category, tags, content_fingerprint, popularity_score)
+            SELECT 
+                r.url, 
+                r.title, 
+                r.cover_url, 
+                r.category, 
+                COALESCE((
+                    SELECT GROUP_CONCAT(t.name, ', ') 
+                    FROM tags t 
+                    JOIN resource_tags rt ON t.id = rt.tag_id 
+                    WHERE rt.resource_id = r.id
+                ), ''),
+                r.content_fingerprint, 
+                r.popularity_score
+            FROM resources r
+            WHERE TRUE
+            ON CONFLICT(url) DO UPDATE SET
+                title = CASE WHEN excluded.title != '' THEN excluded.title ELSE global_vault.title END,
+                cover_url = CASE WHEN excluded.cover_url != '' THEN excluded.cover_url ELSE global_vault.cover_url END,
+                category = CASE WHEN excluded.category != '' THEN excluded.category ELSE global_vault.category END,
+                tags = CASE WHEN excluded.tags != '' THEN excluded.tags ELSE global_vault.tags END,
+                popularity_score = MAX(global_vault.popularity_score, excluded.popularity_score),
+                last_updated_at = CURRENT_TIMESTAMP
+            """
+        )
+        return cursor.rowcount
+
+def list_monitored_targets(db_path: str) -> list[dict]:
+    with get_connection(db_path) as conn:
+        rows = conn.execute("SELECT * FROM monitored_targets ORDER BY created_at DESC").fetchall()
+        return [dict(r) for r in rows]
+
+def add_monitored_target(db_path: str, url: str, label: str, freq: int):
+    with get_connection(db_path, write=True) as conn:
+        conn.execute(
+            "INSERT INTO monitored_targets (url, label, frequency_hours) VALUES (?, ?, ?) ON CONFLICT(url) DO UPDATE SET label=excluded.label, frequency_hours=excluded.frequency_hours",
+            (url, label, freq)
+        )
+
+def update_monitored_scan_time(db_path: str, target_id: int):
+    with get_connection(db_path, write=True) as conn:
+        conn.execute("UPDATE monitored_targets SET last_scanned_at = CURRENT_TIMESTAMP WHERE id = ?", (target_id,))
+
+def delete_monitored_target(db_path, tid):
+    with get_connection(db_path, write=True) as conn:
+        conn.execute("DELETE FROM monitored_targets WHERE id = ?", (tid,))
 
 def get_realtime_stats(db_path: str, job_id: int) -> dict:
     """The absolute source of truth. Uses O(1) cached metrics from scan_jobs."""
@@ -374,12 +450,38 @@ def save_resource_with_tags(db_path, resource, conn=None):
                 ).lastrowid
             )
             conn.execute(
-                "INSERT OR IGNORE INTO resource_tags (resource_id, tag_id) VALUES (?,?)",
+                "INSERT OR IGNORE INTO resource_tags (resource_id, tag_id) VALUES (?, ?)",
                 (res_id, tid),
             )
 
+        # Phase 14: Permanent Archival
+        # Save or update the resource in the global_vault so it never disappears.
+        tags_str = ", ".join(resource.tags) if resource.tags else ""
+        conn.execute(
+            """
+            INSERT INTO global_vault (url, title, cover_url, category, tags, content_fingerprint, popularity_score)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(url) DO UPDATE SET
+                title = CASE WHEN excluded.title != '' THEN excluded.title ELSE global_vault.title END,
+                cover_url = CASE WHEN excluded.cover_url != '' THEN excluded.cover_url ELSE global_vault.cover_url END,
+                category = CASE WHEN excluded.category != '' THEN excluded.category ELSE global_vault.category END,
+                tags = CASE WHEN excluded.tags != '' THEN excluded.tags ELSE global_vault.tags END,
+                popularity_score = MAX(global_vault.popularity_score, excluded.popularity_score),
+                last_updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                resource.url,
+                resource.title,
+                resource.cover_url,
+                resource.category,
+                tags_str,
+                resource.content_fingerprint,
+                resource.popularity_score,
+            ),
+        )
+
         return res_id
-    except Exception:
+    except Exception as e:
         raise
 
 
@@ -409,6 +511,16 @@ def get_resources(db_path, job_id):
             resource.tags = tags.split("|") if tags else []
             res.append(resource)
         return res
+
+
+def get_vault_resources(db_path: str, limit: int = 1000) -> list[dict]:
+    """Retrieve permanently archived resources from the Global Vault."""
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM global_vault ORDER BY last_updated_at DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def get_resources_by_tag(db_path, tag_id):
@@ -553,11 +665,13 @@ def clear_http_cache(conn):
 
 def perform_housekeeping(db_path: str):
     """Automated maintenance task for database and assets."""
-    with get_connection(db_path) as conn:
+    with get_connection(db_path, write=True) as conn:
         # 1. Cleanup old HTTP cache (> 7 days)
         cleanup_expired_http_cache(conn, days=7)
         # 2. Re-index for speed
         conn.execute("VACUUM")
+        # R38: Force WAL checkpoint to keep log file size under control
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     logger.info("Housekeeping completed.")
 
 
